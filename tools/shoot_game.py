@@ -33,6 +33,15 @@ except ImportError:
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT_DIR = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, 'docs', 'shots')
+# 只调计谋特效照片时用：SHOT_FX_ONLY=1 跳过 11 张常规图和 60 秒中盘采样。
+# 调特效是"改一点 → 看一眼"的循环，整条流程 3 分钟里 2 分钟与特效无关。
+FX_ONLY = os.environ.get('SHOT_FX_ONLY') == '1'
+
+
+def out(name):
+    """常规截图路径；FX_ONLY 时返回 None（shot() 会跳过）。"""
+    return None if FX_ONLY else os.path.join(OUT_DIR, name)
+
 # 每次跑用一个全新的 pid：云存档是**按 pid 持久化**的，复用会增加累加统计，
 # 让第 N 次跑拿到的解锁状态和第一次不一样 —— 平衡测试必须要一个干净的起点。
 RUN_PID = 'shot_' + str(int(time.time()))
@@ -109,11 +118,28 @@ class CDP:
                         windowsVirtualKeyCode=vk, nativeVirtualKeyCode=vk)
 
     async def shot(self, path):
+        # path 为 None = 本次不拍（SHOT_FX_ONLY 下调特效照片时用来跳过常规图）。
+        # 用"跳过"而不是"拍完再删"：常规图一拍就是 11 张、每张都要等一次
+        # Page.captureScreenshot 往返，调特效时序时这段时间纯属浪费。
+        if path is None:
+            return
         r = await self.call('Page.captureScreenshot', format='png')
         with open(path, 'wb') as f:
             f.write(base64.b64decode(r['data']))
         print('  写出', os.path.relpath(path, ROOT),
               os.path.getsize(path) // 1024, 'KB')
+
+    async def ev(self, body):
+        """在游戏场景里执行一段 JS（body 里可用 s = 当前场景）。
+
+        给"把六个计谋逐个放一遍"这种**调试通道**用：一局里新号只解锁缓兵计，
+        另外五个的形态根本看不到，而"六个计谋形态互不相同"是这一版的硬规范 ——
+        没有视觉证据的规范等于没写。所以这里允许直接改场景状态来取景。
+        """
+        js = ("(()=>{const g=window.__sg;const s=g&&g.scene.getScene('game');"
+              "if(!s)return '';try{" + body + "}catch(e){return 'ERR:'+e}})()")
+        r = await self.call('Runtime.evaluate', expression=js, returnByValue=True)
+        return (r.get('result') or {}).get('value')
 
     async def find(self, label, kind='Text'):
         """按**文字**在场景里找控件，返回它的真实页面坐标。
@@ -264,7 +290,11 @@ KEYS = {'d': ('d', 'KeyD', 68), 'a': ('a', 'KeyA', 65),
         'w': ('w', 'KeyW', 87), 's': ('s', 'KeyS', 83),
         'q': ('q', 'KeyQ', 81), 'e': ('e', 'KeyE', 69),
         'r': ('r', 'KeyR', 82), 'f': ('f', 'KeyF', 70),
-        'enter': ('Enter', 'Enter', 13),
+        'enter': ('Enter', 'Enter', 13), 'esc': ('Escape', 'Escape', 27),
+        # 方向键：既是移动键，也是备战界面切章的键。
+        # 正因为"同一个键有两套含义"，备战面板误弹出才会毁掉一局 —— 见 check_objectives 的回归断言。
+        'left': ('ArrowLeft', 'ArrowLeft', 37), 'right': ('ArrowRight', 'ArrowRight', 39),
+        'up': ('ArrowUp', 'ArrowUp', 38), 'down': ('ArrowDown', 'ArrowDown', 40),
         '1': ('1', 'Digit1', 49), '2': ('2', 'Digit2', 50),
         '3': ('3', 'Digit3', 51)}
 
@@ -348,24 +378,30 @@ async def main():
             await asyncio.sleep(4)   # 等 Phaser 起场景 + 程序化贴图生成
             print('   视口:', await c.viewport())
 
-            # ---- 1. 备战界面（帐前点将）----
-            # 这一版把「选人」升级成了「备战」：章节条 + 武将卡 + 计谋卡 + 出征，
-            # 一屏完成。所以第一张图要拍整屏，确认四块内容都在视野内、没互相压字，
-            # 也没有局内 HUD 从面板边缘漏出来。
-            await c.shot(os.path.join(OUT_DIR, '1-备战.png'))
+            # ---- 1. 备战 · 屏①「战役 · 选关」----
+            # 备战这一版拆成了两屏（用户反馈"界面看起来很乱"）：
+            #   ① 选关：章节切换 + 三张关卡卡 + 目标 + 首通奖励
+            #   ② 点将：武将 + 计谋 + 本关摘要 + 出征
+            # 第一张图拍屏①，确认"一屏一个主题"确实做到了。
+            await c.shot(out('1-选关.png'))
             st = await c.state()
-            print('   备战:', fmt(st))
+            print('   选关页:', fmt(st))
 
             # 切一次章节再切回来 —— 验证 ◀▶ 真的会重绘（切到未解锁章显示锁定态，
             # 切回来必须恢复正常，否则说明重绘时状态没复位）
             await c.click_label('▶')
             await asyncio.sleep(0.7)
-            await c.shot(os.path.join(OUT_DIR, '2-下一章.png'))
+            await c.shot(out('2-下一章.png'))
             print('   切章后:', fmt(await c.state()))
             await c.click_label('◀')
             await asyncio.sleep(0.7)
 
-            # 选计谋卡 —— 备战界面上唯一一个「新号也能真的选动」的控件。
+            # ---- 1b. 进屏②「帐前 · 点将」----
+            await c.click_label('点将')
+            await asyncio.sleep(0.6)
+            await c.shot(out('3-点将.png'))
+
+            # 选计谋卡 —— 点将页上唯一一个「新号也能真的选动」的控件。
             # 选中后卡片描边 / 图标 / 名字一起变金色，是最直观的一次「选择已生效」反馈。
             #
             # 为什么这里不是武将卡：截图流程每次都用全新的 pid（云存档按 pid 持久化，
@@ -376,7 +412,7 @@ async def main():
             # 现在改成：先点锁卡、确认**真的没有反应**，再点计谋卡拍真实变化。
             await c.click_label('缓兵计')
             await asyncio.sleep(0.6)
-            await c.shot(os.path.join(OUT_DIR, '3-选计谋.png'))
+            await c.shot(out('4-选计谋.png'))
 
             before = await c.prep_char()
             await c.click_label('关羽')
@@ -391,40 +427,48 @@ async def main():
             await asyncio.sleep(1.4)
             st = await c.state()
             if not st.get('started'):
-                # 点不到就退到键盘路径（备战界面绑了 Enter），保证后续步骤不被卡住，
+                # 点不到就退到键盘路径（点将页绑了 Enter），保证后续步骤不被卡住，
                 # 但把这件事打出来 —— 静默降级会让"按钮坏了"这种问题永远查不出来。
                 print('   !! 点击未生效，降级用 Enter 出征')
                 await tap(c, 'enter')
                 await asyncio.sleep(1.2)
                 st = await c.state()
             print('   出征后:', fmt(st), ' started=', st.get('started'), ' 点击命中=', ok)
-            await c.shot(os.path.join(OUT_DIR, '4-报幕.png'))
+            await c.shot(out('5-报幕.png'))
+
+            # 回归：进局后按方向键**绝不能**把备战面板弹回来（曾经的真 bug）
+            for k in ('left', 'right'):
+                await tap(c, k)
+            await asyncio.sleep(0.4)
+            st_arrow = await c.state()
+            print('   方向键回归: started=', st_arrow.get('started'),
+                  '（必须仍为 True；若为 False 说明备战面板被弹回来了）')
 
             # 向右下跑一段，把走路帧和镜头滚动都拍进去
             for k in ('d', 's'):
                 await c.key('keyDown', *KEYS[k])
             await asyncio.sleep(3.0)
-            await c.shot(os.path.join(OUT_DIR, '5-走路.png'))
+            await c.shot(out('6-走路.png'))
             for k in ('d', 's'):
                 await c.key('keyUp', *KEYS[k])
 
             # ---- 3. 交火 + 阵型成形 ----
             # 阵型是这一版最重要的新增：脚本必须在敌人成阵之后再拍一张，
             # 否则拍到的是零散散兵，看不出"楔形/横排/弧形"的差别。
-            await settle(c, 20, trace=trace, strat_every=8)
-            await c.shot(os.path.join(OUT_DIR, '6-交火.png'))
+            await settle(c, 6 if FX_ONLY else 20, trace=trace, strat_every=8)
+            await c.shot(out('7-交火.png'))
 
             # 换个方向再拍一张，验证朝向切换
             await c.key('keyDown', *KEYS['w'])
             await asyncio.sleep(2.2)
-            await c.shot(os.path.join(OUT_DIR, '7-朝上.png'))
+            await c.shot(out('8-朝上.png'))
             await c.key('keyUp', *KEYS['w'])
 
             # ---- 4. 施计谋 + 冷却环 ----
             # 先轮询等"未暂停+冷却清零"再按 Q，否则：
             #   1) 升级面板开着时 paused=true，castStratagem 直接 return，没有特效；
             #   2) 按在冷却期内也是空操作。
-            # 两种情况都会让 8-施计瞬间 和上帧逐字节相同，冒充"施法"。
+            # 两种情况都会让 9-施计瞬间 和上帧逐字节相同，冒充"施法"。
             # 若卡在开面板状态，就按 1 选第一张卡关面板，再继续等。
             # 环在 0.2s 时扩张最明显（外环半径已约 190px），抓这一帧。
             wait_deadline = time.time() + 36
@@ -439,15 +483,77 @@ async def main():
                 await asyncio.sleep(0.5)
             await tap(c, 'q')
             await asyncio.sleep(0.2)
-            await c.shot(os.path.join(OUT_DIR, '8-施计瞬间.png'))
+            await c.shot(out('9-施计瞬间.png'))
             st_sg = await c.state()
             print('   施计后:', fmt(st_sg))
-            await settle(c, 14, trace=trace)
-            await c.shot(os.path.join(OUT_DIR, '9-计谋冷却中.png'))
+            await settle(c, 4 if FX_ONLY else 14, trace=trace)
+            await c.shot(out('10-计谋冷却中.png'))
 
             # ---- 5. 中盘压力曲线 ----
-            await settle(c, 60, trace=trace, strat_every=20)
-            await c.shot(os.path.join(OUT_DIR, '10-中盘.png'))
+            await settle(c, 8 if FX_ONLY else 60, trace=trace, strat_every=20)
+            await c.shot(out('11-中盘.png'))
+
+            # ---- 6. 计谋特效六连拍（本轮「特效体系」的视觉证据）----
+            #
+            # 为什么必须单独做：一局里新号只解锁了缓兵计，另外五个的爆发形态
+            # 在正常流程里**根本看不到** —— 而"六个计谋形态互不相同"是这一版的硬规范，
+            # 没有视觉证据的规范等于没写。所以这里用调试通道逐个装上放一遍。
+            #
+            # 抓拍时机按形态给：火墙/火舌要等它铺开（0.35s），箭雨要等几波落下来（0.62s），
+            # 纯扩散类 0.22s 最亮。全部**错开时间**抓，否则拍到的是同一帧的初始状态。
+            #
+            # 最后两列是摆靶参数 (半径, 个数) —— **必须按每个计谋自己的有效范围给**：
+            #   火计的火墙铺在玩家身前 78px 处（半径 40 的结算圈），靶子摆到 175 就等于
+            #   "火在中间烧、敌人在外圈站着看"；十面埋伏的落点有 220px 随机半径，
+            #   靶子摆太近又会被互相重叠的敌人挡住。一刀切两个计谋都用同一个半径，
+            #   六张图里至少四张是废的。
+            FX = [
+                ('fire', '火计', 'burst', 22, 0.20, 105, 10),
+                ('emptycity', '空城计', 'guard', 24, 0.30, 145, 9),
+                ('slowdown', '缓兵计', 'control', 24, 0.26, 170, 11),
+                ('ambush', '十面埋伏', 'burst', 26, 0.62, 175, 10),
+                ('chain', '连环计', 'control', 25, 0.24, 150, 9),
+                ('laststand', '背水一战', 'buff', 28, 0.26, 160, 10),
+            ]
+            st_fx = await c.state()
+            if st_fx.get('over'):
+                print('   !! 已收场，跳过计谋特效六连拍（否则拍到的是结算界面）')
+            else:
+                # 摆靶的敌人被打死后会掉经验，玩家一捡就弹**升级面板**：
+                # 它会暂停物理、并且直接盖住整个画面（第一版 fx-only 跑出来
+                # 六张图全是升级面板，特效一张没拍到 —— 面板挡住的正是要拍的东西）。
+                # 两道处理：
+                #   ① 升级门槛抬到不可能达到，从根上断掉拍照期间弹板的可能；
+                #   ② 若此刻已经弹着，按 1 走游戏自己的关板路径 ——
+                #      不硬改 paused，否则物体会停在暂停态、后续特效全不动。
+                await c.ev("s.expNeed=1e18;return 'ok';")
+                for _ in range(4):
+                    if not (await c.state()).get('paused'):
+                        break
+                    await tap(c, '1')
+                    await asyncio.sleep(0.3)
+                for i, (sid, sname, kind, cd, wait, rr, rn) in enumerate(FX, 1):
+                    # 每发之前必须做两件事，否则照片没有证据价值：
+                    #   ① fxClear —— 计谋特效是**有时长**的（火墙活 4 秒），
+                    #      不清场的话上一发会盖在下一发的照片上。
+                    #      实测 fx-4-十面埋伏 那张里拍到的是 fx-1 火计的火墙。
+                    #   ② fxRing  —— 阵型的阵心是刻意刷在屏幕外的（见 spawnFormation 注释），
+                    #      不改的话六张照片全是"计谋打在空地上"，撞击感为零。
+                    r = await c.ev(
+                        "s.invuln=9999999;"
+                        "if(s.fxClear)s.fxClear();"
+                        f"if(s.fxRing)s.fxRing({rn},{rr});"
+                        f"s.stratagem={{id:'{sid}',name:'{sname}',quote:'',desc:'',"
+                        f"kind:'{kind}',cdSec:{cd}}};"
+                        "s.stratCd=0;return 'ok';")
+                    if r != 'ok':
+                        print('   !! 计谋特效调试通道返回', r)
+                    await asyncio.sleep(0.55)
+                    await c.ev(f"s.stratagem={{id:'{sid}',name:'{sname}',quote:'',"
+                               f"desc:'',kind:'{kind}',cdSec:{cd}}};"
+                               "s.stratCd=0;s.castStratagem();return 'ok';")
+                    await asyncio.sleep(wait)
+                    await c.shot(os.path.join(OUT_DIR, f'fx-{i}-{sname}.png'))
 
             last = trace[-1] if trace else {}
             print(f'--- 阵型日志（{last.get("formsN", 0)} 组）---')

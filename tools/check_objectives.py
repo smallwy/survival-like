@@ -24,7 +24,17 @@ import json
 import os
 import sys
 
-import websockets
+try:
+    import websockets
+except ModuleNotFoundError:  # pragma: no cover
+    # 这一层是 CDP 直连浏览器的前提。直接抛 traceback 的话，
+    # 在 verify_all 里表现为"逻辑验证 FAIL"，很容易被误判成"代码坏了"——
+    # 实测就因为这个白跑过一整条验证链（6 秒就结束，还全是 FAIL）。
+    print('需要 websockets：pip install websockets', file=sys.stderr)
+    print('提示：本机已有一个装好依赖的解释器，'
+          r'可直接用 ~/.workbuddy/binaries/python/envs/default/Scripts/python.exe 运行，'
+          '或设 PYTHON_BIN 指向它。', file=sys.stderr)
+    sys.exit(2)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _devstack import stack  # noqa: E402
@@ -62,24 +72,47 @@ TEXTS = (
 )
 
 
-async def start_run(c):
-    """重新载入页面并出征（Enter 是备战界面绑定的键盘路径）。
+async def read_stage(c):
+    """读开局状态。抽出来是为了让下面三条出征路径共用同一段表达式。"""
+    return await ev(c, "return JSON.stringify({started:!!s.started,"
+                       "obj:s.stage.objective,dur:s.stage.durationSec,"
+                       "target:s.stage.target,ch:s.chapter.index,"
+                       "stg:s.stage.index,strat:s.stratagem?s.stratagem.name:''});")
 
-    必须重试：备战界面要等 loadMeta() 的 fetch 回来才建，建完才注册 Enter 监听。
-    只按一次的话，网络稍慢就会"按了没反应"，然后后面所有断言都是错的。
+
+async def start_run(c):
+    """重新载入页面并出征。
+
+    备战现在是**两屏**（① 战役·选关 → ② 帐前·点将），两条屏都绑了 Enter：
+    选关页按 Enter 进点将页，点将页按 Enter 出征。
+
+    三条路径依次尝试，**每一层失败都要看得见**：
+      1) Enter 连按 —— 同时也验证了键盘路径真的通；
+      2) 点按钮（「点将」→「出征」）—— Enter 可能被别的监听吃掉；
+      3) 直接调 s.deploy() —— 兜底，但会**大声打出来**。
+         静默降级是最危险的：UI 真坏了却永远查不出来（本项目踩过一次，
+         表现为"一整轮截图拍到的其实是同一个界面"）。
     """
     await c.call('Page.navigate', url=URL)
     await asyncio.sleep(3.0)
+    st = {}
     for _ in range(6):
         await tap(c, 'enter')
         await asyncio.sleep(0.7)
-        st = await ev(c, "return JSON.stringify({started:!!s.started,"
-                         "obj:s.stage.objective,dur:s.stage.durationSec,"
-                         "target:s.stage.target,ch:s.chapter.index,"
-                         "stg:s.stage.index,strat:s.stratagem?s.stratagem.name:''});")
+        st = await read_stage(c)
         if st.get('started'):
             return st
-    return st
+    print('   !! Enter 路径没能出征，改用点击路径')
+    for label in ('点将', '出　征'):
+        await c.click_label(label)
+        await asyncio.sleep(0.8)
+    st = await read_stage(c)
+    if st.get('started'):
+        return st
+    print('   !! 点击路径也没能出征，**降级**直接调 s.deploy()（请检查按钮/键盘绑定）')
+    await ev(c, "s.gotoDeploy();s.deploy();return '1';")
+    await asyncio.sleep(1.0)
+    return await read_stage(c)
 
 
 async def main():
@@ -90,13 +123,24 @@ async def main():
             c = CDP(ws)
             await c.call('Page.enable')
 
-            # ---------- -1) 备战界面的交互（看得见的反馈必须真接线）----------
+            # ---------- -1) 备战界面（两屏）的交互 ----------
             # 这两条是被一张**假截图**逼出来的：截图流程里点了「关羽」再拍图，
             # 那张图却和「1-备战」逐字节相同 —— 因为新号只解锁刘备，关羽是锁定卡，
             # 点击本来就没有任何反应。所以这里用断言把「交互 → 状态」钉住，
             # 免得再出现"图上写着换将、实际什么都没发生"。
             await c.call('Page.navigate', url=URL)
             await asyncio.sleep(3.5)
+
+            # 两屏拆分（用户反馈"界面看起来很乱"）：
+            # 加载后必须先落在「战役·选关」，点「点将」才进「帐前·点将」。
+            # 拆开之后每一屏只有一个主题 —— 断言也顺便保证"拆了但两屏都真的可进"。
+            r0 = await ev(c, "return JSON.stringify({step:s.prepStep,ov:!!s.selectOverlay});")
+            ok('备战分两步：加载后停在「战役·选关」', r0.get('step') == 'stage', str(r0))
+            await c.click_label('点将')
+            await asyncio.sleep(0.6)
+            r1 = await ev(c, "return JSON.stringify({step:s.prepStep});")
+            ok('点「点将」进入「帐前·点将」', r1.get('step') == 'deploy', str(r1))
+
             pc0 = await c.prep_char()
             ok('备战：新号默认选中刘备', pc0 == 'rookie', str(pc0))
 
@@ -128,6 +172,24 @@ async def main():
             ok('第 1 关目标是 survive', st.get('obj') == 'survive', str(st.get('obj')))
             ok('默认已解锁一个计谋（缓兵计）', st.get('strat') == '缓兵计',
                str(st.get('strat')))
+
+            # ---------- 0.5) 回归：对局中按方向键绝不能把备战面板弹回来 ----------
+            #
+            # 这是用户实机截图反馈的那个 bug：「打着打着弹了这个（备战面板）」。
+            # 病根是备战界面每次重建都往 window 上加一个 keydown 监听，
+            # 而"摘旧的"读的是刚新建容器上的属性（永远 undefined）→ 监听只增不减。
+            # startRun 只摘掉最后一份，于是对局中按 ← / →（也正是移动键）会重新弹出备战。
+            #
+            # 症状极隐蔽：tsc 全绿、布局断言全绿、画面也正常，只有真的按了方向键才暴露。
+            # 所以钉成断言：进局后连按方向键，必须仍然在局内、且没有 overlay。
+            await tap(c, 'left')
+            await tap(c, 'right')
+            await tap(c, 'up')
+            await asyncio.sleep(0.5)
+            rr = await ev(c, "return JSON.stringify({started:!!s.started,"
+                             "ov:!!s.selectOverlay,step:s.prepStep});")
+            ok('回归：对局中按方向键不会把备战面板弹回来',
+               rr.get('started') and not rr.get('ov'), str(rr))
 
             # ---------- 1) survive 关：活满时长 = 通关 ----------
             await ev(c, "s.elapsed = s.stage.durationSec - 0.3; return '1';")
@@ -254,8 +316,11 @@ async def main():
                          "return JSON.stringify({n:s.children.list.filter(o=>o.type==='Zone').length});",
                          "n", 1, '火计：放出了火墙区域'),
                 'emptycity': ("s.stratagem={id:'emptycity',name:'空城计',quote:'',kind:'guard',cdSec:24};",
-                              "return JSON.stringify({iv:Math.round(s.invuln)});",
-                              "iv", 1500, '空城计：给了大段无敌帧'),
+                              # 读**施放瞬间记录的授予值**，不回读会衰减的 s.invuln。
+                              # 回读会引入真实时间噪声：机器卡一下（CDP 首轮常见）
+                              # 就会读到 1400 上下，一次偶发失败会被误读成"空城计坏了"。
+                              "return JSON.stringify({iv:s.lastGuardMs});",
+                              "iv", 2500, '空城计：给了大段无敌帧'),
                 'slowdown': ("s.stratagem={id:'slowdown',name:'缓兵计',quote:'',kind:'control',cdSec:24};",
                              "const es=s.enemies.getChildren().filter(e=>e.active);"
                              "return JSON.stringify({n:es.length,later:es.every(e=>s.slowUntil>s.elapsed)});",
@@ -372,6 +437,51 @@ async def main():
                          "tp:b?[Math.round(b.left),Math.round(b.right),Math.round(b.bottom)]:null,"
                          "ob:[Math.round(ob.top),Math.round(ob.left),Math.round(ob.right)]});")
             ok('HUD：目标条没有压在右上角计时块上', not r.get('err') and not r.get('hit'), str(r))
+
+            # ---------- 9) 特效抓拍通道（截图脚本逐发抓拍用的两条通道）----------
+            #
+            # 为什么"给截图工具用的代码"也要立断言：
+            # 计谋特效是**有时长**的（火墙活 4 秒），逐个拍六个计谋时上一发的残留会盖在
+            # 下一发的照片上 —— 实测 fx-4-十面埋伏.png 里拍到的是 fx-1 火计的火墙。
+            # 而这种代码最容易**悄悄半坏**：清了贴图却没清火墙的结算 Zone，
+            # 画面看着干净了、火还在烧，静态断言一条都查不出来。
+            #
+            # 放在最后跑：fxRing 会凭空摆一圈敌人，不能让它干扰上面的 HUD / 计谋断言。
+            r = await ev(c,
+                         "return JSON.stringify({clear:typeof s.fxClear,"
+                         "ring:typeof s.fxRing});")
+            ok('截图通道：场景暴露了 fxClear / fxRing',
+               r.get('clear') == 'function' and r.get('ring') == 'function', str(r))
+
+            r = await ev(c,
+                         "const tag=o=>{try{return !!(o.getData&&o.getData('fx')===1)}"
+                         "catch(e){return false}};"
+                         "s.invuln=9999999;"
+                         "s.stratagem={id:'fire',name:'火计',quote:'',kind:'burst',cdSec:22};"
+                         "s.stratCd=0;s.castStratagem();"
+                         "const zs=s.children.list.filter(o=>o.type==='Zone'&&tag(o));"
+                         "const n1=s.children.list.filter(tag).length;"
+                         "s.fxClear();"
+                         "const n2=s.children.list.filter(tag).length;"
+                         "const z2=zs.filter(o=>o.active&&!!o.scene).length;"
+                         "return JSON.stringify({n1:n1,n2:n2,z1:zs.length,z2:z2});")
+            ok('特效清场：火计放完后场上确实有带 fx 标记的对象（有东西可清）',
+               (r.get('n1') or 0) >= 5, str(r))
+            ok('特效清场：fxClear 之后一个 fx 对象都不剩',
+               r.get('n2') == 0, str(r))
+            ok('特效清场：火墙的结算 Zone 也被清掉（只清贴图 = 画面干净但还在烧）',
+               (r.get('z1') or 0) >= 1 and (r.get('z2') or 0) == 0, str(r))
+
+            r = await ev(c,
+                         "const act=()=>s.enemies.getChildren().filter(e=>e.active).length;"
+                         "const before=act();"
+                         "s.fxRing(14,125);"
+                         "const near=s.enemies.getChildren().filter(e=>e.active"
+                         "&&Math.hypot(e.x-s.player.x,e.y-s.player.y)<190).length;"
+                         "return JSON.stringify({before:before,after:act(),near:near});")
+            ok('截靶通道：fxRing 真的把一圈敌人摆到了玩家身边',
+               (r.get('after') or 0) - (r.get('before') or 0) >= 10
+               and (r.get('near') or 0) >= 10, str(r))
 
     finally:
         proc.terminate()

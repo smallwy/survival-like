@@ -90,9 +90,12 @@ export function panel(
   return g
 }
 
-/** 一条鎏金分隔线，中间嵌一个小菱形（回纹的简化）—— 用于标题下沿。 */
+/** 一条鎏金分隔线，中间嵌一个小菱形（回纹的简化）—— 用于标题下沿。
+ *  `color` 必须显式标 `number`：默认值来自 `as const` 的 UI 表，
+ *  不标的话 TS 会把形参收窄成字面量类型 `0xc9a227`，
+ *  于是任何传别的颜色的调用点（如分隔线用弱色 UI.line）都会报类型错。 */
 export function rule(
-  scene: Phaser.Scene, x: number, y: number, w: number, color = UI.gold
+  scene: Phaser.Scene, x: number, y: number, w: number, color: number = UI.gold
 ): Phaser.GameObjects.Graphics {
   const g = scene.add.graphics()
   g.fillStyle(color, 0.75).fillRect(x, y, w, 1)

@@ -458,5 +458,139 @@ check('阵型有屏幕边缘的方向指示', /private formationBanner\([\s\S]*?
 check('阵型有地面轮廓（从阵心放射到每个槽位）',
   /for \(const p of pts\) gg\.lineBetween\(ax, ay, p\.x, p\.y\)/.test(src))
 
+// --- 11n 备战两屏：拆开了、并且都真的可进 ---
+//
+// 用户原话："这个选择出征的单位界面 和 进入关卡能独立开来吗"。
+// 拆开的风险是"拆了但某一屏进不去/回不来"，所以静态钉住两个渲染函数都真的被调用。
+check('备战拆成两步（prepStep: stage | deploy）', /prepStep: 'stage' \| 'deploy'/.test(src))
+check('屏①「战役·选关」有独立渲染函数且被调用',
+  /private renderStageSelect\(/.test(src) && /this\.renderStageSelect\(c\)/.test(src))
+check('屏②「帐前·点将」有独立渲染函数且被调用',
+  /private renderDeploy\(/.test(src) && /this\.renderDeploy\(c\)/.test(src))
+check('两屏之间有来有回（gotoDeploy / gotoStageSelect 都被接线）',
+  /this\.gotoDeploy\(\)/.test(src) && /this\.gotoStageSelect\(\)/.test(src))
+check('出征入口收敛到一个 deploy()（按钮与 Enter 共用）',
+  /private deploy\(\)/.test(src) && /this\.deploy\(\)/.test(src))
+
+// --- 11o 备战键盘监听：**必须**是场景级唯一一份 ---
+//
+// 这是用户实机截图反馈的 bug：「打着打着弹了这个（备战面板）」。
+// 病根：旧版每次重建面板都往 window 加 keydown，而"摘旧的"读的是刚新建容器上的
+// 属性（永远 undefined）→ 监听只增不减。startRun 只摘掉最后一份，
+// 于是对局中按 ← / →（也正是移动键）会把备战面板重新弹出来。
+// tsc 绿、HUD 布局断言绿、画面正常 —— 只有真的按方向键才暴露，必须用断言兜住。
+check('备战的 window 键盘监听存在**场景**上（不是每次新建的容器上）',
+  /private prepKeyHandler: \(\(ev: KeyboardEvent\) => void\) \| null = null/.test(src))
+check('挂新监听之前先摘旧的（否则监听只增不减）',
+  /if \(this\.prepKeyHandler\) \{\s*window\.removeEventListener\('keydown', this\.prepKeyHandler\)/.test(src))
+check('备战键盘处理内部挡了 started（双保险，不依赖摘监听是否成功）',
+  /if \(this\.started \|\| !this\.selectOverlay\) return/.test(src))
+check('场景重启时也摘掉那份监听（window 不归场景管，不会自动清）',
+  /this\.prepKeyHandler\) \{\s*window\.removeEventListener\('keydown', this\.prepKeyHandler\)/.test(src))
+check('已无"把监听存在容器上"的旧写法（_kh）', !/_kh/.test(code))
+
+// --- 11p 技能特效体系：统一三段式 + 每个计谋专属形态 ---
+//
+// 「技能特效还是很单一」的解药不是更多素材，而是**规则**：
+// 统一的三段式（蓄力/爆发/余韵）+ 每个计谋轮廓不同的爆发形态。
+check('施法有统一的蓄力段 castTelegraph', /private castTelegraph\(/.test(src))
+check('蓄力段真的被戏剧化释放调用', /this\.castTelegraph\(color, kind\)/.test(src))
+check('特效贴图有统一入口 fxSprite（深度/混合模式只定义一处）', /private fxSprite\(/.test(src))
+check('碎屑有统一发射器 emitBits', /private emitBits\(/.test(src))
+for (const k of ['fx_rune', 'fx_ember', 'fx_shard', 'fx_slash', 'fx_flame', 'fx_arrowfall', 'fx_bolt']) {
+  check(`特效底形 ${k} 已程序化生成`, src.includes(`generateTexture('${k}'`))
+}
+const seg = (a, b) => src.slice(src.indexOf(a), src.indexOf(b))
+check('火计用火舌（不是一颗橙圆点）', /fx_flame/.test(seg('private stratFire(', 'private stratEmptyCity(')))
+check('空城计用音波环 + 城垛轮廓 + 跟随护罩',
+  /strokeEllipse/.test(seg('private stratEmptyCity(', 'private stratSlowdown('))
+  && /this\.guardAura/.test(src))
+check('缓兵计用六角冰晶', /fx_shard/.test(seg('private stratSlowdown(', 'private stratAmbush(')))
+check('十面埋伏有落箭形态（arrowRain）',
+  /private arrowRain\(/.test(src) && /this\.arrowRain\(x, y\)/.test(src))
+check('连环计有折线电弧', /fx_bolt/.test(seg('private stratChain(', 'private stratLastStand(')))
+check('背水一战向上升（区别于其它计谋的向外扩散）+ 屏幕边缘脉冲',
+  /edgePulse\(UI\.red\)/.test(src) && /private edgePulse\(/.test(src))
+check('近战命中补一道斩击弧（和远程点命中在轮廓上分开）',
+  /this\.slashArc\(e\.x, e\.y, ang, w\.color\)/.test(src))
+// 六个计谋的爆发形态必须落在不同的底形上 —— 全是同一种形状 = 又回到"单一"
+const forms = [
+  /fx_flame/.test(seg('private stratFire(', 'private stratEmptyCity(')),
+  /strokeEllipse/.test(seg('private stratEmptyCity(', 'private stratSlowdown(')),
+  /fx_shard/.test(seg('private stratSlowdown(', 'private stratAmbush(')),
+  /arrowRain\(x, y\)/.test(seg('private stratAmbush(', 'private stratChain(')),
+  /fx_bolt/.test(seg('private stratChain(', 'private stratLastStand(')),
+  /fx_ember[\s\S]*?y: o\.y - /.test(seg('private stratLastStand(', '计谋类别 -> 主色'))
+]
+check('六个计谋的爆发形态互不相同（不是同一颗圆点换六个颜色）',
+  forms.filter(Boolean).length === 6, `distinct=${forms.filter(Boolean).length}/6`)
+
+// --- 11q 设计系统（theme.ts）真的接入了 ---
+//
+// theme.ts 曾经是**死代码**：定义好了 0 处使用。这一版把它接进了
+// HUD + 备战两屏 + 升级面板 + 结算界面，旧的科技青必须清零。
+check('设计系统的组件真的被用（panel / rule / seal / text）',
+  /\bpanel\(this,/.test(src) && /\brule\(this,/.test(src)
+  && /\bseal\(this,/.test(src) && /\buiText\(this,/.test(src))
+check('图形色与文字色分两套（UI.* / TXT.*），不混用',
+  /UI\.ink1/.test(src) && /TXT\.main/.test(src))
+check('不再有旧的科技青 0x4ecdc4 硬编码', !/0x4ecdc4/.test(code))
+check('不再有旧的墨底硬编码 0x090912 / 0x14142a',
+  !/0x090912/.test(code) && !/0x14142a/.test(code))
+check('结算界面有朱红印章（三国 UI 的身份标识）', /seal\(this, 0, px\(-152\)/.test(src))
+
+// --- 11r 备战压暗底与 toast 堆叠（都是"看起来小、截图里一眼就看出来"的排版问题）---
+//
+// 压暗底曾经放进面板容器里 → 小窗口下容器整体 setScale(fit) 缩小，
+// 压暗底跟着缩，四条边各漏出一条 10px 的局内画面缝隙（实测截图可见）。
+check('备战的全屏压暗底是场景级对象（不能被面板的等比缩放带着缩）',
+  /private prepBackdrop: Phaser\.GameObjects\.Rectangle \| null/.test(src)
+  && /this\.prepBackdrop = this\.add\.rectangle/.test(src))
+check('压暗底随面板一起销毁（否则重开后残留一层黑盖住战场）',
+  /if \(this\.prepBackdrop\) \{ this\.prepBackdrop\.destroy\(\); this\.prepBackdrop = null \}/.test(src))
+check('多条 toast 向上堆叠（「计谋就绪」与「施计」不再糊在同一行）',
+  /private toastLive/.test(src) && /- 48 - idx \* 34/.test(src))
+
+// 空城计的断言必须读"施放瞬间记录的授予值"而不是会衰减的 s.invuln ——
+// 后者会被机器卡顿带出真实时间噪声，偶发失败会被误读成"空城计坏了"。
+check('空城计记录授予的无敌时长（断言不受真实时间衰减干扰）',
+  /private lastGuardMs/.test(src) && /this\.lastGuardMs = Math\.round\(this\.invuln\)/.test(src))
+
+// --- 11s 特效抓拍通道（fxClear / fxRing）---
+//
+// 这一组守的是"视觉证据本身是不是真的"。
+// 上一轮跑出来的 fx-4-十面埋伏.png 里，拍到的是 fx-1 火计留下的火墙，
+// 落箭反而看不清 —— 计谋特效是**有时长**的（火墙活 4 秒），
+// 逐发抓拍不清场，照片就会把上一发的效果当成这一发的证据。
+// 于是必须存在一条"显式清场"的通道，且它清的是**整个**特效层，
+// 包括火墙那个还在每 220ms 结算火伤的 Zone —— 只清贴图不清 Zone 是"假干净"。
+check('特效对象统一带 fx 标记（清场才能不误伤敌人/掉落/UI）',
+  /o\.setData\('fx', 1\)/.test(src) && /private fxSprite\(/.test(src))
+check('火墙的结算 Zone / 图形 / 灼痕也带 fx 标记（否则清了贴图火还在烧）',
+  /z\.setData\('fx', 1\)/.test(src) && /decal\.setData\('fx', 1\)/.test(src))
+check('存在清场通道 fxClear（逐发抓拍前必须能回到干净画面）',
+  /fxClear\(\) \{/.test(src) && /o\.getData\('fx'\) !== 1/.test(src))
+check('清场前先杀补间（火苗是 yoyo repeat:-1，不停会在销毁后继续写属性）',
+  /this\.tweens\.killTweensOf\(o\)/.test(src))
+check('清场遍历的是 children.list 的副本（Phaser 的 destroy 会边删边跳）',
+  /\[\.\.\.this\.children\.list\]/.test(src))
+check('存在摆靶通道 fxRing（阵心刻意在屏幕外，不摆靶照片全是空地）',
+  /fxRing\(n = \d+, r = \d+\)/.test(src) && /this\.spawnEnemy\(def, false,/.test(src))
+check('落箭有插地残留且留得够久（单支箭只在场 150ms 时，任何一帧都读不到"十面埋伏"）',
+  /duration: 900, delay: 380/.test(src) && /'fx_arrowfall', color, 1\.5, 70, false/.test(src))
+
+// 抓拍脚本本身也要守：它必须**调用**这两条通道。
+// 通道写在游戏里而脚本不用，等于照片还是脏的。
+const shootPath = join(root, 'tools', 'shoot_game.py')
+const shoot = existsSync(shootPath) ? readFileSync(shootPath, 'utf8') : ''
+check('抓拍脚本每发计谋前先 fxClear（不是等它自然消失）',
+  /s\.fxClear\(\)/.test(shoot))
+check('抓拍脚本每发计谋前先 fxRing（把靶子摆到玩家周围）',
+  /s\.fxRing\(/.test(shoot))
+// 摆靶的敌人被打死后会掉经验、一捡就弹升级面板 —— 面板会**暂停物理**并且盖住
+// 整个画面（第一版 fx-only 跑出来六张图全是升级面板，特效一张没拍到）。
+check('抓拍脚本屏蔽了升级面板（既抬高门槛，也已弹着的走游戏自己的关板路径）',
+  /s\.expNeed=1e18/.test(shoot) && /await tap\(c, '1'\)/.test(shoot))
+
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`)
 process.exit(failed === 0 ? 0 : 1)

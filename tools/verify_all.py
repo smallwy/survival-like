@@ -8,6 +8,7 @@
 
 退出码 0 表示全绿。
 """
+import glob
 import os
 import subprocess
 import sys
@@ -15,9 +16,43 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _devstack import ROOT, _node, stack  # noqa: E402
 
-PY = os.environ.get('PYTHON_BIN', sys.executable)
-NODE = _node()
 WEB = os.path.join(ROOT, 'web')
+
+
+def _pick_python():
+    """挑一个**能 import websockets** 的解释器来跑子脚本。
+
+    CDP 相关的两个阶段（逻辑验证 / 真机截图）依赖 websockets，而本机默认的
+    python 恰好没装。直接 `python tools/verify_all.py` 会看到
+    "逻辑验证 FAIL、真机截图 FAIL"，6 秒就结束 —— 极容易被误判成代码坏了，
+    实测因为这个白跑过一整轮。所以这里主动找：
+      1) 环境变量 PYTHON_BIN
+      2) 当前解释器
+      3) ~/.workbuddy 下各个隔离 venv（本机装依赖用的就是它）
+    """
+    home = os.path.expanduser('~')
+    cands = [os.environ.get('PYTHON_BIN'), sys.executable]
+    for pat in (('envs', '*', 'Scripts', 'python.exe'), ('envs', '*', 'bin', 'python')):
+        cands += glob.glob(os.path.join(home, '.workbuddy', 'binaries', 'python', *pat))
+    for c in cands:
+        if not c or not os.path.isfile(c):
+            continue
+        try:
+            r = subprocess.run([c, '-c', 'import websockets'],
+                               capture_output=True, timeout=60)
+        except Exception:
+            continue
+        if r.returncode == 0:
+            return c
+    print('警告：没找到带 websockets 的解释器，逻辑验证与截图两个阶段会失败。',
+          file=sys.stderr)
+    print('      装依赖：<python> -m pip install websockets', file=sys.stderr)
+    return sys.executable
+
+
+PY = _pick_python()
+NODE = _node()
+print(f'使用解释器：{PY}')
 
 steps = []
 
