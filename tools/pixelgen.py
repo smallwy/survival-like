@@ -143,10 +143,14 @@ BUILD = {
 HEROES = {
     # 鞋色统一压暗。旧版 rookie 用 #f4f4f4 纯白，两只鞋各 6x2 紧挨着画，
     # 在深色地面上连成一条 12px 的白横条 —— 看起来像脚下垫了一块白板。
+    # 刘备：汉室宗亲。旧版是「青绿连帽衫 + 手枪」的现代遗留（就是那张不合身的立绘），
+    # 现改为与立绘一致的王侯造型 —— 朱红锦袍 + 鎏金发冠 + 长须 + 赤色披风。
+    # 用 crown 但冠色取朱红（关羽的冠是绿），两人一眼可分。
     'rookie': dict(
-        kind='hero', weapon='bow', build='normal', headgear='hood',
-        skin='#ffd9b0', hair='#332e3f',
-        top='#3ec9b8', bottom='#3f5c8c', shoe='#39415f', trim='#ffffff',
+        kind='hero', weapon='bow', build='normal', headgear='crown',
+        skin='#ffd9b0', hair='#241d1a',
+        top='#b8402e', bottom='#5a2320', shoe='#2e2118', trim='#e8c96a',
+        beard='#241d1a', cape='#8f2f26',
     ),
     'guanyu': dict(
         kind='hero', weapon='guandao', build='tall', headgear='crown',

@@ -8,6 +8,14 @@ import {
   enemyById, weaponById, charById,
   factionById, formationById, stratagemById, chapterById, stageKey
 } from '../config/gameData'
+// 三国视觉设计系统（墨底 · 鎏金 · 朱红 · 青玉 · 米白）
+// 三国风设计系统（墨 / 鎏金 / 朱红 / 青玉 / 米白，见 config/theme.ts）。
+//
+// **已定义但尚未接入** —— HUD 与备战界面目前仍是旧的青色科技风（#4ecdc4）。
+// 接入要把这两处共 100+ 处硬编码色值逐一对齐（面板底、描边、标题、正文、强调），
+// 是一次独立的重构，刻意不和玩法/特效改动混在同一轮里提交 ——
+// 否则一旦回归，分不清是配色改的还是逻辑改的。
+import { UI, TXT, FONT, panel, rule, seal, text as uiText } from '../config/theme'
 // 立绘只用于「静态展示」场合：HUD 头像、选人卡片。
 // 它们是静态展示品，不含动作信息 —— 放在游戏内当活动单位就只能靠程序变形去猜，
 // 这正是之前六轮"施法朝向不对/不转身"的病根。游戏内单位改用像素帧序列。
@@ -45,11 +53,54 @@ import pxFoeBossTyrant from '../assets/pixel/foe_boss_tyrant.png'
 const PX_DIRS = ['down', 'up', 'side'] as const
 const PX_ACTS = ['idle', 'walk', 'attack'] as const
 const PX_COLS = 4
-const PX_SCALE = 2 // 逻辑像素 -> 屏幕像素（整数倍，像素块才锐利）
+// 逻辑像素 -> 屏幕像素（整数倍，像素块才锐利）。
+// 2 → 3 是本轮专门调的："场景太大、单位太小"的直接解法 ——
+// 单位在屏幕上大 50%，视野比例随之收紧，压迫感来自"近"而不是"多"。
+// 只能用整数倍：1.5 会把像素块拉成宽窄不一（NEAREST 采样），是最刺眼的瑕疵。
+const PX_SCALE = 3
+
+/**
+ * 非像素单位对象（子弹 / 曳光 / 拖尾 / 战场装饰）同步放大的系数。
+ *
+ * 这些贴图不是按"逻辑格"绘制的，不会跟随 PX_SCALE 自动变化；
+ * 不乘这一下就会变成"单位大了一圈、子弹和装饰还停在旧尺寸"，
+ * 比例一失衡，画面立刻能看出"子弹太小、场景太空"。
+ */
+const FX_SCALE = PX_SCALE / 2
 
 /** 右上角关卡目标进度条的宽度（逻辑像素，实际再乘 hudK）。
  *  必须窄于「画布宽 - 左侧武将面板宽」，否则会压到面板上。 */
 const OBJ_BAR_W = 200
+
+/**
+ * 相机缩放 —— **保持 1，不要用 zoom 来"拉近视野"**。
+ *
+ * 踩过的坑（代价是一整轮验证 4 条断言集体 FAIL）：
+ * Phaser 的相机 zoom 会连 `scrollFactor = 0` 的对象一起缩放、一起偏移。
+ * HUD 与备战界面**全部**是 scrollFactor 0 的屏幕坐标对象，于是
+ * 左上角 8px 的面板被算成 `(8 - w/2) * zoom + w/2`，直接飞到屏幕外；
+ * 玩家看到的界面位置与代码里的坐标彻底对不上（点击全部落空）。
+ * 要让 HUD 不受 zoom 影响，必须给它单独一个相机（+ Layer 分组），
+ * 那是一次全局重构，不值得为"视野"付这个代价。
+ *
+ * 正确的做法是**放大像素倍率**（PX_SCALE）：世界单位变大、视野随之显得更紧，
+ * 而 HUD 完全不受影响。像素倍率本来就是整数倍，也顺手保住了像素锐利。
+ */
+const CAM_ZOOM = 1
+
+/**
+ * 兵种护甲 → 脚下标识环的形态。
+ *
+ * `w` 是相对可视宽度的倍数，`h` 是绝对高度，`a` 是不透明度（0 = 不画）。
+ * 用「形状」而不是颜色区分护甲：颜色已经用来表示势力了，
+ * 两个维度必须用两套通道，否则玩家读到的是"一团有色的小人"。
+ */
+const ARMOR_RING: Record<'none' | 'light' | 'heavy' | 'cavalry', { w: number; h: number; a: number }> = {
+  none: { w: 0, h: 0, a: 0 },              // 无甲：连环都不画，靠"没有环"读出脆皮
+  light: { w: 1.05, h: 22, a: 0.55 },      // 轻甲：细环
+  heavy: { w: 1.40, h: 33, a: 0.78 },      // 重甲：又大又厚的双线环
+  cavalry: { w: 1.55, h: 15, a: 0.66 }     // 骑甲：又宽又扁，像马蹄踏过的印子
+}
 
 type PxDir = typeof PX_DIRS[number]
 type PxAct = typeof PX_ACTS[number]
@@ -212,6 +263,10 @@ export class GameScene extends Phaser.Scene {
   private nameText!: Phaser.GameObjects.Text
   private statText!: Phaser.GameObjects.Text
   private weaponText!: Phaser.GameObjects.Text
+  /** 左上主面板下方的「当前势力档案」：色块 + 势力名 + 特性。
+   *  势力是四支柱之一，但玩家在局内原本看不到任何势力信息 —— 只知道"有人在打我"。 */
+  private factionChip!: Phaser.GameObjects.Rectangle
+  private factionText!: Phaser.GameObjects.Text
   private timeText!: Phaser.GameObjects.Text
   private timePanel!: Phaser.GameObjects.Rectangle
   private expBar!: Phaser.GameObjects.Graphics
@@ -246,6 +301,10 @@ export class GameScene extends Phaser.Scene {
   private prepStrat = ''
 
   private bg!: Phaser.GameObjects.TileSprite
+  /** 战场装饰池：固定一批对象循环复用（离玩家太远就搬到前方的环带上），
+   *  这样地图"无限大"但对象数恒定，不会随着走动越积越多。 */
+  private props: Phaser.GameObjects.Image[] = []
+  private propAccum = 0
   private moving = false
   private moveVx = 0        // 本帧输入方向（-1/0/1）
   private moveVy = 0
@@ -352,10 +411,13 @@ export class GameScene extends Phaser.Scene {
     const cx = this.scale.width / 2
     const cy = this.scale.height / 2
 
-    // 石板地面：跟随镜头移动，制造"在场地里跑"的空间感
+    // 石板地面：跟随镜头移动，制造"在场地里跑"的空间感。
+    // tileScale 必须等于相机 zoom，否则背景会相对地面**打滑** ——
+    // 内容位移按 1:1 而世界按 zoom 倍走，一走起来就能看出地面在飘。
     this.bg = this.add.tileSprite(cx, cy, this.scale.width, this.scale.height, 'ground')
       .setScrollFactor(0)
       .setDepth(-20)
+      .setTileScale(CAM_ZOOM, CAM_ZOOM)
 
     // 玩家脚下的阴影
     this.shadow = this.add.image(cx, cy + 30, 'blob')
@@ -391,6 +453,9 @@ export class GameScene extends Phaser.Scene {
     this.chapterTint = this.add.rectangle(cx, cy, this.scale.width, this.scale.height, this.chapter.tint, 0.22)
       .setScrollFactor(0).setDepth(84).setBlendMode(Phaser.BlendModes.ADD)
 
+    // 战场装饰：无限地图上"随处有东西可看"，而不是一片空石板
+    this.initProps()
+
     this.enemies = this.physics.add.group()
     this.bullets = this.physics.add.group()
     this.pickups = this.physics.add.group()
@@ -404,6 +469,10 @@ export class GameScene extends Phaser.Scene {
     this.physics.add.overlap(this.orbits, this.enemies, this.onOrbitHit as any, undefined, this)
 
     this.cameras.main.startFollow(this.player, true, 0.1, 0.1)
+    // 恒为 1：**刻意不用 zoom 拉近视野**，原因见 CAM_ZOOM 的注释
+    // （zoom 会把 scrollFactor=0 的整个 HUD 一起缩放并推出屏幕）。
+    // "单位太小 / 场景太空"靠 PX_SCALE 解决。
+    this.cameras.main.setZoom(CAM_ZOOM)
     this.cameras.main.setBackgroundColor('#14142b')
 
     this.keys = this.input.keyboard!.addKeys('W,A,S,D,UP,LEFT,DOWN,RIGHT')
@@ -421,6 +490,19 @@ export class GameScene extends Phaser.Scene {
     this.scale.on('resize', this.layout, this)
     this.buildHud()
     this.loadMeta()
+  }
+
+  /**
+   * 相机在**世界坐标**下的可视半宽/半高。
+   *
+   * 相机的 zoom 同时改变两件事：「看得见多大范围」和「单位多大」。
+   * 所有"屏幕外生成"的半径都必须用它折算 —— 否则 zoom 越大，
+   * 敌人从越远的地方生成、要走越久才进场，主观上就是"地图很空、
+   * 明明刷了怪却半天见不到"。
+   */
+  private viewHalf(): { hw: number; hh: number } {
+    const z = this.cameras.main.zoom || 1
+    return { hw: this.scale.width / (2 * z), hh: this.scale.height / (2 * z) }
   }
 
   /** 窗口尺寸变化时重排常驻 UI（RESIZE 模式下画布会变，位置必须跟着走） */
@@ -663,6 +745,219 @@ export class GameScene extends Phaser.Scene {
     }
     ctx.putImageData(img, 0, 0)
     cv.refresh()
+
+    // -----------------------------------------------------------------------
+    // 弹体贴图：每种武器一张，用**形状**而不是颜色区分「这是什么弹」。
+    //
+    // 旧版所有远程武器共用一张 tracer（一条淡白色椭圆），只靠 setTint 换色 ——
+    // 玩家看到的永远是一根白线，分不出短弓的箭、连弩的矢、铁蒺藜的钉。
+    // 这里每张图只写**白色明度层次**（1.0 高光 / 0.7 主体 / 0.45 暗部），
+    // tint 后自然变成同色系的立体形，形状与颜色互不干扰。
+    // 全部朝 +x 绘制（fireWeapon 里 setRotation(角度) 绕中心旋转）。
+    // -----------------------------------------------------------------------
+
+    // 箭（短弓）：尾羽 → 箭杆 → 锐利箭头
+    const ar = this.make.graphics({ x: 0, y: 0 }, false)
+    ar.fillStyle(0xffffff, 0.45); ar.fillTriangle(1, 1, 8, 4, 1, 7)
+    ar.fillStyle(0xffffff, 0.72); ar.fillRect(6, 3, 11, 2)
+    ar.fillStyle(0xffffff, 1); ar.fillTriangle(14, 0, 25, 4, 14, 8)
+    ar.generateTexture('b_arrow', 26, 8)
+    ar.destroy()
+
+    // 弩矢（连弩）：短杆 + 方头，读作「小而多的钉子」
+    const bo = this.make.graphics({ x: 0, y: 0 }, false)
+    bo.fillStyle(0xffffff, 0.62); bo.fillRect(1, 3, 10, 2)
+    bo.fillStyle(0xffffff, 1); bo.fillRect(11, 1, 5, 6)
+    bo.fillTriangle(16, 1, 19, 4, 16, 7)
+    bo.generateTexture('b_bolt', 20, 8)
+    bo.destroy()
+
+    // 铁蒺藜：四向尖刺 + 核心，投出去旋转时最有辨识度
+    const sp = this.make.graphics({ x: 0, y: 0 }, false)
+    sp.fillStyle(0xffffff, 0.8)
+    sp.fillTriangle(8, 0, 5, 8, 11, 8)
+    sp.fillTriangle(8, 16, 5, 8, 11, 8)
+    sp.fillTriangle(0, 8, 8, 5, 8, 11)
+    sp.fillTriangle(16, 8, 8, 5, 8, 11)
+    sp.fillStyle(0xffffff, 1); sp.fillCircle(8, 8, 4)
+    sp.generateTexture('b_spike', 16, 16)
+    sp.destroy()
+
+    // 重箭（强弩）：更长更宽，一眼看出「这一发很重」
+    const ga = this.make.graphics({ x: 0, y: 0 }, false)
+    ga.fillStyle(0xffffff, 0.4); ga.fillTriangle(1, 1, 12, 5, 1, 9)
+    ga.fillStyle(0xffffff, 0.66); ga.fillRect(9, 3, 15, 4)
+    ga.fillStyle(0xffffff, 1); ga.fillTriangle(22, 0, 36, 5, 22, 10)
+    ga.generateTexture('b_greatarrow', 38, 10)
+    ga.destroy()
+
+    // 枪影（亮银枪）：长拖尾 + 细长枪尖，飞出去像一道银光
+    const sq = this.make.graphics({ x: 0, y: 0 }, false)
+    sq.fillStyle(0xffffff, 0.22); sq.fillRect(0, 2, 20, 3)
+    sq.fillStyle(0xffffff, 0.6); sq.fillRect(13, 2, 13, 2)
+    sq.fillStyle(0xffffff, 1); sq.fillTriangle(24, 0, 37, 3.5, 24, 7)
+    sq.generateTexture('b_spear', 38, 7)
+    sq.destroy()
+
+    // 飞刀（回旋飞刀）：柳叶刀身 + 短柄，环绕时是「刀刃在转」而不是「光点在转」
+    const kf = this.make.graphics({ x: 0, y: 0 }, false)
+    kf.fillStyle(0xffffff, 0.5); kf.fillRect(1, 3, 6, 2)
+    kf.fillStyle(0xffffff, 0.8)
+    kf.fillPoints([{ x: 6, y: 1 }, { x: 20, y: 4 }, { x: 6, y: 7 }], true)
+    kf.fillStyle(0xffffff, 1); kf.fillRect(13, 3, 6, 2)
+    kf.generateTexture('b_knife', 22, 8)
+    kf.destroy()
+
+    // -----------------------------------------------------------------------
+    // 战场装饰：让「无限大的地图」不再是一片空石板的唯一手段。
+    // 全部画成**暗色低对比**（depth -5），是背景层，绝不和单位抢主体；
+    // 只有火盆的火焰是亮的（那点暖光是荒原里唯一的方向感）。
+    // 战旗用白色明度层次，生成时 tint 当前势力色 —— 「这一带是谁的地盘」用旗色说。
+    // -----------------------------------------------------------------------
+
+    // 营帐
+    const tn = this.make.graphics({ x: 0, y: 0 }, false)
+    tn.fillStyle(0x2b2942, 1)
+    tn.fillPoints([{ x: 48, y: 10 }, { x: 90, y: 66 }, { x: 6, y: 66 }], true)
+    tn.fillStyle(0x383553, 1)   // 左半受光
+    tn.fillPoints([{ x: 48, y: 10 }, { x: 48, y: 66 }, { x: 6, y: 66 }], true)
+    tn.fillStyle(0x181727, 1)   // 门帘
+    tn.fillPoints([{ x: 48, y: 28 }, { x: 66, y: 66 }, { x: 30, y: 66 }], true)
+    tn.fillStyle(0x4a4636, 1); tn.fillRect(46, 0, 3, 12)
+    tn.fillStyle(0x8a7a48, 1)
+    tn.fillPoints([{ x: 49, y: 0 }, { x: 62, y: 4 }, { x: 49, y: 9 }], true)
+    tn.generateTexture('p_tent', 96, 68)
+    tn.destroy()
+
+    // 辎重车
+    const ct = this.make.graphics({ x: 0, y: 0 }, false)
+    ct.fillStyle(0x24223a, 1); ct.fillRect(6, 18, 68, 22)
+    ct.fillStyle(0x322f4e, 1); ct.fillRect(6, 18, 68, 6)
+    ct.fillStyle(0x1e1c30, 1)
+    ct.fillCircle(20, 42, 9); ct.fillCircle(60, 42, 9)
+    ct.fillStyle(0x3a3752, 1)
+    ct.fillCircle(20, 42, 4); ct.fillCircle(60, 42, 4)
+    ct.fillStyle(0x403c5c, 1); ct.fillRect(14, 10, 52, 9)   // 车上的货
+    ct.generateTexture('p_cart', 80, 52)
+    ct.destroy()
+
+    // 火盆（唯一的暖光）
+    const bz = this.make.graphics({ x: 0, y: 0 }, false)
+    bz.fillStyle(0x22203a, 1)
+    bz.fillPoints([{ x: 4, y: 14 }, { x: 32, y: 14 }, { x: 27, y: 30 }, { x: 9, y: 30 }], true)
+    bz.fillStyle(0x15142a, 1); bz.fillRect(15, 30, 6, 12)
+    bz.fillStyle(0x2b2942, 1); bz.fillRect(6, 42, 24, 4)
+    for (let i = 0; i < 5; i++) {
+      const fw = 14 - i * 2
+      bz.fillStyle(i < 2 ? 0xffe066 : i < 4 ? 0xff9f43 : 0xd94f2b, 0.9)
+      bz.fillRect(18 - fw / 2, 14 - i * 4, fw, 6)
+    }
+    bz.generateTexture('p_brazier', 36, 48)
+    bz.destroy()
+
+    // 乱石
+    const rk = this.make.graphics({ x: 0, y: 0 }, false)
+    rk.fillStyle(0x27253e, 1)
+    rk.fillPoints([{ x: 4, y: 22 }, { x: 12, y: 8 }, { x: 24, y: 6 }, { x: 34, y: 16 }, { x: 30, y: 24 }], true)
+    rk.fillStyle(0x322f4e, 1)
+    rk.fillPoints([{ x: 12, y: 8 }, { x: 24, y: 6 }, { x: 20, y: 18 }, { x: 10, y: 18 }], true)
+    rk.generateTexture('p_rock', 38, 26)
+    rk.destroy()
+
+    // 草簇
+    const gs = this.make.graphics({ x: 0, y: 0 }, false)
+    gs.fillStyle(0x2c3a2e, 1)
+    for (const [gx, gh] of [[3, 10], [8, 15], [13, 9], [18, 13], [22, 8]] as const) {
+      gs.fillRect(gx, 16 - gh, 2, gh)
+    }
+    gs.generateTexture('p_grass', 26, 18)
+    gs.destroy()
+
+    // 战旗：白色明度层次，生成时按势力色 tint
+    const bn = this.make.graphics({ x: 0, y: 0 }, false)
+    bn.fillStyle(0xffffff, 0.35); bn.fillRect(5, 4, 4, 84)
+    bn.fillStyle(0xffffff, 0.55); bn.fillCircle(7, 4, 5)
+    bn.fillStyle(0xffffff, 0.75)
+    bn.fillPoints([{ x: 10, y: 10 }, { x: 38, y: 14 }, { x: 32, y: 28 },
+      { x: 38, y: 42 }, { x: 10, y: 46 }], true)
+    bn.fillStyle(0xffffff, 1)   // 靠杆一侧更亮，旗面才「立」得起来
+    bn.fillPoints([{ x: 10, y: 10 }, { x: 24, y: 12 }, { x: 22, y: 44 }, { x: 10, y: 46 }], true)
+    bn.generateTexture('p_banner', 42, 90)
+    bn.destroy()
+  }
+
+  // ==========================================================================
+  // 战场装饰
+  // ==========================================================================
+  /**
+   * 装饰类型抽取。权重刻意让**草/石**占多数：营帐和战旗是"地标"，
+   * 满地都是就不再是地标了 —— 稀疏才显得出"这一带扎着营"。
+   */
+  private pickPropKind(): string {
+    const r = Math.random()
+    if (r < 0.30) return 'p_grass'
+    if (r < 0.54) return 'p_rock'
+    if (r < 0.66) return 'p_banner'
+    if (r < 0.76) return 'p_brazier'
+    if (r < 0.88) return 'p_tent'
+    return 'p_cart'
+  }
+
+  /** 摆一个装饰：随机大小 + 底边对齐地面（origin 下移，看起来立在石板上） */
+  private placeProp(p: Phaser.GameObjects.Image, x: number, y: number) {
+    const kind = p.getData('kind') as string
+    p.setPosition(x, y)
+      .setScale(Phaser.Math.FloatBetween(0.78, 1.24) * FX_SCALE)
+      .setAlpha(kind === 'p_grass' ? 0.7 : 0.92)
+      .setOrigin(0.5, 0.86)
+      .setDepth(-8)
+    // 战旗按**当前势力色**着色 —— 「这一带是谁的地盘」不靠文字，靠旗色。
+    if (kind === 'p_banner') p.setTint(this.faction.color)
+    else p.clearTint()
+  }
+
+  private initProps() {
+    for (const p of this.props) p.destroy()
+    this.props = []
+    const vh = this.viewHalf()
+    const R = Math.hypot(vh.hw, vh.hh)
+    const N = 46
+    for (let i = 0; i < N; i++) {
+      const k = this.pickPropKind()
+      const p = this.add.image(0, 0, k)
+      p.setData('kind', k)
+      // 开局就要铺满**整个可见范围**（而不只是外圈），否则一进场四下空荡
+      const a = Math.random() * Math.PI * 2
+      const r = Math.sqrt(Math.random()) * R * 1.35
+      this.placeProp(p, this.player.x + Math.cos(a) * r, this.player.y + Math.sin(a) * r)
+      this.props.push(p)
+    }
+  }
+
+  /**
+   * 装饰随玩家移动"生长"。
+   *
+   * 超过回收半径的装饰会被搬到**刚出视野**的环带上 ——
+   * 玩家往哪走，前面就长出新的营帐与旗子，身后的一点点退场。
+   * 于是"地图很大"不再等于"地图很空"。
+   */
+  private scatterProps() {
+    const vh = this.viewHalf()
+    const R = Math.hypot(vh.hw, vh.hh)
+    const keep = R * 1.4
+    for (const p of this.props) {
+      const d = Phaser.Math.Distance.Between(p.x, p.y, this.player.x, this.player.y)
+      if (d <= keep) continue
+      // 三成概率换一种装饰，避免固定的这几十个类型反复出现被看穿
+      if (Math.random() < 0.32) {
+        const k = this.pickPropKind()
+        p.setTexture(k)
+        p.setData('kind', k)
+      }
+      const a = Math.random() * Math.PI * 2
+      const r = R * Phaser.Math.FloatBetween(1.02, 1.55)
+      this.placeProp(p, this.player.x + Math.cos(a) * r, this.player.y + Math.sin(a) * r)
+    }
   }
 
   // HUD 重排。旧版的三个问题：血条盖着数字、经验条挤在嘴角、时间悬在屏幕最右上
@@ -688,7 +983,10 @@ export class GameScene extends Phaser.Scene {
     this.hudExpY = 80
 
     // ---- 左上主面板 ----
-    reg(this.add.rectangle(px(8), px(8), W, H, 0x090912, 0.74)
+    // 不透明度刻意给到 0.9：0.74 时**底下走过的东西会透上来**
+    // （加了战场装饰之后尤其明显 —— 营帐、旗子从面板里"穿"出来，
+    // 读血条时视线一直被抢）。半透明是为了看到战场，不是为了看见噪点。
+    reg(this.add.rectangle(px(8), px(8), W, H, 0x090912, 0.9)
       .setOrigin(0, 0).setScrollFactor(0).setDepth(D)
       .setStrokeStyle(2, 0x4ecdc4, 0.5))
     reg(this.add.rectangle(px(8), px(8), W, px(3), 0x4ecdc4, 0.9)
@@ -722,8 +1020,22 @@ export class GameScene extends Phaser.Scene {
     this.hpBar = reg(this.add.graphics().setScrollFactor(0).setDepth(D + 2))
     this.expBar = reg(this.add.graphics().setScrollFactor(0).setDepth(D + 2))
 
+    // ---- 左上（主面板正下方）：当前势力档案 ----
+    // 「谁在打我」必须常驻可见。色块用的就是**势力色** ——
+    // 和敌人脚下标识环、战场战旗、阵型横幅同一个颜色，
+    // 玩家不用读字也能把"这片蓝色 = 魏"连起来。
+    reg(this.add.rectangle(px(8), px(128), W, px(32), 0x090912, 0.88)
+      .setOrigin(0, 0).setScrollFactor(0).setDepth(D)
+      .setStrokeStyle(1, 0x4ecdc4, 0.3))
+    this.factionChip = reg(this.add.rectangle(px(8), px(128), px(5), px(32), this.faction.color, 1)
+      .setOrigin(0, 0).setScrollFactor(0).setDepth(D + 1))
+    this.factionText = reg(this.add.text(px(22), px(136), '', {
+      fontSize: fs(14), color: '#ffffff', stroke: '#000000', strokeThickness: 2
+    }).setScrollFactor(0).setDepth(D + 2))
+    this.factionText.setText(`${this.faction.name}军　${this.faction.trait}`)
+
     // ---- 右上时间块（带底衬，避免被敌人盖住）----
-    this.timePanel = reg(this.add.rectangle(0, 0, px(116), px(40), 0x090912, 0.74)
+    this.timePanel = reg(this.add.rectangle(0, 0, px(116), px(40), 0x090912, 0.9)
       .setOrigin(0, 0).setScrollFactor(0).setDepth(D)
       .setStrokeStyle(2, 0x4ecdc4, 0.4))
     this.timeText = reg(this.add.text(0, 0, '', {
@@ -934,6 +1246,7 @@ export class GameScene extends Phaser.Scene {
     this.handleMove()
     this.animatePlayer(delta)
     this.tickWeapons(delta)
+    this.driveBullets()
     this.driveOrbits(delta)
     this.spawnDirector(delta)
     this.driveEnemies(delta)
@@ -944,6 +1257,13 @@ export class GameScene extends Phaser.Scene {
 
     this.bg.tilePositionX = this.cameras.main.scrollX
     this.bg.tilePositionY = this.cameras.main.scrollY
+    // 装饰重投不必每帧做：150ms 一次肉眼完全看不出"新长出"的接缝，
+    // 却省下每帧 46 次距离计算的浪费。
+    this.propAccum += delta
+    if (this.propAccum > 150) {
+      this.propAccum = 0
+      this.scatterProps()
+    }
   }
 
   // ==========================================================================
@@ -1407,6 +1727,24 @@ export class GameScene extends Phaser.Scene {
     return null
   }
 
+  /**
+   * 武器 → 弹体贴图。
+   *
+   * 用**形状**区分弹种，而不是只靠颜色。旧版全部共用一张 tracer，
+   * 玩家看到的永远是一根白线，分不出短弓的箭、连弩的矢、铁蒺藜的钉。
+   * 形状在满屏弹幕里比颜色可靠得多 —— 一眼能认出"这是哪把武器在打"。
+   */
+  private bulletTex(w: WeaponDef): string {
+    switch (w.id) {
+      case 'bow': return 'b_arrow'
+      case 'crossbow': return 'b_bolt'
+      case 'caltrop': return 'b_spike'
+      case 'heavybow': return 'b_greatarrow'
+      case 'spear': return 'b_spear'
+      default: return 'tracer'
+    }
+  }
+
   private fireGun(w: WeaponDef, target: Phaser.Physics.Arcade.Image | null) {
     const px = this.player.x
     const py = this.player.y
@@ -1421,16 +1759,29 @@ export class GameScene extends Phaser.Scene {
     // 这里刻意**不震屏**：手枪 450ms、冲锋枪 140ms 一发，逐发震屏等于屏幕一直在抖，
     // 而且 Phaser 的 shake 会连 scrollFactor=0 的 HUD 一起晃。后坐力交给角色位移表达。
 
+    const tex = this.bulletTex(w)
     for (let i = 0; i < w.count; i++) {
       const a = base + (i - (w.count - 1) / 2) * (w.spread || 0)
-      const b = this.bullets.get(mz.x, mz.y, 'tracer') as Phaser.Physics.Arcade.Image | null
+      const b = this.bullets.get(mz.x, mz.y, tex) as Phaser.Physics.Arcade.Image | null
       if (!b) continue
+      // **必须显式 setTexture**：Group.get(x,y,key) 只在"新建实例"时才用 key，
+      // 回收复用的实例会被直接返回、key 被忽略（和敌人那边同一个坑）。
+      // 少了这一行，弹体的外观就取决于池子里撞到哪个旧实例 ——
+      // 弓箭手可能射出一发"铁蒺藜"，玩家没法靠轮廓认武器。
+      b.setTexture(tex)
       const vx = Math.cos(a) * w.speed
       const vy = Math.sin(a) * w.speed
+      this.tweens.killTweensOf(b)
       b.setActive(true).setVisible(true).setTint(w.color)
       b.setBlendMode(Phaser.BlendModes.ADD)
       b.setRotation(a)
-      b.setScale(1)
+      b.setAlpha(1)
+      // 出膛瞬间沿飞行方向拉长再回弹 —— 「这一发有速度」的关键帧
+      b.setScale(1.35 * FX_SCALE, 0.82 * FX_SCALE)
+      this.tweens.add({
+        targets: b, scaleX: FX_SCALE, scaleY: FX_SCALE,
+        duration: 95, ease: 'Quad.easeOut'
+      })
       const body = b.body as Phaser.Physics.Arcade.Body
       body.setSize(24, 6, true)
       body.setVelocity(vx, vy)
@@ -1442,6 +1793,52 @@ export class GameScene extends Phaser.Scene {
       b.setData('col', w.color)
       // 相克表随弹携带：命中时才知道打的是什么护甲，倍率在那时才算
       b.setData('vs', w.vs)
+    }
+
+    // 出膛曳光：一条从枪口沿弹道射出的短光带，向前疾走并淡出。
+    // 连射武器（连弩 140ms/发）会把它连成一条"火线"，不用看弹体也能读出弹道方向。
+    const tm = this.add.image(mz.x + Math.cos(base) * 20, mz.y + Math.sin(base) * 20, 'tracer')
+      .setTint(w.color).setBlendMode(Phaser.BlendModes.ADD)
+      .setRotation(base).setDepth(49).setScale(1.7 * FX_SCALE, 0.85 * FX_SCALE)
+    this.tweens.add({
+      targets: tm, alpha: 0, scaleX: 2.8 * FX_SCALE, duration: 120,
+      onComplete: () => tm.destroy()
+    })
+  }
+
+  /**
+   * 子弹拖尾。
+   *
+   * 没有它，高速弹体在 60fps 下只是几个互不相关的孤立光点 ——
+   * 玩家读不出"它从哪来、往哪去"，主观感受就是"子弹很平淡"。
+   * 每颗在飞的子弹挂一条贴身的淡光带，速度感才立得住。
+   */
+  private driveBullets() {
+    const kids = this.bullets.getChildren() as Phaser.Physics.Arcade.Image[]
+    for (const b of kids) {
+      const tail = b.getData('tail') as Phaser.GameObjects.Image | undefined
+      if (!b.active) {
+        // 子弹被回收/命中销毁：拖尾必须跟着消失，否则会在原地留下一串幽灵光点
+        if (tail) tail.setVisible(false)
+        continue
+      }
+      const body = b.body as Phaser.Physics.Arcade.Body
+      const vx = body.velocity.x
+      const vy = body.velocity.y
+      const sp = Math.hypot(vx, vy) || 1
+      let t = tail
+      if (!t) {
+        t = this.add.image(b.x, b.y, 'tracer')
+          .setBlendMode(Phaser.BlendModes.ADD).setDepth(48)
+        b.setData('tail', t)
+      }
+      // 贴在弹体后方（沿速度反方向偏移），并随弹道旋转
+      const off = 15
+      t.setVisible(true)
+        .setPosition(b.x - (vx / sp) * off, b.y - (vy / sp) * off)
+        .setRotation(Math.atan2(vy, vx))
+        .setTint((b.getData('col') as number) || 0xffffff)
+        .setAlpha(0.38).setScale(1.25 * FX_SCALE, 0.5 * FX_SCALE)
     }
   }
 
@@ -1608,10 +2005,15 @@ export class GameScene extends Phaser.Scene {
 
   private createOrbits(def: WeaponDef) {
     for (let i = 0; i < def.count; i++) {
-      const o = this.orbits.get(this.player.x, this.player.y, 'dot') as Phaser.Physics.Arcade.Image | null
+      const o = this.orbits.get(this.player.x, this.player.y, 'b_knife') as Phaser.Physics.Arcade.Image | null
       if (!o) continue
-      o.setActive(true).setVisible(true).setTint(def.color).setScale(Math.max(0.6, def.radius / 40))
+      // 同样必须显式 setTexture（复用实例会忽略 get 的 key）
+      o.setTexture('b_knife')
+      o.setActive(true).setVisible(true).setTint(def.color)
+      // 尺寸按刀刃贴图（22x8）而不是原来 16px 的圆点重算
+      o.setScale(Math.max(0.9, def.radius / 70))
       o.setBlendMode(Phaser.BlendModes.ADD)
+      o.setAlpha(1)
       ;(o.body as Phaser.Physics.Arcade.Body).setCircle(8)
       o.setData('dmg', def.damage * this.dmgScale * this.buffDmg)
       o.setData('vs', def.vs)
@@ -1635,6 +2037,9 @@ export class GameScene extends Phaser.Scene {
       const a = off + this.orbitAngle
       o.x = this.player.x + Math.cos(a) * radius
       o.y = this.player.y + Math.sin(a) * radius
+      // 刀刃沿**切线**方向：它是"在环绕着割"，不是"自转的光点"。
+      // 切线 = 半径方向 + 90°；朝左时贴图自然翻过来。
+      o.setRotation(a + Math.PI / 2)
       let cd = (o.getData('cd') as number) - delta
       if (cd < 0) cd = 0
       o.setData('cd', cd)
@@ -1739,7 +2144,8 @@ export class GameScene extends Phaser.Scene {
     // 旧的固定半径 420 在这个窗口下同时犯了两个错：水平 420 < 半宽 472（左右两侧
     // 直接在画面里冒出来），垂直 420 > 半高 324（上下两侧要走很久才进场）。
     const spread = Math.max(...f.slots.map((s) => Math.abs(s.dx)))
-    const r = Math.hypot(this.scale.width, this.scale.height) / 2 + 90 + spread
+    const vh = this.viewHalf()
+    const r = Math.hypot(vh.hw, vh.hh) + 90 + spread
     const ang = Phaser.Math.FloatBetween(0, Math.PI * 2)
     const ax = this.player.x + Math.cos(ang) * r
     const ay = this.player.y + Math.sin(ang) * r
@@ -1749,6 +2155,7 @@ export class GameScene extends Phaser.Scene {
     const px2 = -uy
     const py2 = ux
 
+    const pts: { x: number; y: number }[] = []
     for (const slot of f.slots) {
       // 蜂拥阵刻意加抖动：太整齐就不像"蜂拥"了
       const jitter = f.id === 'swarm' ? 20 : 4
@@ -1764,8 +2171,77 @@ export class GameScene extends Phaser.Scene {
       // 逼玩家主动冲进危险区才能清掉 —— 否则"敌人不进攻"会让游戏变简单。
       e.setData('holdR', f.behavior === 'hold' ? 230 : f.behavior === 'fireline' ? 280 : 0)
       e.setData('fgt', f.id)
+      pts.push({ x: sx, y: sy })
     }
-    this.toast(`${this.faction.name}军 · ${f.name}阵　（破法：${f.counter}）`)
+
+    // 地面阵型轮廓：从阵心向每个槽位拉一条放射线 —— 三国的"阵法"本来就是
+    // 一张图，把它画在地上，玩家追过去时能亲眼看见"这是一个阵"而不是一堆散兵。
+    if (pts.length > 1) {
+      const gg = this.add.graphics().setDepth(-5).setBlendMode(Phaser.BlendModes.ADD)
+      const rad = Math.max(...pts.map((p) => Math.hypot(p.x - ax, p.y - ay)))
+      gg.lineStyle(3, this.faction.color, 0.4)
+      for (const p of pts) gg.lineBetween(ax, ay, p.x, p.y)
+      gg.lineStyle(2, this.faction.color, 0.26)
+      gg.strokeCircle(ax, ay, rad + 26)
+      this.tweens.add({
+        targets: gg, alpha: 0, delay: 1500, duration: 800,
+        onComplete: () => gg.destroy()
+      })
+    }
+
+    this.formationBanner(f, ang)
+  }
+
+  /**
+   * 阵型进场播报。
+   *
+   * 阵型是「看不见就等于不存在」的东西。敌人还没进画面，玩家必须先知道
+   * **哪边、什么阵、怎么破** —— 否则 charge / hold / encircle 这些行为差异
+   * 只会被感受成"这批怪有点怪"，而不是"西凉在冲我的侧翼"。
+   * 所以给两件事：顶部横幅（势力色 + 阵型名 + 破法）与屏幕**边缘**的方向箭头。
+   */
+  private formationBanner(f: FormationDef, ang: number) {
+    const w = this.scale.width
+    const h = this.scale.height
+    const col = this.faction.color
+    const k = this.hudK
+
+    const t1 = this.add.text(w / 2, Math.round(70 * k), `${this.faction.name}军 · ${f.name}阵`, {
+      fontSize: `${Math.max(14, Math.round(19 * k))}px`, color: '#ffffff',
+      stroke: '#000000', strokeThickness: 4
+    }).setOrigin(0.5).setScrollFactor(0).setDepth(416).setAlpha(0)
+    const t2 = this.add.text(w / 2, Math.round(93 * k), `破法：${f.counter}`, {
+      fontSize: `${Math.max(12, Math.round(13 * k))}px`, color: '#ffe066',
+      stroke: '#000000', strokeThickness: 3
+    }).setOrigin(0.5).setScrollFactor(0).setDepth(416).setAlpha(0)
+    const ln = this.add.rectangle(w / 2, Math.round(57 * k), Math.round(190 * k), 3, col, 0.9)
+      .setScrollFactor(0).setDepth(416).setAlpha(0)
+
+    for (const o of [t1, t2, ln] as Phaser.GameObjects.GameObject[]) {
+      this.tweens.add({ targets: o, alpha: 1, duration: 150 })
+      this.tweens.add({
+        targets: o, alpha: 0, delay: 1750, duration: 450,
+        onComplete: () => o.destroy()
+      })
+    }
+
+    // 屏幕边缘的方向指示：把"这一阵从哪压上来"指出来。
+    // 用与准星/破法同色（势力色）的箭头，和横幅是同一条信息。
+    const dx = Math.cos(ang)
+    const dy = Math.sin(ang)
+    const tx = Math.abs(dx) < 1e-6 ? Infinity : (w / 2 - 46) / Math.abs(dx)
+    const ty = Math.abs(dy) < 1e-6 ? Infinity : (h / 2 - 46) / Math.abs(dy)
+    const tt = Math.min(tx, ty)
+    const arrow = this.add.image(w / 2 + dx * tt, h / 2 + dy * tt, 'b_arrow')
+      .setTint(col).setBlendMode(Phaser.BlendModes.ADD)
+      .setRotation(ang).setScale(2.6).setScrollFactor(0).setDepth(415).setAlpha(0)
+    this.tweens.add({ targets: arrow, alpha: 0.95, duration: 150 })
+    this.tweens.add({
+      targets: arrow,
+      x: arrow.x + dx * 18, y: arrow.y + dy * 18,
+      alpha: 0, duration: 1600, ease: 'Quad.easeOut',
+      onComplete: () => arrow.destroy()
+    })
   }
 
   private spawnDirector(delta: number) {
@@ -1830,8 +2306,12 @@ export class GameScene extends Phaser.Scene {
     // 玩家在画面里只看得见 2~3 只" —— 主观感受就是地图很空。
     // 改成沿矩形周长出生后，每个方向都是刚好看不见的距离，进场时间一致。
     const pad = boss ? 150 : 70
-    const rx = this.scale.width / 2 + pad
-    const ry = this.scale.height / 2 + pad
+    // 用**世界坐标**的可见半宽/半高（除以 zoom）而不是屏幕半宽：
+    // zoom 之后屏幕能看到的范围变小了，继续用屏幕尺寸算会让敌人
+    // 从画面外很远的地方生成，进场要等很久。
+    const vh = this.viewHalf()
+    const rx = vh.hw + pad
+    const ry = vh.hh + pad
     const pw = rx * 2
     const ph = ry * 2
     let t = Math.random() * (pw * 2 + ph * 2)
@@ -1927,6 +2407,28 @@ export class GameScene extends Phaser.Scene {
     const visH = pxVisH(unit)
     sh.setVisible(true).setPosition(x, y + visH * 0.44)
       .setDisplaySize(visW * 1.05, Math.max(9, visH * 0.2))
+
+    // ------------------------------------------------------------------
+    // 兵种 × 势力 的脚下标识
+    //
+    // 这是"看不出兵种、感受不到势力"的直接解法。贴图本身能表达"是什么兵"，
+    // 但满屏小小人时靠剪影分辨太吃力；脚下的环是**一眼可读**的：
+    //   形状 = 护甲类型（宽扁＝骑兵 / 又大又厚＝重甲 / 细＝轻甲 / 无甲＝不画）
+    //   颜色 = 当前势力色
+    // 于是"宽扁的黄环"＝西凉铁骑，玩家不用点开任何面板就知道该换铁蒺藜了。
+    // 相克表（WEAPONS[].vs）本来就在算这些倍率，这里只是把它**画出来**。
+    // ------------------------------------------------------------------
+    let mk = e.getData('mark') as Phaser.GameObjects.Image | undefined
+    if (!mk) {
+      mk = this.add.image(x, y, 'ring').setDepth(-1)
+      e.setData('mark', mk)
+    }
+    const ar = ARMOR_RING[def.armor]
+    mk.setVisible(ar.a > 0)
+      .setTint(this.faction.color)
+      .setAlpha(ar.a)
+      .setPosition(x, y + visH * 0.44)
+      .setDisplaySize(Math.max(18, visW * ar.w), ar.h)
 
     if (def.isBoss) {
       this.bossBanner(def.bossName || def.name)
@@ -2028,6 +2530,9 @@ export class GameScene extends Phaser.Scene {
       // 影子跟着走（用 sprite 实际显示高度定位脚底）
       const sh = e.getData('shadow') as Phaser.GameObjects.Image | undefined
       if (sh) sh.setPosition(e.x, e.y + e.displayHeight / 2 - 2)
+      // 护甲/势力标识环同步（独立对象，不跟着 sprite 自动走）
+      const mk = e.getData('mark') as Phaser.GameObjects.Image | undefined
+      if (mk && mk.visible) mk.setPosition(e.x, e.y + e.displayHeight / 2 - 2)
 
       let touch = (e.getData('touchCd') as number) - delta
       if (touch < 0) touch = 0
@@ -2340,6 +2845,8 @@ export class GameScene extends Phaser.Scene {
     // 影子与预警球是独立对象，必须一起收掉，否则会留在地上/原地不动
     const sh = e.getData('shadow') as Phaser.GameObjects.Image | undefined
     if (sh) sh.setVisible(false)
+    const mk = e.getData('mark') as Phaser.GameObjects.Image | undefined
+    if (mk) mk.setVisible(false)
     const tg = e.getData('telegraph') as Phaser.GameObjects.Image | undefined
     if (tg) { tg.destroy(); e.setData('telegraph', undefined) }
     const bar = e.getData('hpBar') as Phaser.GameObjects.Graphics | undefined
@@ -2748,7 +3255,10 @@ export class GameScene extends Phaser.Scene {
       }).setOrigin(0.5))
       this.uiAdd(card, this.add.image(0, -46, 'portrait_' + cdef.id).setScale(0.34))
       this.uiAdd(card, this.add.sprite(0, 46, pxKey('hero_' + cdef.id), pxFrame('down', 'idle', 0))
-        .setScale(pxScale('hero_' + cdef.id) * 0.9))
+      // 卡片上的局内小人预览：**除以 FX_SCALE 抵消**像素倍率。
+      // 这张卡片的尺寸是按屏幕像素定死的，不跟着 PX_SCALE 走 ——
+      // 不抵消的话，PX_SCALE 一调大，预览小人就会撑破卡片边框。
+        .setScale(pxScale('hero_' + cdef.id) * 0.9 / FX_SCALE))
       const sw2 = weaponById(cdef.weapon)
       this.uiAdd(card, this.add.text(0, 88, `起始 ${sw2 ? sw2.name : '—'}`, {
         fontSize: '13px', color: ck ? '#6f7a90' : '#ffe066'

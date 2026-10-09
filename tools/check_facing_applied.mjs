@@ -397,5 +397,66 @@ const popM = /baseScale \* ([\d.]+)/.exec(flash)
 check('受击膨胀倍率 <= 1.10（否则静态帧里像"换了个更大的敌人"）',
   popM && +popM[1] <= 1.1, popM ? popM[1] : '?')
 
+check('HUD 常驻显示当前势力档案', /this\.factionChip/.test(src) && /势力是四支柱之一/.test(src))
+
+// --- 11m 局内视觉：单位倍率、弹体差异化、战场装饰、四支柱可视化 ---
+//
+// 相机 zoom 必须恒为 1。Phaser 的 zoom 会连 scrollFactor = 0 的对象一起缩放并偏移，
+// 而 HUD 与备战界面**全部**是 scrollFactor 0 的 —— 实测 8px 的面板被算到 -224px、
+// 直接飞出屏幕，且所有点击落空。tsc 全绿、截图里 HUD 直接消失（很容易被误判成
+// "没渲染" 而去查错方向）。这条断言就是为了别再踩第二次。
+const camZoom = /const CAM_ZOOM = ([\d.]+)/.exec(src)
+check('相机 zoom 恒为 1（非 1 会把整个 HUD 缩放并推出屏幕）',
+  camZoom && +camZoom[1] === 1, camZoom ? camZoom[1] : '?')
+check('没有别处偷偷设置非 1 的 zoom',
+  !/setZoom\((?!CAM_ZOOM|1\))/.test(src))
+check('像素倍率是整数倍（非整数会让像素块宽窄不一）',
+  /const PX_SCALE = \d+\b/.test(src))
+check('生成半径按 viewHalf 折算（否则改缩放时敌人从错误的距离生成）',
+  (src.match(/this\.viewHalf\(\)/g) || []).length >= 3)
+
+// 弹体：每个远程武器都要有自己的**形状**，不能再共用一根 tracer。
+// 旧版全部共用一张淡白椭圆、只靠 tint 换色，玩家看到的永远是一根白线。
+for (const [wid, tex] of [
+  ['bow', 'b_arrow'], ['crossbow', 'b_bolt'], ['caltrop', 'b_spike'],
+  ['heavybow', 'b_greatarrow'], ['spear', 'b_spear'],
+]) {
+  check(`武器 '${wid}' 有独立弹体贴图 ${tex}`,
+    new RegExp(`case '${wid}': return '${tex}'`).test(src))
+}
+check('六种弹体贴图都真的生成了',
+  ['b_arrow', 'b_bolt', 'b_spike', 'b_greatarrow', 'b_spear', 'b_knife']
+    .every((k) => src.includes(`generateTexture('${k}'`)))
+check('子弹发射时显式 setTexture（复用实例会忽略 get 的 key）',
+  /b\.setTexture\(tex\)/.test(src))
+check('子弹有拖尾且接进了 update',
+  /private driveBullets\(/.test(src) && /this\.driveBullets\(\)/.test(src))
+check('飞刀用刀刃贴图而不是圆点',
+  /orbits\.get\([^)]*'b_knife'\)/.test(src) && /o\.setTexture\('b_knife'\)/.test(src))
+
+// 战场装饰：让"无限大的地图"不只是一片空石板
+for (const k of ['p_tent', 'p_cart', 'p_brazier', 'p_rock', 'p_grass', 'p_banner']) {
+  check(`装饰贴图 '${k}' 已生成`, src.includes(`generateTexture('${k}'`))
+}
+check('装饰随玩家移动重投（scatterProps 接进 update）',
+  /private scatterProps\(/.test(src) && /this\.scatterProps\(\)/.test(src))
+check('装饰对象池有限（回收复用而不是无限堆积）',
+  /private props: Phaser\.GameObjects\.Image\[\] = \[\]/.test(src)
+  && /if \(d <= keep\) continue/.test(src))
+check('战旗按势力色着色（"这一带是谁的地盘"靠旗色说）',
+  /kind === 'p_banner'\) p\.setTint\(this\.faction\.color\)/.test(src))
+
+// 四支柱可视化：让"兵种/阵型/势力"从数值变成**看得见**的东西
+check('敌人脚下标识环按护甲类型分形（ARMOR_RING）', /const ARMOR_RING/.test(src))
+for (const a of ['none', 'light', 'heavy', 'cavalry']) {
+  check(`护甲 '${a}' 有标识环规格`, new RegExp(`${a}:\\s*\\{ w:`).test(src))
+}
+check('标识环的颜色用的是势力色而不是护甲色（两个维度分开）',
+  /mk\.setVisible\(ar\.a > 0\)[\s\S]{0,90}setTint\(this\.faction\.color\)/.test(src))
+check('阵型有进场横幅（势力色 + 破法）', /private formationBanner\(/.test(src))
+check('阵型有屏幕边缘的方向指示', /private formationBanner\([\s\S]*?setScrollFactor\(0\)/.test(src))
+check('阵型有地面轮廓（从阵心放射到每个槽位）',
+  /for \(const p of pts\) gg\.lineBetween\(ax, ay, p\.x, p\.y\)/.test(src))
+
 console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`)
 process.exit(failed === 0 ? 0 : 1)
