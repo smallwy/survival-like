@@ -4,9 +4,17 @@ import {
   BALANCE, WeaponDef, EnemyDef, enemyById, weaponById
 } from '../config/gameData'
 import rookiePortrait from '../assets/portraits/rookie.png'
+import rookieUpper from '../assets/portraits/rookie_upper.png'
+import rookieLower from '../assets/portraits/rookie_lower.png'
 import guanyuPortrait from '../assets/portraits/guanyu.png'
+import guanyuUpper from '../assets/portraits/guanyu_upper.png'
+import guanyuLower from '../assets/portraits/guanyu_lower.png'
 import zhangfeiPortrait from '../assets/portraits/zhangfei.png'
+import zhangfeiUpper from '../assets/portraits/zhangfei_upper.png'
+import zhangfeiLower from '../assets/portraits/zhangfei_lower.png'
 import zhaoyunPortrait from '../assets/portraits/zhaoyun.png'
+import zhaoyunUpper from '../assets/portraits/zhaoyun_upper.png'
+import zhaoyunLower from '../assets/portraits/zhaoyun_lower.png'
 import enemyMinion from '../assets/portraits/enemy_minion.png'
 import enemyRunner from '../assets/portraits/enemy_runner.png'
 import enemyTank from '../assets/portraits/enemy_tank.png'
@@ -21,6 +29,14 @@ import enemyBossTyrant from '../assets/portraits/enemy_boss_tyrant.png'
 // 因此下面所有 scale 都基于 TEX=256，所见即所得。
 const TEX = 256
 const PLAYER_SCALE = 0.22 // 256 * 0.22 ≈ 56px
+// 上下半身图层的腰线比例（由 tools/split_limbs.py 按 alpha 轮廓自动探测生成）。
+// 上半身以该点为旋转支点，抬手时手臂（在上半身图层内）会真正绕腰部抬起。
+const WAIST: Record<string, number> = {
+  rookie: 0.535,
+  guanyu: 0.402,
+  zhangfei: 0.703,
+  zhaoyun: 0.426
+}
 
 interface WeaponRT { def: WeaponDef; cd: number; angle: number }
 
@@ -32,6 +48,10 @@ export class GameScene extends Phaser.Scene {
   // 避免大图缩放把 Arcade 圆形碰撞框带成超大/超小（不同 Phaser 版本行为不一致）。
   private player!: Phaser.GameObjects.Container
   private playerImg!: Phaser.GameObjects.Image
+  // 分层：上半身（含头+手臂+武器）绕腰部旋转 => 真正的"抬手施法"动作
+  private upperImg!: Phaser.GameObjects.Image
+  private lowerImg!: Phaser.GameObjects.Image
+  private waistY = 0          // 腰线在屏幕像素中的 y（缩放后），抬手旋转支点
   private shadow!: Phaser.GameObjects.Ellipse
   private enemies!: Phaser.Physics.Arcade.Group
   private bullets!: Phaser.Physics.Arcade.Group
@@ -95,6 +115,16 @@ export class GameScene extends Phaser.Scene {
     this.load.image('portrait_zhangfei', zhangfeiPortrait)
     this.load.image('portrait_zhaoyun', zhaoyunPortrait)
 
+    // 上/下半身图层，用于抬手施法
+    this.load.image('upper_rookie', rookieUpper)
+    this.load.image('lower_rookie', rookieLower)
+    this.load.image('upper_guanyu', guanyuUpper)
+    this.load.image('lower_guanyu', guanyuLower)
+    this.load.image('upper_zhangfei', zhangfeiUpper)
+    this.load.image('lower_zhangfei', zhangfeiLower)
+    this.load.image('upper_zhaoyun', zhaoyunUpper)
+    this.load.image('lower_zhaoyun', zhaoyunLower)
+
     this.load.image('enemy_minion', enemyMinion)
     this.load.image('enemy_runner', enemyRunner)
     this.load.image('enemy_tank', enemyTank)
@@ -125,11 +155,20 @@ export class GameScene extends Phaser.Scene {
     // 玩家脚下的阴影
     this.shadow = this.add.ellipse(cx, cy + 26, 42, 13, 0x000000, 0.3).setDepth(-1)
 
-    // 游戏内主角 = AI 立绘
+    // 游戏内主角 = AI 立绘（分上下两层）
+    // 两层内容坐标与原图一致（见 tools/split_limbs.py），因此用相同 scale/position
+    // 摆放即可精确还原原图；上半身把 origin 设在腰线，rotation 即绕腰抬手。
+    const waist = WAIST[this.activeChar.id] ?? 0.5
+    this.waistY = waist * TEX * PLAYER_SCALE
+    this.lowerImg = this.add.image(0, 0, 'lower_' + this.activeChar.id)
+      .setScale(PLAYER_SCALE).setOrigin(0.5, 0.5).setDepth(8)
+    this.upperImg = this.add.image(0, 0, 'upper_' + this.activeChar.id)
+      .setScale(PLAYER_SCALE).setOrigin(0.5, waist).setDepth(9)
     this.playerImg = this.add.image(0, 0, 'portrait_' + this.activeChar.id)
       .setScale(PLAYER_SCALE)
-      .setDepth(10)
-    this.player = this.add.container(cx, cy, [this.playerImg])
+      .setDepth(7)
+      .setVisible(false) // 分层已覆盖整图；受击闪白时短暂启用作整体闪白
+    this.player = this.add.container(cx, cy, [this.playerImg, this.lowerImg, this.upperImg])
     this.physics.add.existing(this.player)
     const pbody = this.player.body as Phaser.Physics.Arcade.Body
     pbody.setSize(42, 42)
@@ -343,33 +382,31 @@ export class GameScene extends Phaser.Scene {
     body.setVelocity((vx / len) * this.speed, (vy / len) * this.speed)
   }
 
-  // 走路视觉：上下起伏 + 迈步压扁 + 8 向倾斜 + 脚下扬尘 + 抬手施法动作
+  // 走路 + 施法分层动画
+  // 关键：下半身负责走路（起伏/迈步/倾斜），上半身独立绕腰部旋转抬手。
+  // 这样抬手时手臂（在上半身图层里）会真的抬起来，而不是整张图平移。
   private animatePlayer(delta: number) {
     this.shadow.setPosition(this.player.x, this.player.y + 26)
-    this.castAnim = Math.max(0, this.castAnim - delta * 0.0042)
+    this.castAnim = Math.max(0, this.castAnim - delta * 0.0045)
+
+    // ---- 走路（主要驱动下半身）----
+    let bob = 0
+    let leanX = 0
+    let leanY = 0
+    let sqx = 1
+    let sqy = 1
 
     if (this.moving) {
       this.walkPhase += delta * 0.013
-      const step = Math.sin(this.walkPhase)          // 迈步周期
-      const step2 = Math.sin(this.walkPhase * 2)     // 双倍频（压扁拉伸）
-      const dir = this.faceRight ? 1 : -1
-
-      const bob = Math.abs(Math.sin(this.walkPhase)) * 5
-      // 上下移动时额外增加"浮沉"幅度，强化前进/后退的知觉
+      const step = Math.sin(this.walkPhase)
+      const step2 = Math.sin(this.walkPhase * 2)
       const vScale = this.moveVy !== 0 ? 1.35 : 1
-      const sx = PLAYER_SCALE * (1 - step2 * 0.055)
-      const sy = PLAYER_SCALE * (1 + step2 * 0.055)
-
-      this.playerImg.y = -bob * vScale
-
-      // 8 向倾斜：按移动向量决定倾斜方向，斜着走最明显
-      const leanX = this.moveVx * 0.05
-      const leanY = this.moveVy * 0.045
-      this.playerImg.rotation = leanX + step * 0.04 * dir + leanY * 0.6
-      // 背身时左右翻转观感反转，斜向移动观感更自然
-      this.playerImg.setFlipX(this.faceUp ? this.faceRight : !this.faceRight)
-      this.playerImg.setScale(sx, sy)
-      this.shadow.setScale(1 - bob * 0.035, 1 - bob * 0.05)
+      bob = Math.abs(step) * 5 * vScale
+      sqx = 1 - step2 * 0.055
+      sqy = 1 + step2 * 0.055
+      // 8 向倾斜
+      leanX = this.moveVx * 0.05
+      leanY = this.moveVy * 0.045
 
       this.dustTimer -= delta
       if (this.dustTimer <= 0) {
@@ -378,31 +415,61 @@ export class GameScene extends Phaser.Scene {
       }
     } else {
       this.walkPhase = 0
-      const breathe = 1 + Math.sin(this.elapsed * 2.2) * 0.012
-      this.playerImg.y *= 0.85
-      this.playerImg.rotation *= 0.85
-      this.playerImg.setScale(PLAYER_SCALE * breathe, PLAYER_SCALE * breathe)
-      this.playerImg.setFlipX(this.faceUp ? this.faceRight : !this.faceRight)
-      this.shadow.setScale(1, 1)
+      const breathe = Math.sin(this.elapsed * 2.2) * 0.012
+      sqx = 1 + breathe
+      sqy = 1 + breathe
     }
 
-    // 抬手施法/开火：沿施法方向前冲 + 上举 + 拉伸，形成"出手"动作
+    const flip = this.faceUp ? this.faceRight : !this.faceRight
+
+    // 阴影随起伏缩放，制造离地错觉
+    this.shadow.setScale(1 - bob * 0.035, 1 - bob * 0.05)
+
+    // 下半身：承载起伏与倾斜（走路的主体）
+    this.lowerImg.setScale(PLAYER_SCALE * sqx, PLAYER_SCALE * sqy)
+    this.lowerImg.y = -bob
+    this.lowerImg.rotation = leanX + leanY * 0.6
+    this.lowerImg.setFlipX(flip)
+
+    // 上半身：抬起时大幅后仰(rotation)，并向施法方向前送
     if (this.castAnim > 0.01) {
-      const k = this.castAnim * this.castAnim
-      const ca = this.castAnim
+      // 进度曲线：p = 0(刚触发) -> 1(动作结束)
+      // easeOutCubic 让出手瞬间速度最快（跟真实发力一致），避免"延迟才动"的僵硬感。
+      const p = 1 - this.castAnim
+      const p2 = 1 - Math.pow(1 - p, 3)
+      // 抬升曲线：起手就有明显抬手（首帧不为 0），末段线性收回归位。
+      // 用 p 的衰减项保证单调回落，避免 sin 曲线尾部卡住导致"动作冻结"。
+      const envelope = Math.pow(1 - p, 1.4)   // 1 -> 0，单调
+      const arc = Math.sin(Math.PI * p2)      // 抡起 -> 甩出 的弧线
+      const lift = Math.min(1, envelope * (0.55 + 0.75 * arc))
       const dirX = Math.cos(this.fireAngle)
       const dirY = Math.sin(this.fireAngle)
-      // 前冲 + 抬升：出手瞬间向目标方向位移
-      this.playerImg.x = dirX * 13 * k
-      this.playerImg.y += dirY * 13 * k - 5 * k
-      // 拉伸：出手瞬间纵向拉长、横向压窄
-      this.playerImg.setScale(
-        PLAYER_SCALE * (1 - ca * 0.1),
-        PLAYER_SCALE * (1 + ca * 0.16)
+      const faceMul = this.faceRight ? 1 : -1
+      // 抡起方向与开火方向一致：武器绕腰部大幅上抬（最大约 62°）
+      const swing = -dirX * 1.08 * lift * faceMul
+      // origin 已设为腰线比例（见 create），rotation 即绕腰旋转 -> 手臂真正抬起
+      this.upperImg.rotation = swing + leanX * 0.5 + leanY * 0.3
+      // 抬手时整体上举 + 前送
+      this.upperImg.x = dirX * 14 * lift
+      this.upperImg.y = -bob - 6 * lift
+      // 发力时纵向拉长（抡起蓄力感）
+      this.upperImg.setScale(
+        PLAYER_SCALE * sqx * (1 - lift * 0.07),
+        PLAYER_SCALE * sqy * (1 + lift * 0.2)
       )
-      this.playerImg.rotation += dirX * 0.12 * ca
+      this.upperImg.setFlipX(flip)
+
+      // 下半身做反向剪切：抬手时腿部下沉/后坐，形成上下身对拉的真实发力姿态
+      this.lowerImg.rotation -= dirX * 0.14 * lift * faceMul
+      this.lowerImg.y = -bob + 4 * lift
     } else {
-      this.playerImg.x *= 0.8
+      // 静止/走路时上半身跟随下半身，仅保留轻微反向惯性，避免完全僵硬同步
+      const inertia = Math.sin(this.walkPhase + Math.PI) * 0.02
+      this.upperImg.rotation = inertia + leanX * 0.5 + leanY * 0.3
+      this.upperImg.x *= 0.85
+      this.upperImg.y = -bob
+      this.upperImg.setScale(PLAYER_SCALE * sqx, PLAYER_SCALE * sqy)
+      this.upperImg.setFlipX(flip)
     }
   }
 
@@ -444,7 +511,7 @@ export class GameScene extends Phaser.Scene {
     const base = target ? Phaser.Math.Angle.Between(px, py, target.x, target.y) : -Math.PI / 2
     this.fireAngle = base
     this.castAnim = 1
-    this.muzzleFlash(px, py, base, w.color)
+    this.muzzleFlash(px, py, base, w.color, this.waistY)
     this.shake(60, 0.0015)
 
     for (let i = 0; i < w.count; i++) {
@@ -468,17 +535,19 @@ export class GameScene extends Phaser.Scene {
   }
 
   // 枪口火光：开火瞬间的加色光斑，快速放大淡出
-  private muzzleFlash(x: number, y: number, angle: number, color: number) {
-    const d = 26
+  // muzzleY 用 waistY 让火光跟随抬起后的手部高度，使抬手动作与枪口特效咬合
+  private muzzleFlash(x: number, y: number, angle: number, color: number, muzzleY = 0) {
+    const d = 30
+    const baseY = y - (muzzleY > 0 ? muzzleY * 0.35 : 0)
     const f = this.add
-      .image(x + Math.cos(angle) * d, y + Math.sin(angle) * d, 'glow')
+      .image(x + Math.cos(angle) * d, baseY + Math.sin(angle) * d, 'glow')
       .setTint(color)
       .setBlendMode(Phaser.BlendModes.ADD)
-      .setScale(0.5)
+      .setScale(0.55)
       .setDepth(60)
     this.tweens.add({
       targets: f,
-      scale: 1.15,
+      scale: 1.2,
       alpha: 0,
       duration: 95,
       ease: 'Quad.easeOut',
@@ -528,7 +597,7 @@ export class GameScene extends Phaser.Scene {
     }
     this.fireAngle = ang
     this.castAnim = 1
-    this.muzzleFlash(px, py, ang, w.color)
+    this.muzzleFlash(px, py, ang, w.color, this.waistY)
     this.shake(70, 0.002)
 
     const kids = this.enemies.getChildren() as Phaser.Physics.Arcade.Image[]
@@ -952,8 +1021,15 @@ export class GameScene extends Phaser.Scene {
   }
 
   private refreshPlayerLook() {
-    this.playerImg.setTexture('portrait_' + this.activeChar.id)
-    this.portrait.setTexture('portrait_' + this.activeChar.id)
+    const id = this.activeChar.id
+    const waist = WAIST[id] ?? 0.5
+    this.waistY = waist * TEX * PLAYER_SCALE
+    this.playerImg.setTexture('portrait_' + id)
+    this.upperImg.setTexture('upper_' + id)
+    this.lowerImg.setTexture('lower_' + id)
+    // 换角色后腰线比例不同，必须同步 origin，否则抬手支点会偏
+    this.upperImg.setOrigin(0.5, waist)
+    this.portrait.setTexture('portrait_' + id)
   }
 
   private showCharSelect() {
