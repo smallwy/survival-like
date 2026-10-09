@@ -7,20 +7,27 @@ import rookiePortrait from '../assets/portraits/rookie.png'
 import guanyuPortrait from '../assets/portraits/guanyu.png'
 import zhangfeiPortrait from '../assets/portraits/zhangfei.png'
 import zhaoyunPortrait from '../assets/portraits/zhaoyun.png'
+import enemyMinion from '../assets/portraits/enemy_minion.png'
+import enemyRunner from '../assets/portraits/enemy_runner.png'
+import enemyTank from '../assets/portraits/enemy_tank.png'
+import enemySwarm from '../assets/portraits/enemy_swarm.png'
+import enemyShooter from '../assets/portraits/enemy_shooter.png'
+import enemyBossWarlord from '../assets/portraits/enemy_boss_warlord.png'
+import enemyBossTyrant from '../assets/portraits/enemy_boss_tyrant.png'
 
-  // 幸存者类核心场景：
+// 幸存者类核心场景：
 // 移动 + 多类型自动武器 + 波次导演刷怪 + 射手远程 + Boss + 经验升级三选一 + 计时结算 + meta 解锁。
 // 美术策略：
-// - 游戏内主角：直接用 AI 生成的 1024x1024 chibi 立绘（缩小到约 60px），玩家看到的就是立绘本人。
-// - 选人/HUD/结算：同一套 AI 立绘 PNG（更大的展示）。
-// - 子弹/敌人/拾取：白色圆点运行时着色。
+// - 主角 + 敌人/BOSS：AI 生成的 1024x1024 chibi 立绘（按比例缩小到约 20-80px），不再是圆点。
+// - 选人/HUD/结算：同一套 AI 立绘 PNG。
+// - 子弹/拾取/环绕球：白色圆点运行时着色。
 interface WeaponRT { def: WeaponDef; cd: number; angle: number }
 
 export class GameScene extends Phaser.Scene {
-  // 玩家用 Container 承载 AI 立绘：可见层是缩放后的立绘图片，物理碰撞框独立设为世界单位，
-  // 避免 1024 大图缩放把 Arcade 圆形碰撞框带成超大/超小（不同 Phaser 版本行为不一致）。
+  // 玩家用 Container 承载 AI 立绘：可见层是缩放后的立绘图片，物理碰撞框独立设为世界单位。
   private player!: Phaser.GameObjects.Container
   private playerImg!: Phaser.GameObjects.Image
+  private shadow!: Phaser.GameObjects.Ellipse
   private enemies!: Phaser.Physics.Arcade.Group
   private bullets!: Phaser.Physics.Arcade.Group
   private pickups!: Phaser.Physics.Arcade.Group
@@ -51,11 +58,16 @@ export class GameScene extends Phaser.Scene {
   private lvText!: Phaser.GameObjects.Text
   private timeText!: Phaser.GameObjects.Text
   private expBar!: Phaser.GameObjects.Graphics
+  private hpBar!: Phaser.GameObjects.Graphics
   private portrait!: Phaser.GameObjects.Image
   private paused = false
   private over = false
   private started = false
   private selectOverlay!: Phaser.GameObjects.Container | null
+
+  private bg!: Phaser.GameObjects.TileSprite
+  private moving = false
+  private faceRight = true
 
   // meta（跨局解锁）
   private unlockedW = new Set<string>(['pistol'])
@@ -71,6 +83,14 @@ export class GameScene extends Phaser.Scene {
     this.load.image('portrait_guanyu', guanyuPortrait)
     this.load.image('portrait_zhangfei', zhangfeiPortrait)
     this.load.image('portrait_zhaoyun', zhaoyunPortrait)
+
+    this.load.image('enemy_minion', enemyMinion)
+    this.load.image('enemy_runner', enemyRunner)
+    this.load.image('enemy_tank', enemyTank)
+    this.load.image('enemy_swarm', enemySwarm)
+    this.load.image('enemy_shooter', enemyShooter)
+    this.load.image('enemy_boss_warlord', enemyBossWarlord)
+    this.load.image('enemy_boss_tyrant', enemyBossTyrant)
   }
 
   create() {
@@ -85,8 +105,19 @@ export class GameScene extends Phaser.Scene {
 
     const cx = this.scale.width / 2
     const cy = this.scale.height / 2
+
+    // 地图网格背景：让空旷世界有空间感，跟随镜头移动
+    this.bg = this.add.tileSprite(cx, cy, this.scale.width, this.scale.height, 'grid')
+      .setScrollFactor(0)
+      .setDepth(-20)
+
+    // 玩家脚下的阴影
+    this.shadow = this.add.ellipse(cx, cy + 30, 40, 12, 0x000000, 0.25).setDepth(-1)
+
     // 游戏内主角 = AI 立绘：Container 承载缩放后的立绘图片，碰撞框独立设成世界单位。
-    this.playerImg = this.add.image(0, 0, 'portrait_' + this.activeChar.id).setScale(0.06)
+    this.playerImg = this.add.image(0, 0, 'portrait_' + this.activeChar.id)
+      .setScale(0.06)
+      .setDepth(10)
     this.player = this.add.container(cx, cy, [this.playerImg])
     this.physics.add.existing(this.player)
     const pbody = this.player.body as Phaser.Physics.Arcade.Body
@@ -122,7 +153,7 @@ export class GameScene extends Phaser.Scene {
     return v
   }
 
-  // 程序绘制所有纹理：dot 供子弹/敌人/拾取；hero_ 为代码小人纹理（保留备用，当前主角改用 AI 立绘）。
+  // 程序绘制所有纹理：dot 供子弹/敌人子弹/拾取；hero_ 为代码小人纹理（保留备用）。
   private makeTextures() {
     // 通用圆点（白底，运行时着色）
     const g = this.make.graphics({ x: 0, y: 0 }, false)
@@ -130,6 +161,15 @@ export class GameScene extends Phaser.Scene {
     g.fillCircle(8, 8, 8)
     g.generateTexture('dot', 16, 16)
     g.destroy()
+
+    // 世界网格纹理（极淡，作为移动参照）
+    const gg = this.make.graphics({ x: 0, y: 0 }, false)
+    gg.lineStyle(1, 0xffffff, 0.08)
+    gg.strokeRect(0, 0, 128, 128)
+    gg.fillStyle(0xffffff, 0.02)
+    gg.fillRect(0, 0, 128, 128)
+    gg.generateTexture('grid', 128, 128)
+    gg.destroy()
 
     // 角色立绘（分辨率统一 28x38，按角色换色 + 换配件区分）
     this.makeHero('hero_rookie', 0x4ecdc4, {})                       // 新人：青衫，无配件
@@ -196,16 +236,35 @@ export class GameScene extends Phaser.Scene {
   }
 
   private buildHud() {
-    // 左上角 AI 立绘（放大展示）
-    this.portrait = this.add.image(34, 50, 'portrait_' + this.activeChar.id).setScale(0.06).setScrollFactor(0).setDepth(100)
-    this.hpText = this.add.text(78, 14, '', { fontSize: '18px', color: '#ffffff' }).setScrollFactor(0).setDepth(100)
-    this.lvText = this.add.text(78, 40, '', { fontSize: '15px', color: '#ffd93d' }).setScrollFactor(0).setDepth(100)
+    const hudBase = 99
+    // 半透明 HUD 面板
+    this.add.rectangle(4, 4, 330, 88, 0x0b0b16, 0.55)
+      .setOrigin(0, 0)
+      .setScrollFactor(0)
+      .setDepth(hudBase)
+      .setStrokeStyle(1, 0x4ecdc4, 0.4)
+
+    // 左上角 AI 立绘
+    this.portrait = this.add.image(42, 48, 'portrait_' + this.activeChar.id)
+      .setScale(0.06)
+      .setScrollFactor(0)
+      .setDepth(hudBase + 1)
+
+    this.hpText = this.add.text(90, 14, '', {
+      fontSize: '18px', color: '#ffffff', stroke: '#000000', strokeThickness: 3
+    }).setScrollFactor(0).setDepth(hudBase + 1)
+    this.lvText = this.add.text(90, 38, '', {
+      fontSize: '15px', color: '#ffd93d', stroke: '#000000', strokeThickness: 2
+    }).setScrollFactor(0).setDepth(hudBase + 1)
     this.timeText = this.add
-      .text(this.scale.width - 12, 12, '', { fontSize: '18px', color: '#ffffff' })
+      .text(this.scale.width - 12, 12, '', {
+        fontSize: '20px', color: '#ffffff', stroke: '#000000', strokeThickness: 3
+      })
       .setOrigin(1, 0)
       .setScrollFactor(0)
-      .setDepth(100)
-    this.expBar = this.add.graphics().setScrollFactor(0).setDepth(100)
+      .setDepth(hudBase + 1)
+    this.hpBar = this.add.graphics().setScrollFactor(0).setDepth(hudBase + 1)
+    this.expBar = this.add.graphics().setScrollFactor(0).setDepth(hudBase + 1)
     this.refreshHud()
   }
 
@@ -215,15 +274,25 @@ export class GameScene extends Phaser.Scene {
     const m = Math.floor(this.elapsed / 60)
     const s = String(Math.floor(this.elapsed % 60)).padStart(2, '0')
     this.timeText.setText(`${m}:${s}`)
+
+    // 血条
+    this.hpBar.clear()
+    this.hpBar.fillStyle(0x000000, 0.55).fillRect(90, 60, 150, 8)
+    const hpPct = Math.max(0, Math.min(1, this.hp / this.maxHp))
+    const hpColor = hpPct > 0.5 ? 0x6bcb77 : hpPct > 0.25 ? 0xffd93d : 0xff6b6b
+    this.hpBar.fillStyle(hpColor, 1).fillRect(90, 60, 150 * hpPct, 8)
+
+    // 经验条
     this.expBar.clear()
-    this.expBar.fillStyle(0x000000, 0.4).fillRect(78, 62, 200, 10)
-    this.expBar.fillStyle(0x4ecdc4, 1).fillRect(78, 62, 200 * Math.min(1, this.exp / this.expNeed), 10)
+    this.expBar.fillStyle(0x000000, 0.4).fillRect(90, 72, 150, 6)
+    this.expBar.fillStyle(0x4ecdc4, 1).fillRect(90, 72, 150 * Math.min(1, this.exp / this.expNeed), 6)
   }
 
   update(_t: number, delta: number) {
     if (!this.started || this.over || this.paused) return
     this.elapsed += delta / 1000
     this.handleMove()
+    this.animatePlayer(delta)
     this.tickWeapons(delta)
     this.driveOrbits(delta)
     this.spawnDirector(delta)
@@ -232,6 +301,10 @@ export class GameScene extends Phaser.Scene {
     this.drivePickups()
     this.refreshHud()
     if (this.elapsed >= BALANCE.runMinutes * 60) this.gameOver(true)
+
+    // 网格背景跟随镜头产生视差/空间感
+    this.bg.tilePositionX = this.cameras.main.scrollX
+    this.bg.tilePositionY = this.cameras.main.scrollY
   }
 
   private handleMove() {
@@ -242,9 +315,37 @@ export class GameScene extends Phaser.Scene {
     if (k.D.isDown || k.RIGHT.isDown) vx += 1
     if (k.W.isDown || k.UP.isDown) vy -= 1
     if (k.S.isDown || k.DOWN.isDown) vy += 1
+    this.moving = (vx !== 0 || vy !== 0)
+    if (vx > 0) this.faceRight = true
+    if (vx < 0) this.faceRight = false
     const len = Math.hypot(vx, vy) || 1
     const body = this.player.body as Phaser.Physics.Arcade.Body
     body.setVelocity((vx / len) * this.speed, (vy / len) * this.speed)
+  }
+
+  // 玩家立绘动态：移动时上下起伏 + 轻微 squash，左右翻转表示面向
+  private animatePlayer(delta: number) {
+    // 阴影始终贴地跟随
+    this.shadow.setPosition(this.player.x, this.player.y + 30)
+
+    if (this.moving) {
+      const t = this.time.now / 1000
+      const bob = Math.abs(Math.sin(t * 10)) * 5
+      this.playerImg.y = -bob
+      const sx = 0.06
+      const sy = 0.06 * (1 + Math.sin(t * 10) * 0.04)
+      this.playerImg.setScale(sx, sy)
+      this.playerImg.setFlipX(!this.faceRight)
+      // 阴影随起伏缩放，制造"离地"错觉
+      this.shadow.setScale(1 - bob * 0.04)
+    } else {
+      // 静止时缓慢回到原位
+      const ease = delta * 0.012
+      this.playerImg.y += (0 - this.playerImg.y) * ease
+      this.playerImg.setScale(0.06, 0.06)
+      this.playerImg.setFlipX(!this.faceRight)
+      this.shadow.setScale(1)
+    }
   }
 
   // ---------- 武器 ----------
@@ -392,9 +493,13 @@ export class GameScene extends Phaser.Scene {
     const r = boss ? 520 : 420
     const x = this.player.x + Math.cos(ang) * r
     const y = this.player.y + Math.sin(ang) * r
-    const e = this.enemies.get(x, y, 'dot') as Phaser.Physics.Arcade.Image | null
+    const tex = 'enemy_' + def.id
+    const e = this.enemies.get(x, y, tex) as Phaser.Physics.Arcade.Image | null
     if (!e) return
-    e.setActive(true).setVisible(true).setTint(def.color).setScale(def.radius / 8)
+
+    // 敌人大小 = 2*radius，纹理 1024 => 缩放 (2r)/1024
+    const s = (def.radius * 2) / 1024
+    e.setActive(true).setVisible(true).setScale(s)
     e.setData('hp', def.hp + this.level * 4)
     e.setData('dmg', def.damage)
     e.setData('sp', def.speed)
@@ -407,7 +512,11 @@ export class GameScene extends Phaser.Scene {
       e.setData('shootDmg', def.shootDmg || 10)
     }
     e.setData('eid', ++this.eidSeq)
-    ;(e.body as Phaser.Physics.Arcade.Body).setCircle(8)
+
+    // 矩形碰撞框按显示大小设（除以当前缩放 = 回到 source 像素，updateBounds 再乘回正确世界尺寸）
+    const body = e.body as Phaser.Physics.Arcade.Body
+    body.setSize((def.radius * 2) / s, (def.radius * 2) / s, true)
+
     if (def.isBoss) this.bossBanner(def.bossName || def.name)
   }
 

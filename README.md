@@ -27,7 +27,7 @@ survivors-game/
 │       ├── scenes/GameScene.ts  # 核心玩法
 │       ├── config/gameData.ts   # 数值/内容数据表（策划改这里）
 │       ├── types.d.ts     # 静态资源类型声明
-│       └── assets/portraits/    # AI 生成的角色立绘（PNG）
+│       └── assets/portraits/    # AI 生成的角色 + 敌人/BOSS 立绘（PNG）
 ├── docs/                  # 策划文档 + 数据表
 │   ├── 立项策划案.md
 │   ├── 武器被动表.csv
@@ -95,13 +95,17 @@ go build -o ../bin/server ./server && ../bin/server
 - 后端已做接口隔离，迁移成本低。
 
 ## 美术说明与 AI 披露
-- 游戏内角色小人：由 `GameScene.makeHero()` 程序绘制（零图片资源）。
-- 选人界面 / HUD 立绘：`web/src/assets/portraits/*.png` 为 AI 生成（chibi 卡通风格）。
-- **Steam 发布要求**：上架时需在商店页勾选「AI 生成内容」披露，因角色立绘为 AI 生成。这是平台合规项，不影响审核。
+- 游戏内角色 / 敌人 / BOSS：`web/src/assets/portraits/*.png` 为 AI 生成的 chibi 卡通立绘（1024×1024，按游戏内尺寸缩放显示）。
+- 玩家移动：带落地阴影、按方向翻转、移动时上下起伏（bob）+ 轻微 squash，不再是平移。
+- 背景：世界网格 TileSprite，随镜头移动产生空间感。
+- HUD：半透明面板 + 血条/经验条可视化 + 描边文字，比纯文本更清晰。
+- **Steam 发布要求**：上架时需在商店页勾选「AI 生成内容」披露，因角色/敌人立绘为 AI 生成。这是平台合规项，不影响审核。
 
 ## 已知 TODO
 - [x] 更多武器 / 敌人 / Boss 与波次（gun/orbit/beam/aura + 射手 + 双 Boss + 波次导演）
 - [x] meta 解锁（后端 /api/meta 驱动武器/皮肤解锁，结算自动上报）
 - [x] 角色立绘与选人界面（AI 生成 chibi 立绘 + 程序绘制小人）
+- [x] 敌人/BOSS 也使用 AI 立绘（不再是红点）
+- [x] 玩家移动感（阴影 + bob + 翻转）与 HUD 视觉优化
 - [ ] 音效与轻量特效（提升"爽感"）
 - [ ] Steam 接入与商店页 / 预告片

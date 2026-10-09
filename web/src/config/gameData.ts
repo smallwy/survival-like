@@ -1,6 +1,8 @@
 // 游戏数值与内容数据表（策划向，改这里即可调平衡，不必动逻辑代码）。
-// 美术策略：子弹/敌人/拾取用白色圆点运行时着色；玩家小人由 GameScene 程序绘制 chibi 形象；
-// HUD/选人界面使用 AI 生成的角色立绘 PNG（见 web/src/assets/portraits/）。
+// 美术策略：
+// - 玩家 + 敌人/BOSS：使用 AI 生成的 1024x1024 chibi 立绘 PNG（按半径缩放显示，见 portraits/）。
+// - 子弹/敌人子弹/拾取/环绕球：白色圆点运行时着色。
+// - 数值配置与图片分离：改此处可调整敌人大小/速度/血量，无需改图。
 
 export type WeaponKind = 'gun' | 'orbit' | 'beam' | 'aura'
 
