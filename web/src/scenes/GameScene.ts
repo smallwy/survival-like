@@ -11,13 +11,16 @@ import zhaoyunPortrait from '../assets/portraits/zhaoyun.png'
   // 幸存者类核心场景：
 // 移动 + 多类型自动武器 + 波次导演刷怪 + 射手远程 + Boss + 经验升级三选一 + 计时结算 + meta 解锁。
 // 美术策略：
-// - 游戏内角色：Phaser Graphics 程序绘制的 chibi 小人（零资源、高性能）。
-// - 选人/HUD/结算：AI 生成的 1024x1024 chibi 立绘 PNG（轻量但更有"角色感"）。
+// - 游戏内主角：直接用 AI 生成的 1024x1024 chibi 立绘（缩小到约 60px），玩家看到的就是立绘本人。
+// - 选人/HUD/结算：同一套 AI 立绘 PNG（更大的展示）。
 // - 子弹/敌人/拾取：白色圆点运行时着色。
 interface WeaponRT { def: WeaponDef; cd: number; angle: number }
 
 export class GameScene extends Phaser.Scene {
-  private player!: Phaser.Physics.Arcade.Image
+  // 玩家用 Container 承载 AI 立绘：可见层是缩放后的立绘图片，物理碰撞框独立设为世界单位，
+  // 避免 1024 大图缩放把 Arcade 圆形碰撞框带成超大/超小（不同 Phaser 版本行为不一致）。
+  private player!: Phaser.GameObjects.Container
+  private playerImg!: Phaser.GameObjects.Image
   private enemies!: Phaser.Physics.Arcade.Group
   private bullets!: Phaser.Physics.Arcade.Group
   private pickups!: Phaser.Physics.Arcade.Group
@@ -82,8 +85,13 @@ export class GameScene extends Phaser.Scene {
 
     const cx = this.scale.width / 2
     const cy = this.scale.height / 2
-    this.player = this.physics.add.image(cx, cy, 'hero_' + this.activeChar.id)
-    ;(this.player.body as Phaser.Physics.Arcade.Body).setCircle(10, this.player.width / 2 - 10, this.player.height / 2 - 10)
+    // 游戏内主角 = AI 立绘：Container 承载缩放后的立绘图片，碰撞框独立设成世界单位。
+    this.playerImg = this.add.image(0, 0, 'portrait_' + this.activeChar.id).setScale(0.06)
+    this.player = this.add.container(cx, cy, [this.playerImg])
+    this.physics.add.existing(this.player)
+    const pbody = this.player.body as Phaser.Physics.Arcade.Body
+    pbody.setSize(46, 46)
+    pbody.setOffset(-23, -23)
 
     this.enemies = this.physics.add.group()
     this.bullets = this.physics.add.group()
@@ -114,7 +122,7 @@ export class GameScene extends Phaser.Scene {
     return v
   }
 
-  // 程序绘制所有纹理：dot 供子弹/敌人/拾取；4 张 chibi 角色立绘供玩家与 HUD。
+  // 程序绘制所有纹理：dot 供子弹/敌人/拾取；hero_ 为代码小人纹理（保留备用，当前主角改用 AI 立绘）。
   private makeTextures() {
     // 通用圆点（白底，运行时着色）
     const g = this.make.graphics({ x: 0, y: 0 }, false)
@@ -628,9 +636,9 @@ export class GameScene extends Phaser.Scene {
     this.showCharSelect()
   }
 
-  // 同步更新游戏内小人 + HUD AI 立绘
+  // 同步更新游戏内主角立绘 + HUD AI 立绘
   private refreshPlayerLook() {
-    this.player.setTexture('hero_' + this.activeChar.id)
+    this.playerImg.setTexture('portrait_' + this.activeChar.id)
     this.portrait.setTexture('portrait_' + this.activeChar.id)
   }
 
