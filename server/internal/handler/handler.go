@@ -94,7 +94,13 @@ func (h *Handler) ReportMeta(w http.ResponseWriter, r *http.Request) {
 
 	m, err := h.store.LoadMeta(pid)
 	if err != nil {
-		m = &store.Meta{PlayerID: pid, UnlockedWeapons: []string{"pistol"}, UnlockedChars: []string{"rookie"}}
+		// 新号默认带两把武器：手枪 + 冲锋枪。
+		// 只给手枪会形成死结 —— 升级池里的「新武器」卡要靠累计击杀解锁武器才有
+		// 内容，而解锁门槛（如 铁蒺藜 需单局 150 分）又要求你本来就打得动。
+		// 实测单手枪 DPS 26.7，刷怪速率一旦超过它，玩家就只会越堆越多直到被围死，
+		// 跑出"39 秒阵亡、14 只怪围着你"的曲线。两把武器（合计 69.6 dps）才让
+		// 「打怪 → 升级 → 变强」这个正循环转起来。
+		m = &store.Meta{PlayerID: pid, UnlockedWeapons: []string{"bow", "crossbow"}, UnlockedChars: []string{"rookie"}}
 	}
 
 	before := map[string]bool{}
@@ -116,7 +122,9 @@ func (h *Handler) ReportMeta(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var now []string
+	// 用空切片而不是 nil：nil 会被 encoding/json 序列化成 null，
+	// 前端 `for (const x of unlockedNow)` 直接抛 TypeError。
+	now := []string{}
 	for _, id := range allIDs(m) {
 		if !before[id] {
 			now = append(now, id)
@@ -166,22 +174,22 @@ func grantUnlocks(m *store.Meta) {
 		*slice = append(*slice, id)
 	}
 	if m.BestScore >= 150 {
-		add(&m.UnlockedWeapons, "shotgun")
+		add(&m.UnlockedWeapons, "caltrop")
 	}
 	if m.TotalKills >= 150 {
-		add(&m.UnlockedWeapons, "smg")
+		add(&m.UnlockedWeapons, "crossbow")
 	}
 	if m.BestScore >= 600 {
-		add(&m.UnlockedWeapons, "rifle")
+		add(&m.UnlockedWeapons, "heavybow")
 	}
 	if m.TotalKills >= 400 {
-		add(&m.UnlockedWeapons, "orbit")
+		add(&m.UnlockedWeapons, "knives")
 	}
 	if m.BestScore >= 1200 {
-		add(&m.UnlockedWeapons, "beam")
+		add(&m.UnlockedWeapons, "guandao")
 	}
 	if m.TotalKills >= 800 {
-		add(&m.UnlockedWeapons, "aura")
+		add(&m.UnlockedWeapons, "snake")
 	}
 	if m.BestScore >= 800 {
 		add(&m.UnlockedChars, "guanyu")

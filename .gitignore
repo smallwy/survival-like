@@ -19,6 +19,13 @@ server/server
 # 日志
 *.log
 
+# 临时诊断产物（截图放大、体检裁剪等，随时可重新生成）
+_diag/
+docs/_*.png
+
+# 无头浏览器调试用的临时 profile
+**/cdp-prof*/
+
 # 系统文件
 .DS_Store
 Thumbs.db

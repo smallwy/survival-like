@@ -121,23 +121,32 @@ def outlined(img, col=OUTLINE):
 # --------------------------------------------------------------------------
 # 体型：所有部件坐标都由这里派生，保证脚底统一落在 y=30
 # --------------------------------------------------------------------------
+# 设计意图：**剪影要在 1/8 秒内区分开**。玩家在弹幕里没空看颜色，
+# 只认轮廓。所以不同兵种不只是换个色调，而是连体型都拉开：
+#   wisp  瘦高  -> 快怪（细长、背生尖刺）
+#   brute 宽厚  -> 胖怪 / Boss（宽肩、有角）
+# 所有体型的 ty+th+lh 都等于 30 —— 脚底对齐，切换体型不会"浮空"。
 BUILD = {
-    #         头顶  头底  躯干y 躯干高 腿高 躯干宽
-    'tiny':   dict(hy0=10, hy1=19, ty=19, th=7,  lh=4, w=9),
-    'slim':   dict(hy0=3,  hy1=15, ty=15, th=10, lh=5, w=9),
-    'normal': dict(hy0=2,  hy1=14, ty=15, th=10, lh=5, w=11),
-    'wide':   dict(hy0=2,  hy1=14, ty=14, th=11, lh=5, w=13),
-    'tall':   dict(hy0=1,  hy1=14, ty=14, th=11, lh=5, w=11),
+    #         头顶  头底  躯干y 躯干高 腿高 躯干宽 头半宽
+    'tiny':   dict(hy0=11, hy1=19, ty=19, th=7,  lh=4, w=8,  hw=4),
+    'wisp':   dict(hy0=4,  hy1=15, ty=15, th=9,  lh=6, w=7,  hw=5),
+    'slim':   dict(hy0=3,  hy1=15, ty=15, th=10, lh=5, w=9,  hw=6),
+    'normal': dict(hy0=2,  hy1=14, ty=15, th=10, lh=5, w=11, hw=6),
+    'tall':   dict(hy0=1,  hy1=14, ty=14, th=11, lh=5, w=11, hw=6),
+    'wide':   dict(hy0=2,  hy1=14, ty=14, th=11, lh=5, w=13, hw=7),
+    'brute':  dict(hy0=3,  hy1=14, ty=13, th=12, lh=5, w=17, hw=7),
 }
 
 # --------------------------------------------------------------------------
 # 单位定义（配色与原 AI 立绘一致，保证选人卡片和游戏内是"同一个人"）
 # --------------------------------------------------------------------------
 HEROES = {
+    # 鞋色统一压暗。旧版 rookie 用 #f4f4f4 纯白，两只鞋各 6x2 紧挨着画，
+    # 在深色地面上连成一条 12px 的白横条 —— 看起来像脚下垫了一块白板。
     'rookie': dict(
-        kind='hero', weapon='pistol', build='normal', headgear='hood',
+        kind='hero', weapon='bow', build='normal', headgear='hood',
         skin='#ffd9b0', hair='#332e3f',
-        top='#3ec9b8', bottom='#3f5c8c', shoe='#f4f4f4', trim='#ffffff',
+        top='#3ec9b8', bottom='#3f5c8c', shoe='#39415f', trim='#ffffff',
     ),
     'guanyu': dict(
         kind='hero', weapon='guandao', build='tall', headgear='crown',
@@ -154,27 +163,35 @@ HEROES = {
     'zhaoyun': dict(
         kind='hero', weapon='spear', build='slim', headgear='helm',
         skin='#ffd9b0', hair='#22202b',
-        top='#e6ecf5', bottom='#c3cddc', shoe='#8a8f99', trim='#d9a52c',
+        top='#e6ecf5', bottom='#c3cddc', shoe='#525a6b', trim='#d9a52c',
         cape='#c9d4e4', ponytail='#22202b',
     ),
 }
 
-# 敌人：「妖兵」——圆头凶目、无发、带角或尖牙，配色沿用 gameData 的 color
+# 敌人：「妖兵」——圆头凶目、无发、带角或尖牙，配色沿用 gameData 的 color。
+# 参考 gameData 的数值：快怪 speed=135 最灵活 / 胖怪 hp=70 radius 最大 /
+# 虫群最弱最小 / 射手远程。体型与特征件都按这个定位画，做到"看轮廓就知道威胁"。
 FOES = {
     'minion':       dict(kind='foe', weapon='blade', build='normal', upscale=1,
                          top='#ff6b6b', skin='#ff6b6b', horn=False),
-    'runner':       dict(kind='foe', weapon='claw', build='slim', upscale=1,
-                         top='#ffd93d', skin='#ffd93d', horn=False),
-    'tank':         dict(kind='foe', weapon='club', build='wide', upscale=1,
-                         top='#6bcb77', skin='#6bcb77', horn=True),
+    'runner':       dict(kind='foe', weapon='blade', build='wisp', upscale=1,
+                         top='#ffd93d', skin='#ffd93d', horn=False, spikes=3),
+    'tank':         dict(kind='foe', weapon='club', build='brute', upscale=1,
+                         top='#6bcb77', skin='#6bcb77', horn=True,
+                         shoulder='#2f6b3c', trim='#bfe6c6'),
     'swarm':        dict(kind='foe', weapon='claw', build='tiny', upscale=1,
                          top='#ff9f43', skin='#ff9f43', horn=False),
-    'shooter':      dict(kind='foe', weapon='staff', build='slim', upscale=1,
-                         top='#a55eea', skin='#a55eea', horn=False),
-    'boss_warlord': dict(kind='foe', weapon='blade', build='wide', upscale=2,
-                         top='#9b59b6', skin='#9b59b6', horn=True),
-    'boss_tyrant':  dict(kind='foe', weapon='club', build='wide', upscale=2,
-                         top='#ee5253', skin='#ee5253', horn=True),
+    'shooter':      dict(kind='foe', weapon='bow', build='slim', upscale=1,
+                         top='#a55eea', skin='#a55eea', horn=False,
+                         third_eye=True, trim='#d9b8ff'),
+    # zoom：显示倍率（相对普通单位）。upscale 只管"画得精细些"，
+    # 两者分开才不会出现"分辨率和体积一起翻倍"→ Boss 渲染成 256px 的荒唐结果。
+    'boss_warlord': dict(kind='foe', weapon='blade', build='brute', upscale=2, zoom=2,
+                         top='#9b59b6', skin='#9b59b6', horn=True,
+                         shoulder='#4a2a63', trim='#e0c3ff', cape='#33193f'),
+    'boss_tyrant':  dict(kind='foe', weapon='guandao', build='brute', upscale=2, zoom=2,
+                         top='#ee5253', skin='#ee5253', horn=True,
+                         shoulder='#7d2323', trim='#ffd0cd', cape='#45161a'),
 }
 
 
@@ -216,7 +233,8 @@ def draw_legs_down(g, b, cx, dy, ll, rl, bottom, shoe):
     for x, lift in ((cx - 5, ll), (cx + 1, rl)):
         h = max(2, lh - lift)
         g.r(x, y + dy, 4, h, bc)
-        g.r(x - 1, y + dy + h, 6, 2, sc)
+        # 鞋宽 5（不是 6）：两只脚之间留出 1px，否则两条鞋连成一根横条
+        g.r(x - 1, y + dy + h, 5, 2, sc)
 
 
 def draw_legs_side(g, b, cx, dy, fo, bo, bottom, shoe):
@@ -261,17 +279,36 @@ def draw_head(g, spec, b, cx, dy, d):
     skin = spec['skin']
     # 妖兵无发：头部整体用本体色（发型层与脸同色 → 视觉上就是一个圆头）
     hair = skin if is_foe else spec.get('hair', '#2b2b33')
-    hw = 6 if spec['build'] != 'tiny' else 4
+    hw = b['hw']
     face_y0 = hy0 + 2
 
     if d == 'up':
-        # 背面：整个后脑，没有五官
+        # 背面：整个后脑，没有五官 —— 但"没有五官"不等于"没有信息"。
+        # 旧版兜帽分支直接拿 top 色把整颗头填满，玩家朝上走时看到的是一颗没有任何
+        # 细节的青色圆蛋（截图里非常明显）。背面靠这几样东西建立体积：
+        # 帽壳的明暗分层、中缝脊线、帽檐下摆阴影、露出来的后颈。
         g.e(cx - hw, hy0, cx + hw, hy1, C(hair))
         g.e(cx - hw, hy0, cx + hw, hy0 + 8, C(hair))
+        topc = spec['top']
         if spec.get('headgear') in ('crown', 'turban', 'helm'):
-            g.e(cx - hw - 1, hy0 - 1, cx + hw + 1, hy0 + 6, C(spec['top']))
+            g.e(cx - hw - 1, hy0 - 1, cx + hw + 1, hy0 + 6, C(topc))
+            g.r(cx - hw - 1, hy0 + 5, hw * 2 + 2, 2, mix(topc, 0.76))
+            g.r(cx - hw, hy0 - 1, hw * 2, 2, mix(topc, 1.12))          # 顶面高光
+            g.r(cx - 1, hy0 - 1, 3, 6, mix(topc, 1.18))                # 背面中缝
+            if spec.get('headgear') == 'turban':
+                g.r(cx + hw - 1, hy0 + 4, 4, 2, mix(topc, 1.1))        # 巾角结
+                g.r(cx + hw + 1, hy0 + 5, 2, 5, mix(topc, 0.88))
+            if spec.get('headgear') == 'helm':
+                g.r(cx - 2, hy0 - 4, 3, 3, (192, 57, 43, 255))         # 盔顶红缨
         if spec.get('headgear') == 'hood':
-            g.e(cx - hw - 1, hy0 - 1, cx + hw + 1, hy1 - 1, C(spec['top']))
+            # 兜帽背面：帽壳 + 脊线 + 下摆阴影 + 露出的后颈头发
+            g.e(cx - hw - 1, hy0 - 1, cx + hw + 1, hy0 + 7, C(topc))
+            g.r(cx - hw - 1, hy0 - 1, hw * 2 + 3, 2, mix(topc, 1.1))   # 顶面高光
+            g.r(cx - 1, hy0 - 1, 3, 8, mix(topc, 1.2))                 # 中缝脊线
+            g.r(cx - hw - 1, hy0 + 6, hw * 2 + 3, 2, mix(topc, 0.7))   # 下摆阴影
+            g.e(cx - 4, hy0 + 7, cx + 4, hy1 + 1, C(hair))             # 后颈
+            g.r(cx - 3, hy0 + 8, 2, 6, mix(hair, 1.3))                 # 露出的发丝
+            g.r(cx + 2, hy0 + 9, 1, 5, mix(hair, 1.3))
         if spec.get('ponytail'):
             g.r(cx + hw - 3, hy0 + 3, 3, 11, C(spec['ponytail']))
         if is_foe:
@@ -342,14 +379,22 @@ def _headgear(g, spec, cx, hy0, hy1, hw, d):
         return
     top, trim = spec['top'], spec.get('trim', '#ffffff')
     if gear == 'hood':
-        # 连帽衫：兜帽是个大罩子，只露出下半张脸
-        g.e(cx - hw - 2, hy0 - 2, cx + hw + 2, hy0 + 9, C(top))
-        g.r(cx - hw - 2, hy0 + 6, hw * 2 + 5, 2, mix(top, 0.78))
+        # 连帽衫：兜帽只罩住头顶到眉线，脸必须露出来。
+        # （旧版兜帽是个罩到 hy0+9 的大罩子，把整张脸吃掉，侧身更是整颗头一个绿块）
+        g.e(cx - hw - 1, hy0 - 1, cx + hw + 1, hy0 + 6, C(top))
+        g.r(cx - hw - 1, hy0 + 4, hw * 2 + 3, 2, mix(top, 0.78))   # 帽檐阴影
+        g.r(cx - hw - 1, hy0 - 1, hw * 2 + 3, 3, mix(top, 1.2))    # 帽顶高光
         if d == 'down':
-            g.e(cx - 4, hy0 + 5, cx + 4, hy1 + 1, C(spec['skin']))
-            g.r(cx - 4, hy0 + 4, 9, 2, C(spec.get('hair', '#332e3f')))
+            g.e(cx - 4, hy0 + 6, cx + 4, hy1 + 1, C(spec['skin']))
+            g.r(cx - 4, hy0 + 5, 9, 2, C(spec.get('hair', '#332e3f')))
             g.r(cx - 3, hy0 + 8, 2, 2, EYE)
             g.r(cx + 1, hy0 + 8, 2, 2, EYE)
+            g.r(cx - 1, hy0 + 11, 2, 1, MOUTH)
+        elif d == 'side':
+            # 侧面：兜帽右缘往后收，露出朝前的半张脸
+            g.e(cx - 1, hy0 + 5, cx + hw, hy1, C(spec['skin']))
+            g.r(cx - 1, hy0 + 5, 3, 2, C(spec.get('hair', '#332e3f')))
+            g.r(cx + 2, hy0 + 8, 2, 2, EYE)
         return
     if gear == 'crown':
         g.r(cx - hw - 1, hy0 - 2, hw * 2 + 2, 5, C(top))
@@ -380,11 +425,48 @@ def _beard(g, spec, cx, hy1, d):
         return
     ln = 6 if spec.get('long_beard') else 4
     bc = C(beard)
+    # 胡须从下巴往下挂，不要压到脸上 —— 原来起点是 hy1-2，正面会糊掉半个脸
     if d == 'side':
-        g.r(cx + 1, hy1 - 2, 3, ln, bc)
+        g.r(cx + 2, hy1 - 1, 2, ln, bc)
+        g.r(cx + 2, hy1 - 1, 2, 1, C(mixhex(beard, 1.8)))
     elif d != 'up':
-        g.r(cx - 3, hy1 - 2, 5, 3, bc)
+        g.r(cx - 3, hy1 - 1, 5, 3, bc)
         g.r(cx - 2, hy1 + 1, 4, ln - 3, bc)
+
+
+def draw_marks(g, spec, b, cx, dy, d, tx, ty, w, th):
+    """兵种特征件：肩甲 / 背刺 / 第三眼。
+
+    这是**剪影辨识**的主要手段 —— 玩家在弹幕里没时间看颜色，只认轮廓。
+    肩甲让 brate 体型横向再撑出 3px，背刺让快怪侧面明显带锯齿，
+    第三眼让远程单位在人群里一眼可辨。
+    """
+    sh = spec.get('shoulder')
+    if sh:
+        pad = 3
+        if d == 'side':
+            g.r(tx + w - 2, ty, pad + 2, 4, C(sh))
+            g.r(tx + w - 1, ty, pad + 2, 2, mix(sh, 1.3))
+        else:
+            g.r(tx - pad, ty, pad + 1, 4, C(sh))
+            g.r(tx + w - 1, ty, pad + 1, 4, C(sh))
+            g.r(tx - pad, ty, pad + 1, 2, mix(sh, 1.3))
+            g.r(tx + w - 1, ty, pad + 1, 2, mix(sh, 1.3))
+
+    sp = spec.get('spikes')
+    if sp:
+        sc = C(mixhex(spec['top'], 0.55))
+        if d == 'up':
+            for i in range(sp):
+                g.r(cx - 1, ty - 3 + i * 2, 2, 2, sc)
+        elif d == 'side':
+            for i in range(sp):
+                g.r(tx - 2, ty + 1 + i * 3, 3, 2, sc)
+                g.p(tx - 3, ty + 1 + i * 3, sc)
+
+    if spec.get('third_eye') and d == 'down':
+        g.r(cx - 2, b['hy0'] + dy + 4, 4, 3, C('#33204a'))
+        g.r(cx - 1, b['hy0'] + dy + 5, 2, 1, C('#ff6bff'))
 
 
 def draw_cape(g, spec, b, cx, dy, d, tx, ty, w, th):
@@ -407,16 +489,30 @@ def draw_cape(g, spec, b, cx, dy, d, tx, ty, w, th):
 # --------------------------------------------------------------------------
 # 武器：返回「出手帧」的武器前端逻辑坐标
 # --------------------------------------------------------------------------
-def draw_weapon(g, spec, cx, hy, d, sw):
-    """sw: -1 蓄力 / 0 常态 / 1 出手。返回枪口逻辑坐标或 None"""
+def draw_weapon(g, spec, cx, hy, d, sw, hw):
+    """sw: -1 蓄力 / 0 常态 / 1 出手。返回枪口逻辑坐标或 None
+
+    两条约束（都是踩过的坑）：
+      1. 握持点必须移到头部轮廓**右侧之外**（hand_x = cx + hw + 2）。旧版固定在
+         cx+4，武器会压在脑袋上，侧身帧看起来就是"头顶糊了一块白布"。
+      2. 敌兵武器比武将压暗一档、缩短一档。近白刃色在深色背景上会糊成一团亮斑，
+         反而抢掉了"谁是自己人"的视觉层级。
+    """
     wp = spec['weapon']
-    hand_x = cx + 4
+    foe = spec['kind'] == 'foe'
+    hand_x = cx + hw + 2
     hand_y = hy
+    wood = '#5a4630' if foe else '#8a6b46'
+    blade = '#98a4b6' if foe else '#d8dee8'
 
     if d == 'up':
         # 背面：武器基本被身体挡住，只露出一点
-        if wp in ('guandao', 'spear', 'serpent'):
-            g.r(hand_x + 1, hy - 14, 2, 18, C('#8a6b46'))
+        if wp == 'bow':
+            g.ln(hand_x + 1, hy - 10, hand_x + 1, hy + 3, C(wood), 2)
+        elif wp in ('guandao', 'spear', 'serpent'):
+            g.r(hand_x + 1, hy - 14, 2, 18, C(wood))
+        elif foe:
+            g.r(hand_x + 1, hy - 8, 2, 10, C(wood))
         return None
 
     if d == 'down':
@@ -427,53 +523,108 @@ def draw_weapon(g, spec, cx, hy, d, sw):
             g.r(hand_x + 1, hand_y - 2 + lift, 4, 2, C('#2a2a33'))
         elif wp in ('guandao', 'spear', 'serpent'):
             top = hy - 15 + lift
-            g.r(hand_x, top, 2, 17 - lift, C('#8a6b46'))
-            g.r(hand_x - 1, top - 4, 4, 5, C('#d8dee8'))
-        else:
-            g.r(hand_x - 1, hand_y - 6 + lift, 3, 8, C('#5a5a66'))
+            g.r(hand_x, top, 2, 17 - lift, C(wood))
+            g.r(hand_x - 1, top - 4, 4, 5, C(blade))
+        elif wp == 'blade':                     # 短刀：立着的刀身 + 十字护手
+            g.r(hand_x - 1, hand_y - 10 + lift, 3, 9, C(blade))
+            g.r(hand_x - 2, hand_y - 2 + lift, 5, 2, C(wood))
+        elif wp == 'club':                      # 木棒：棒身 + 粗头
+            g.r(hand_x - 1, hand_y - 9 + lift, 3, 8, C(wood))
+            g.r(hand_x - 2, hand_y - 14 + lift, 5, 6,
+                C(mixhex(spec['top'], 0.68)))
+        elif wp == 'bow':                       # 弓：竖握的弓身 + 弓弦
+            g.r(hand_x - 1, hand_y - 9 + lift, 2, 17, C(wood))
+            g.r(hand_x - 3, hand_y - 10 + lift, 3, 2, C(wood))
+            g.r(hand_x - 3, hand_y + 8 + lift, 3, 2, C(wood))
+            g.r(hand_x + 2, hand_y - 8 + lift, 1, 16, C(blade))
+        elif wp == 'staff':                     # 法杖：杖 + 顶端宝珠
+            g.r(hand_x - 1, hand_y - 13 + lift, 2, 13, C(wood))
+            g.r(hand_x - 2, hand_y - 17 + lift, 4, 4, C('#ff6bff'))
+        else:                                   # 利爪：三根短刃
+            for i in range(3):
+                g.r(hand_x - 1 + i * 2, hand_y - 5 + lift + i, 2, 6, C(blade))
         return None
 
     # ---- 侧面朝右（主视角） ----
-    if sw > 0.5:                       # 出手：武器水平指向前方（右）
+    # 32 格里给武器留的横向空间只有「握点 → 格子右缘」这一小段（约 7px），
+    # 所以出手姿态统一取「向前上方约 37°」：既读得出"捅出去了"，
+    # 刀尖也不会被格子裁掉（旧版 dx=0.94 水平捅出，关羽/张飞/赵云全部超出格子，
+    # 表现是侧面攻击时刀头齐刷刷被切平）。
+    if sw > 0.5:                       # 出手
         if wp == 'pistol':
             g.r(hand_x - 1, hand_y - 1, 8, 3, C('#33333d'))
             g.r(hand_x + 1, hand_y + 1, 3, 4, C('#2a2a33'))
             return (hand_x + 7, hand_y)
-        dx, dy = 0.94, -0.34
-        ln = 11 if wp != 'guandao' else 12
-        wood, blade = '#8a6b46', '#d8dee8'
-        mx = hand_x + round(dx * (ln - 6))
-        my = hand_y + round(dy * (ln - 6))
+        if wp == 'claw':
+            for i in range(3):
+                g.ln(hand_x, hand_y, hand_x + 5 - i, hand_y - 4 + i * 3, C(blade), 2)
+            return (hand_x + 5, hand_y - 1)
+        if wp == 'staff':
+            g.ln(hand_x, hand_y, hand_x + 6, hand_y - 4, C(wood), 2)
+            g.r(hand_x + 5, hand_y - 8, 3, 4, C('#ff6bff'))
+            return (hand_x + 7, hand_y - 6)
+        if wp == 'bow':
+            # 出手：弓臂前推，箭已离弦。
+            # 箭尖只到 hand_x+6 —— 32 格右缘的余量只有这么多
+            # （hand_x = 16 + hw + 2，normal 体型已占 24），再多一格就会被裁掉，
+            # 这正是之前关羽侧身刀头被切平的同一个坑。
+            g.ln(hand_x - 1, hand_y - 6, hand_x + 3, hand_y - 1, C(wood), 2)
+            g.ln(hand_x - 1, hand_y + 4, hand_x + 3, hand_y - 1, C(wood), 2)
+            g.ln(hand_x + 1, hand_y - 2, hand_x + 6, hand_y - 2, C(blade), 1)
+            return (hand_x + 6, hand_y - 2)
+        dx, dy = 0.8, -0.6
+        ln = 6 if foe else 8
+        mx = hand_x + round(dx * (ln - 4))
+        my = hand_y + round(dy * (ln - 4))
         ex = hand_x + round(dx * ln)
         ey = hand_y + round(dy * ln)
         g.ln(hand_x, hand_y, mx, my, C(wood), 2)
-        g.ln(mx, my, ex, ey, C(blade), 3 if wp == 'guandao' else 2)
+        g.ln(mx, my, ex, ey, C(blade), 3)
         return (ex, ey)
-    if sw < -0.5:                      # 蓄力：武器后仰上举
-        dx, dy = -0.35, -0.94
-        ln = 13
-        mx = hand_x + round(dx * (ln - 6))
-        my = hand_y + round(dy * (ln - 6))
+    if sw < -0.5:                      # 蓄力：举到身前上方（不再甩到脑后压住脸）
+        if wp == 'bow':
+            # 张弓搭箭：弦拉到身后，箭尖朝前
+            g.ln(hand_x - 1, hand_y - 6, hand_x + 3, hand_y - 1, C(wood), 2)
+            g.ln(hand_x - 1, hand_y + 4, hand_x + 3, hand_y - 1, C(wood), 2)
+            g.ln(hand_x + 4, hand_y - 2, hand_x - 2, hand_y - 2, C(blade), 1)
+            return None
+        dx, dy = 0.2, -0.98
+        ln = 9 if foe else 11
+        mx = hand_x + round(dx * (ln - 4))
+        my = hand_y + round(dy * (ln - 4))
         ex = hand_x + round(dx * ln)
         ey = hand_y + round(dy * ln)
-        g.ln(hand_x, hand_y, mx, my, C('#8a6b46'), 2)
-        g.ln(mx, my, ex, ey, C('#d8dee8'), 3)
+        g.ln(hand_x, hand_y, mx, my, C(wood), 2)
+        g.ln(mx, my, ex, ey, C(blade), 3)
         return None
 
-    # 常态：竖握
+    # 常态：竖握。敌兵杆子明显短一截，刃端不会高过头顶
     if wp == 'pistol':
         g.r(hand_x - 1, hand_y - 2, 6, 3, C('#33333d'))
         g.r(hand_x + 1, hand_y + 1, 3, 4, C('#2a2a33'))
         return None
-    top = hy - 16
-    wood, blade = '#8a6b46', '#d8dee8'
-    g.r(hand_x, top, 2, 18, C(wood))
+    if wp == 'bow':
+        # 常态：弓竖握在身前，弓弦朝外
+        g.r(hand_x, hy - 9, 2, 17, C(wood))
+        g.r(hand_x - 2, hy - 10, 3, 2, C(wood))
+        g.r(hand_x - 2, hy + 7, 3, 2, C(wood))
+        g.r(hand_x + 2, hy - 8, 1, 15, C(blade))
+        return None
+    top = hy - (8 if foe else 16)
+    g.r(hand_x, top, 2, (10 if foe else 18), C(wood))
     if wp == 'guandao':
         g.r(hand_x - 2, top - 4, 6, 5, C(blade))
         g.r(hand_x + 3, top - 1, 4, 3, C(blade))
     elif wp == 'spear':
         g.r(hand_x - 1, top - 4, 4, 5, C(blade))
         g.r(hand_x - 1, top - 2, 4, 2, (192, 57, 43, 255))
+    elif wp == 'club':
+        g.r(hand_x - 2, top - 4, 6, 6, C(mixhex(spec['top'], 0.68)))
+    elif wp == 'staff':
+        g.r(hand_x - 2, top - 4, 5, 4, C('#ff6bff'))
+    elif wp == 'claw':
+        for i in range(3):
+            g.r(hand_x - 1 + i, top, 2, 5, C(blade))
     else:
         g.r(hand_x - 1, top - 5, 4, 6, C(blade))
     return None
@@ -507,17 +658,17 @@ def draw_unit(spec, d, act, f):
     # 3) 躯干
     tx, ty, w, th = draw_torso(g, spec, b, cx, dy, d)
 
-    # 4) 手臂
+    # 3b) 兵种特征件（肩甲 / 背刺 / 第三眼）—— 肩甲要压在手臂下面，先画
+    draw_marks(g, spec, b, cx, dy, d, tx, ty, w, th)
+
+    # 4) 手臂。侧身的持械手必须真的伸到武器握点，
+    #    否则武器会"浮"在身体外面，看着像掉在地上的道具。
     arm_col = mix(spec['top'], 0.86)
+    hx = cx + b['hw'] + 2
+    hand_y = ty + th - 2
     if d == 'side':
-        swing = 1 if (act == 'walk' and f % 2 == 0) else 0
-        if sw > 0.5:
-            g.ln(tx + w - 2, ty + 2, tx + w + 5, ty + 4, arm_col, 3)
-        elif sw < -0.5:
-            g.ln(tx + w - 2, ty + 2, tx + w + 2, ty - 2, arm_col, 3)
-        else:
-            off = 1 if swing else 0
-            g.ln(tx + w - 2, ty + 2, tx + w + 2 + off, ty + 6 + off, arm_col, 3)
+        sx, sy = tx + w - 2, ty + 2
+        g.ln(sx, sy, hx - 1, hand_y - (3 if sw > 0.5 else 5), arm_col, 3)
     else:
         g.r(tx - 3, ty + 1 - (2 if (act == 'walk' and f == 0) else 0), 3, 6, arm_col)
         g.r(tx + w, ty + 1 - (2 if (act == 'walk' and f == 2) else 0), 3, 6, arm_col)
@@ -526,8 +677,7 @@ def draw_unit(spec, d, act, f):
     draw_head(g, spec, b, cx, dy, d)
 
     # 6) 武器
-    hand_y = ty + th - 2
-    muzzle = draw_weapon(g, spec, cx, hand_y, d, sw)
+    muzzle = draw_weapon(g, spec, cx, hand_y, d, sw, b['hw'])
 
     img = outlined(g.im)
     up = spec.get('upscale', 1)
@@ -554,7 +704,14 @@ def build_sheet(spec):
                 # 出手帧（f==1）的武器前端 = 枪口
                 if act == 'attack' and f == 1 and mz:
                     muzzles[d] = [mz[0] - GRID / 2, mz[1] - GRID / 2]
-    return sheet, muzzles, cell
+
+    # 量「朝下 · 待机」这一格的 alpha 包围盒，换算回逻辑像素写进 manifest。
+    # 游戏用它算碰撞框与视觉尺寸 —— 这样"看着多大就打到多大"，不会再出现
+    # "胖怪视觉不大、判定却比身体宽"这种视觉与手感错配。
+    # 只量单格：整行会把 4 列动画并起来，量出来永远是整张 sheet 的宽度。
+    bb = sheet.crop((0, 0, cell, cell)).getbbox()
+    bbox = [round(v / up, 2) for v in bb] if bb else None
+    return sheet, muzzles, cell, bbox
 
 
 # --------------------------------------------------------------------------
@@ -636,7 +793,7 @@ def main():
     for group, table, preview in (('hero', HEROES, hero_preview),
                                   ('foe', FOES, foe_preview)):
         for uid, spec in table.items():
-            sheet, muzzles, cell = build_sheet(spec)
+            sheet, muzzles, cell, bbox = build_sheet(spec)
             key = f'{group}_{uid}'
             name = f'{key}.png'
             sheet.save(os.path.join(ASSET_DIR, name))
@@ -644,13 +801,18 @@ def main():
             manifest['units'][key] = {
                 'sheet': name,
                 'upscale': up,
+                'zoom': spec.get('zoom', 1),
+                'cell': cell,
+                'bbox': bbox,
                 'muzzle': {k: [round(v[0], 2), round(v[1], 2)]
                            for k, v in muzzles.items()},
             }
             preview.append((uid, sheet, up))
             ms = muzzles.get('side', ['-', '-'])
-            print(f'{key:16s} {cell:5d} {sheet.size!s:>10s}  '
-                  f'({ms[0]}, {ms[1]}) upscale={up}')
+            vis = (f'{bbox[2] - bbox[0]:.0f}x{bbox[3] - bbox[1]:.0f}'
+                   if bbox else 'n/a')
+            print(f'{key:16s} cell={cell:3d} {sheet.size!s:>10s}  '
+                  f'可视={vis:>8s}  muzzle=({ms[0]}, {ms[1]})  up={up}')
 
     with open(os.path.join(ASSET_DIR, 'manifest.json'), 'w', encoding='utf-8') as fp:
         json.dump(manifest, fp, ensure_ascii=False, indent=2)
