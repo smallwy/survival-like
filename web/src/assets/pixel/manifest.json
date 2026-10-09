@@ -1,0 +1,131 @@
+{
+  "grid": 32,
+  "cols": 4,
+  "dirs": [
+    "down",
+    "up",
+    "side"
+  ],
+  "acts": [
+    "idle",
+    "walk",
+    "attack"
+  ],
+  "actFrames": {
+    "idle": 2,
+    "walk": 4,
+    "attack": 3
+  },
+  "units": {
+    "hero_rookie": {
+      "sheet": "hero_rookie.png",
+      "upscale": 1,
+      "muzzle": {
+        "side": [
+          11.0,
+          7.0
+        ]
+      }
+    },
+    "hero_guanyu": {
+      "sheet": "hero_guanyu.png",
+      "upscale": 1,
+      "muzzle": {
+        "side": [
+          15.0,
+          3.0
+        ]
+      }
+    },
+    "hero_zhangfei": {
+      "sheet": "hero_zhangfei.png",
+      "upscale": 1,
+      "muzzle": {
+        "side": [
+          14.0,
+          3.0
+        ]
+      }
+    },
+    "hero_zhaoyun": {
+      "sheet": "hero_zhaoyun.png",
+      "upscale": 1,
+      "muzzle": {
+        "side": [
+          14.0,
+          3.0
+        ]
+      }
+    },
+    "foe_minion": {
+      "sheet": "foe_minion.png",
+      "upscale": 1,
+      "muzzle": {
+        "side": [
+          14.0,
+          3.0
+        ]
+      }
+    },
+    "foe_runner": {
+      "sheet": "foe_runner.png",
+      "upscale": 1,
+      "muzzle": {
+        "side": [
+          14.0,
+          3.0
+        ]
+      }
+    },
+    "foe_tank": {
+      "sheet": "foe_tank.png",
+      "upscale": 1,
+      "muzzle": {
+        "side": [
+          14.0,
+          3.0
+        ]
+      }
+    },
+    "foe_swarm": {
+      "sheet": "foe_swarm.png",
+      "upscale": 1,
+      "muzzle": {
+        "side": [
+          14.0,
+          4.0
+        ]
+      }
+    },
+    "foe_shooter": {
+      "sheet": "foe_shooter.png",
+      "upscale": 1,
+      "muzzle": {
+        "side": [
+          14.0,
+          3.0
+        ]
+      }
+    },
+    "foe_boss_warlord": {
+      "sheet": "foe_boss_warlord.png",
+      "upscale": 2,
+      "muzzle": {
+        "side": [
+          14.0,
+          3.0
+        ]
+      }
+    },
+    "foe_boss_tyrant": {
+      "sheet": "foe_boss_tyrant.png",
+      "upscale": 2,
+      "muzzle": {
+        "side": [
+          14.0,
+          3.0
+        ]
+      }
+    }
+  }
+}

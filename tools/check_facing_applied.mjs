@@ -1,53 +1,75 @@
 /**
- * 守卫检查：确认「朝向真的被应用到角色贴图上」。
+ * 静态守卫：确保「算出来的朝向/动作真的被应用到贴图上」。
  *
- * 背景：曾经 animatePlayer 里只写了 setFlipX 却漏掉 setTexture —— 朝向
- * (front/back/side) 算了一整轮、贴图却永远是正面图。表现就是"按 WASD 角色不转身"，
- * 而且肉眼很难分辨到底是逻辑没生效还是素材不够，只能反复猜。
- * 这里把该约束固化成可执行的断言，避免以后又悄悄丢掉这一行。
+ * 背景：这个项目曾经连续踩过同一个坑 —— animatePlayer 里算好了朝向 front/back/side，
+ * 却只调了 setFlipX 而漏掉 setTexture，于是朝向算了一整轮从没贴到角色身上，
+ * 表现为"按 WASD 角色不转身"。tsc 和打包都查不出这类"逻辑对但没接线"的问题。
  *
- * 用法：node tools/check_facing_applied.mjs
+ * 现在改用像素帧序列，同一类风险变成「漏掉 setFrame」。
+ * 这个脚本把它变成可执行断言。
  */
-import { readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { readFileSync, existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
 
-const root = join(dirname(fileURLToPath(import.meta.url)), '..')
-const src = readFileSync(join(root, 'web', 'src', 'scenes', 'GameScene.ts'), 'utf8')
+const here = dirname(fileURLToPath(import.meta.url))
+const root = join(here, '..')
+const scenePath = join(root, 'web', 'src', 'scenes', 'GameScene.ts')
+const manifestPath = join(root, 'web', 'src', 'assets', 'pixel', 'manifest.json')
 
-// 截出 animatePlayer 的函数体
-const start = src.indexOf('private animatePlayer')
-if (start < 0) {
-  console.error('FAIL  找不到 animatePlayer')
-  process.exit(1)
-}
-const rest = src.slice(start)
-const end = rest.indexOf('\n  private ', 10)
-const fn = end > 0 ? rest.slice(0, end) : rest
+const src = readFileSync(scenePath, 'utf8')
+const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
 
-let bad = 0
-const checks = [
-  ['setTexture', '按朝向切换贴图 —— 转身的核心动作'],
-  ['setFlipX', '侧身朝左时的水平翻转'],
-  ['curDir', '缓存当前朝向，避免每帧重复切图'],
-  ['setScale', '走路起伏 / 后坐的压缩拉伸']
-]
-for (const [needle, why] of checks) {
-  const ok = fn.includes(needle)
-  if (!ok) bad++
-  console.log(`${ok ? 'OK  ' : 'FAIL'}  animatePlayer 含 ${needle.padEnd(11)} ${why}`)
+let failed = 0
+const check = (name, ok, detail = '') => {
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`)
+  if (!ok) failed++
 }
 
-// 三个朝向的贴图都必须在 preload 注册，否则 setTexture 会贴成"缺图绿框"
-for (const dir of ['front', 'back', 'side']) {
-  const n = (src.match(new RegExp(`charTex\\('[a-z]+', '${dir}'\\)`, 'g')) || []).length
-  const ok = n >= 4
-  if (!ok) bad++
-  console.log(`${ok ? 'OK  ' : 'FAIL'}  preload 已注册 ${dir.padEnd(5)} 贴图 x${n}（应为 4 个角色）`)
+// 1) animatePlayer 必须真的把帧贴到玩家 sprite 上
+const animStart = src.indexOf('private animatePlayer(')
+const animEnd = src.indexOf('private footDust(')
+check('animatePlayer 存在', animStart > 0 && animEnd > animStart)
+const anim = animStart > 0 ? src.slice(animStart, animEnd) : ''
+check('animatePlayer 调用 setFrame(...) —— 否则动作算了也不显示', anim.includes('.setFrame('))
+check('animatePlayer 调用 setFlipX(...) —— 侧向朝左靠翻转', anim.includes('.setFlipX('))
+check('animatePlayer 用 pxFrame(...) 计算帧号', anim.includes('pxFrame('))
+
+// 2) 朝向与动作必须走同一套枚举，不能再混用旧的 front/back
+check('已无遗留的 front/back 朝向字面量', !/['"](front|back)['"]/.test(src))
+check('PxDir 覆盖 down/up/side', /PX_DIRS = \['down', 'up', 'side'\]/.test(src))
+
+// 3) 帧号公式与 manifest 的自描述一致（行列数与帧数必须先对上，
+//    否则 setFrame 会取到别的动作的帧 —— 这类错误肉眼极难发现）
+const dirs = manifest.dirs
+const acts = manifest.acts
+const rows = dirs.length * acts.length
+check('manifest 方向数 x 动作数 = sheet 行数', rows === 9, `rows=${rows}`)
+for (const act of acts) {
+  const n = manifest.actFrames[act]
+  check(`动画 ${act} 的帧数不超过列数 ${manifest.cols}`, n <= manifest.cols, `frames=${n}`)
+}
+// sheet 像素高度必须等于 行数 x 单元边长
+for (const [unit, def] of Object.entries(manifest.units)) {
+  const cell = manifest.grid * def.upscale
+  const png = join(root, 'web', 'src', 'assets', 'pixel', def.sheet)
+  check(`${unit}: spritesheet 文件存在`, existsSync(png), def.sheet)
+  if (existsSync(png)) {
+    const buf = readFileSync(png)
+    // PNG：宽高在 IHDR，偏移 16 起 8 字节大端
+    const w = buf.readUInt32BE(16)
+    const h = buf.readUInt32BE(20)
+    check(`${unit}: 尺寸 ${w}x${h} == ${manifest.cols * cell}x${rows * cell}`,
+      w === manifest.cols * cell && h === rows * cell, `${w}x${h}`)
+  }
 }
 
-if (bad > 0) {
-  console.error(`\n有 ${bad} 项未通过`)
-  process.exit(1)
-}
-console.log('\n全部通过')
+// 4) preload 必须真的加载了 spritesheet
+check('preload 使用 load.spritesheet 加载像素单位', /load\.spritesheet\(/.test(src))
+check('preload 遍历 PX_SHEETS 注册全部单位', /for \(const unit in PX_SHEETS\)/.test(src))
+
+// 5) 枪口坐标必须来自 manifest，不能重新退回硬编码
+check('muzzlePoint 从 manifest 读枪口（不是硬编码表）', /PX_UNITS\[unit\]\?\.muzzle\?\.side/.test(src))
+
+console.log(failed === 0 ? '\n全部通过' : `\n${failed} 项失败`)
+process.exit(failed === 0 ? 0 : 1)
