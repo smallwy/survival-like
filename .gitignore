@@ -9,6 +9,7 @@ server/data/
 
 # 立绘原图备份（AI 原始 1024 图，仓库只保留处理后的 256 透明版）
 web/src/assets/portraits_raw/
+tools/directional_raw/
 
 # 编译产物
 *.exe
