@@ -72,10 +72,13 @@ export class GameScene extends Phaser.Scene {
 
   private bg!: Phaser.GameObjects.TileSprite
   private moving = false
+  private moveVx = 0        // 本帧输入方向（-1/0/1），用于 4 向朝向
+  private moveVy = 0
   private faceRight = true
+  private faceUp = false    // 是否背对镜头（向上走）
   private walkPhase = 0     // 走路循环相位
-  private recoil = 0        // 后坐力（开火瞬间升高，逐帧衰减）
-  private fireAngle = 0     // 最近一次开火方向，用于后坐力反方向位移
+  private castAnim = 0      // 抬手施法/开火动作进度（1 -> 0）
+  private fireAngle = 0     // 最近一次施法方向
   private dustTimer = 0     // 走路扬尘计时
 
   // meta（跨局解锁）
@@ -328,17 +331,22 @@ export class GameScene extends Phaser.Scene {
     if (k.W.isDown || k.UP.isDown) vy -= 1
     if (k.S.isDown || k.DOWN.isDown) vy += 1
     this.moving = (vx !== 0 || vy !== 0)
+    this.moveVx = vx
+    this.moveVy = vy
+    // 水平朝向：只在左右移动时翻转；上下移动保持原朝向（配合 faceUp 做"背面"表现）
     if (vx > 0) this.faceRight = true
     if (vx < 0) this.faceRight = false
+    // 背对镜头：向上移动且垂直分量占优时视为背身
+    this.faceUp = vy < 0 && Math.abs(vy) >= Math.abs(vx)
     const len = Math.hypot(vx, vy) || 1
     const body = this.player.body as Phaser.Physics.Arcade.Body
     body.setVelocity((vx / len) * this.speed, (vy / len) * this.speed)
   }
 
-  // 走路视觉：上下起伏 + 左右倾斜 + 迈步压扁拉伸 + 脚下扬尘 + 后坐力位移
+  // 走路视觉：上下起伏 + 迈步压扁 + 8 向倾斜 + 脚下扬尘 + 抬手施法动作
   private animatePlayer(delta: number) {
     this.shadow.setPosition(this.player.x, this.player.y + 26)
-    this.recoil = Math.max(0, this.recoil - delta * 0.006)
+    this.castAnim = Math.max(0, this.castAnim - delta * 0.0042)
 
     if (this.moving) {
       this.walkPhase += delta * 0.013
@@ -346,44 +354,53 @@ export class GameScene extends Phaser.Scene {
       const step2 = Math.sin(this.walkPhase * 2)     // 双倍频（压扁拉伸）
       const dir = this.faceRight ? 1 : -1
 
-      // 上下起伏：每一步最高点抬升
       const bob = Math.abs(Math.sin(this.walkPhase)) * 5
-      // 迈步压扁：落脚时压扁、抬起时拉长
+      // 上下移动时额外增加"浮沉"幅度，强化前进/后退的知觉
+      const vScale = this.moveVy !== 0 ? 1.35 : 1
       const sx = PLAYER_SCALE * (1 - step2 * 0.055)
       const sy = PLAYER_SCALE * (1 + step2 * 0.055)
 
-      this.playerImg.y = -bob
-      this.playerImg.rotation = dir * (0.045 + step * 0.05)
+      this.playerImg.y = -bob * vScale
+
+      // 8 向倾斜：按移动向量决定倾斜方向，斜着走最明显
+      const leanX = this.moveVx * 0.05
+      const leanY = this.moveVy * 0.045
+      this.playerImg.rotation = leanX + step * 0.04 * dir + leanY * 0.6
+      // 背身时左右翻转观感反转，斜向移动观感更自然
+      this.playerImg.setFlipX(this.faceUp ? this.faceRight : !this.faceRight)
       this.playerImg.setScale(sx, sy)
-      this.playerImg.setFlipX(!this.faceRight)
       this.shadow.setScale(1 - bob * 0.035, 1 - bob * 0.05)
 
-      // 扬尘：每隔一段时间在脚下踢起一小团灰
       this.dustTimer -= delta
       if (this.dustTimer <= 0) {
         this.dustTimer = 190
         this.footDust()
       }
     } else {
-      // 站立：轻微呼吸感 + 后坐力回弹
       this.walkPhase = 0
       const breathe = 1 + Math.sin(this.elapsed * 2.2) * 0.012
       this.playerImg.y *= 0.85
       this.playerImg.rotation *= 0.85
       this.playerImg.setScale(PLAYER_SCALE * breathe, PLAYER_SCALE * breathe)
-      this.playerImg.setFlipX(!this.faceRight)
+      this.playerImg.setFlipX(this.faceUp ? this.faceRight : !this.faceRight)
       this.shadow.setScale(1, 1)
     }
 
-    // 后坐力：沿开火反方向轻微位移 + 挤压
-    if (this.recoil > 0.01) {
-      const k = this.recoil * this.recoil
-      this.playerImg.x = -Math.cos(this.fireAngle) * 7 * k
-      this.playerImg.y += -Math.sin(this.fireAngle) * 7 * k
+    // 抬手施法/开火：沿施法方向前冲 + 上举 + 拉伸，形成"出手"动作
+    if (this.castAnim > 0.01) {
+      const k = this.castAnim * this.castAnim
+      const ca = this.castAnim
+      const dirX = Math.cos(this.fireAngle)
+      const dirY = Math.sin(this.fireAngle)
+      // 前冲 + 抬升：出手瞬间向目标方向位移
+      this.playerImg.x = dirX * 13 * k
+      this.playerImg.y += dirY * 13 * k - 5 * k
+      // 拉伸：出手瞬间纵向拉长、横向压窄
       this.playerImg.setScale(
-        PLAYER_SCALE * (1 + k * 0.1),
-        PLAYER_SCALE * (1 - k * 0.1)
+        PLAYER_SCALE * (1 - ca * 0.1),
+        PLAYER_SCALE * (1 + ca * 0.16)
       )
+      this.playerImg.rotation += dirX * 0.12 * ca
     } else {
       this.playerImg.x *= 0.8
     }
@@ -426,7 +443,7 @@ export class GameScene extends Phaser.Scene {
     const py = this.player.y
     const base = target ? Phaser.Math.Angle.Between(px, py, target.x, target.y) : -Math.PI / 2
     this.fireAngle = base
-    this.recoil = 1
+    this.castAnim = 1
     this.muzzleFlash(px, py, base, w.color)
     this.shake(60, 0.0015)
 
@@ -509,6 +526,8 @@ export class GameScene extends Phaser.Scene {
       g.beginPath(); g.moveTo(px, py); g.lineTo(ex, ey); g.strokePath()
       this.time.delayedCall(130, () => g.destroy())
     }
+    this.fireAngle = ang
+    this.castAnim = 1
     this.muzzleFlash(px, py, ang, w.color)
     this.shake(70, 0.002)
 
@@ -526,6 +545,9 @@ export class GameScene extends Phaser.Scene {
   private fireAura(w: WeaponDef) {
     const px = this.player.x
     const py = this.player.y
+    // 光环是持续施法，用较弱的抬手动作 + 举身感
+    this.castAnim = Math.max(this.castAnim, 0.55)
+    this.fireAngle = -Math.PI / 2
     const g = this.add.graphics().setDepth(40).setBlendMode(Phaser.BlendModes.ADD)
     g.fillStyle(w.color, 0.16); g.fillCircle(px, py, w.radius)
     g.lineStyle(3, w.color, 0.7); g.strokeCircle(px, py, w.radius)
@@ -623,7 +645,13 @@ export class GameScene extends Phaser.Scene {
 
     // 立绘已归一化填满 256 画布，故 scale = 直径 / 256，radius 即角色真实身高半径
     const s = (def.radius * 2) / TEX
-    e.setActive(true).setVisible(true).setScale(s).setAngle(0)
+    // 复用对象池的实例：必须彻底重置上一次的残留状态，否则会出现"出生的敌人是白色的"
+    // （典型原因：上一条命被 setTintFill 闪白，回调未执行就被回收，tint 残留到下一次出生）
+    e.setActive(true).setVisible(true).setScale(s)
+    e.setAngle(0)
+    e.setFlipX(false)
+    e.clearTint()
+    e.setData('baseScale', s)
     e.setData('hp', def.hp + this.level * 4)
     e.setData('dmg', def.damage)
     e.setData('sp', def.speed)
@@ -679,6 +707,10 @@ export class GameScene extends Phaser.Scene {
 
       if (e.getData('shootMax') > 0) {
         let cd = (e.getData('shootCd') as number) - delta
+        // 抬手预备：开火前 260ms 起做"举身"蓄力，给玩家可读的预警
+        const bs = (e.getData('baseScale') as number) || e.scaleX
+        const windup = cd < 260 ? 1 - cd / 260 : 0
+        e.setScale(bs * (1 + windup * 0.18))
         if (cd <= 0) {
           this.enemyShoot(e, (e.getData('shootDmg') as number) || 10)
           cd = (e.getData('shootMax') as number)
@@ -740,9 +772,19 @@ export class GameScene extends Phaser.Scene {
     const hp = ((e.getData('hp') as number) || 0) - (b.getData('dmg') as number)
     this.spark(b.x, b.y, (b.getData('col') as number) || 0xffe066, 2)
     if (hp <= 0) this.killEnemy(e); else e.setData('hp', hp)
-    // 命中闪白，给即时反馈
+    // 命中反馈：闪白 + 轻微缩放脉冲（比单纯变色更有"打到了"的实感）
+    const baseScale = (e.getData('baseScale') as number) || e.scaleX
+    e.setData('baseScale', baseScale)
     e.setTintFill(0xffffff)
-    this.time.delayedCall(55, () => { if (e.active) e.clearTint() })
+    e.setScale(baseScale * 1.15)
+    this.tweens.add({
+      targets: e,
+      scaleX: baseScale,
+      scaleY: baseScale,
+      duration: 110,
+      ease: 'Quad.easeOut',
+      onComplete: () => { if (e.active) e.clearTint() }
+    })
 
     let pierce = (b.getData('pierce') as number) || 0
     if (pierce > 0) b.setData('pierce', pierce - 1)
@@ -801,6 +843,10 @@ export class GameScene extends Phaser.Scene {
     this.spark(e.x, e.y, col, e.getData('isBoss') ? 12 : 5)
     if (e.getData('isBoss')) this.shake(320, 0.008)
     e.setActive(false).setVisible(false)
+    // 立刻清掉闪白，避免回收后残留到下一次出生
+    e.clearTint()
+    // 停掉可能仍在跑的受击缩放 tween，否则会和"下一次出生"的 scale 设置打架
+    this.tweens.killTweensOf(e)
     ;(e.body as Phaser.Physics.Arcade.Body).setVelocity(0, 0)
     this.kills += 1
     this.score += (e.getData('isBoss') ? 50 : 1)
