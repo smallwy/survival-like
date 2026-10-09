@@ -200,7 +200,7 @@ class CDP:
             "return JSON.stringify({hp:Math.round(s.hp),lv:s.level,kill:s.kills,"
             "t:+s.elapsed.toFixed(1),foe:es.length,"
             "kinds:c,beh:b,over:s.over,picks:s.upgradePicks||[],"
-            "started:!!s.started,"
+            "started:!!s.started,paused:!!s.paused,"
             "ch:s.chapter?s.chapter.index:0,chName:s.chapter?s.chapter.name:'',"
             "stg:s.stage?s.stage.index:0,stgName:s.stage?s.stage.name:'',"
             "obj:s.stage?s.stage.objective:'',prog:Math.round(s.objProgress||0),"
@@ -421,9 +421,24 @@ async def main():
             await c.key('keyUp', *KEYS['w'])
 
             # ---- 4. 施计谋 + 冷却环 ----
-            # 先按一下确认"立刻可用"，再等冷却，拍冷却环走到一半的样子。
+            # 先轮询等"未暂停+冷却清零"再按 Q，否则：
+            #   1) 升级面板开着时 paused=true，castStratagem 直接 return，没有特效；
+            #   2) 按在冷却期内也是空操作。
+            # 两种情况都会让 8-施计瞬间 和上帧逐字节相同，冒充"施法"。
+            # 若卡在开面板状态，就按 1 选第一张卡关面板，再继续等。
+            # 环在 0.2s 时扩张最明显（外环半径已约 190px），抓这一帧。
+            wait_deadline = time.time() + 36
+            while time.time() < wait_deadline:
+                st_r = await c.state()
+                if st_r.get('paused'):
+                    await tap(c, '1')
+                    await asyncio.sleep(0.25)
+                    continue
+                if st_r.get('stratReady'):
+                    break
+                await asyncio.sleep(0.5)
             await tap(c, 'q')
-            await asyncio.sleep(0.35)
+            await asyncio.sleep(0.2)
             await c.shot(os.path.join(OUT_DIR, '8-施计瞬间.png'))
             st_sg = await c.state()
             print('   施计后:', fmt(st_sg))

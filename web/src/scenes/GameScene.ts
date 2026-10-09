@@ -257,6 +257,7 @@ export class GameScene extends Phaser.Scene {
   private aimLock = 0               // 施法朝向锁剩余时间(ms)：开火期间朝向不被移动输入覆盖
   private walkAnimT = 0     // 走路帧动画计时(ms)
   private castAnim = 0      // 抬手施法/开火动作进度（1 -> 0）
+  private fxStopping = false // hitStop 防重入：顿帧进行中不叠加第二次
   private fireAngle = 0     // 最近一次施法方向
   private dustTimer = 0     // 走路扬尘计时
 
@@ -310,6 +311,10 @@ export class GameScene extends Phaser.Scene {
     this.hudObjs = []
     this.moving = false
     this.castAnim = 0
+    // 顿帧（hitStop）改写过 time/tweens 的 timeScale，重开必须复位，否则残留会拖慢整局
+    this.fxStopping = false
+    this.time.timeScale = 1
+    this.tweens.timeScale = 1
     this.upgradePicks = []
     this.aimLock = 0
     this.walkAnimT = 0
@@ -587,6 +592,14 @@ export class GameScene extends Phaser.Scene {
     rg.strokeEllipse(32, 14, 58, 24)
     rg.generateTexture('ring', 64, 28)
     rg.destroy()
+
+    // 圆形冲击环（命中/施法扩散用）。和地面指示用的椭圆 ring 区分开：
+    // 这里要的是"从一个点炸开的一圈"，必须正圆，tint 后可复用于火/冰/金/盾各色。
+    const crTex = this.make.graphics({ x: 0, y: 0 }, false)
+    crTex.lineStyle(4, 0xffffff, 1); crTex.strokeCircle(32, 32, 28)
+    crTex.lineStyle(2, 0xffffff, 0.55); crTex.strokeCircle(32, 32, 19)
+    crTex.generateTexture('cring', 64, 64)
+    crTex.destroy()
 
     // 落地阴影（单位脚下那块暗色椭圆）——用贴图而不是矢量椭圆，
     // 因为矢量图形是按屏幕分辨率抗锯齿的，和像素单位放一起会"脏"
@@ -1059,6 +1072,7 @@ export class GameScene extends Phaser.Scene {
         for (let i = 0; i < 4; i++) {
           this.time.delayedCall(i * 40, () => this.spark(x + Phaser.Math.Between(-16, 16), y + Phaser.Math.Between(-16, 16), 0xffe066, 2))
         }
+        this.impactRing(x, y, 0xffe066, 52)
         const kids = this.enemies.getChildren() as Phaser.Physics.Arcade.Image[]
         for (const e of kids) {
           if (!e.active) continue
@@ -1080,6 +1094,7 @@ export class GameScene extends Phaser.Scene {
     g.lineStyle(2, 0x9ad0ff, 0.9)
     for (let i = 0; i < kids.length - 1; i++) {
       g.lineBetween(kids[i].x, kids[i].y, kids[i + 1].x, kids[i + 1].y)
+      this.impactRing(kids[i].x, kids[i].y, 0x9ad0ff, 30, 160)
     }
     this.tweens.add({ targets: g, alpha: 0, duration: 900, onComplete: () => g.destroy() })
     for (const e of kids) {
@@ -1097,15 +1112,89 @@ export class GameScene extends Phaser.Scene {
     this.redFlash()
   }
 
-  /** 计谋释放的通用视觉：一圈扩散环 + 角色提亮，明确"这是你按出来的" */
-  private stratBurst() {
-    const ring = this.add.image(this.player.x, this.player.y, 'ring')
-      .setTint(0xffffff).setDepth(60)
+  /** 计谋类别 -> 主色。备战界面与施法特效共用同一套色，玩家进局前就记住"火=橙/冰=蓝/金=增益/青=守"。 */
+  private kindColor(kind: string): number {
+    switch (kind) {
+      case 'burst': return 0xff7b29
+      case 'control': return 0x6ec6ff
+      case 'buff': return 0xffd93d
+      case 'guard': return 0x4ecdc4
+      default: return 0xffffff
+    }
+  }
+
+  /**
+   * 命中冲击环：在命中点炸开一圈独立的扩散环（不染敌人、不放大敌人）。
+   * 这是"撞击感"的主来源 —— 过去敌人白闪被刻意压到 55ms/1.07 倍（修"敌人发白"的硬约束），
+   * 单靠它给不出"这一下发实了"的分量，所以另起一个独立光环来补重量。
+   * 用 window 的 cring 贴图 + ADD 混合，叠在深色地面上像一道能量回波。
+   */
+  private impactRing(x: number, y: number, color: number, maxR = 44, dur = 190) {
+    const r = this.add.image(x, y, 'cring')
+      .setTint(color).setBlendMode(Phaser.BlendModes.ADD)
+      .setDepth(58).setScale(0.3).setAlpha(0.95)
     this.tweens.add({
-      targets: ring, scale: 6, alpha: 0, duration: 420, ease: 'Quad.easeOut',
-      onComplete: () => ring.destroy()
+      targets: r, scale: maxR / 28, alpha: 0, duration: dur,
+      ease: 'Cubic.easeOut', onComplete: () => r.destroy()
     })
+  }
+
+  /**
+   * 命中顿帧（hit-stop）：极短暂地把 time/tweens 的 timeScale 压低，再真时复位。
+   * 这是动作游戏里"重量感"最便宜也最有效的手段 —— 那一瞬间全世界慢半拍，
+   * 玩家的眼睛会被钉在击中点上。只用在"大事"上（施法、击杀、受击、Boss 命中），
+   * 逐发子弹绝不调用，否则会变成全局慢动作。
+   * 用 window.setTimeout 做真时复位：time.timeScale 本身被压低后，Phaser 自家的
+   * delayedCall 也会跟着变慢，不能拿它来复位自己。
+   */
+  private hitStop(ms: number, slow = 0.12) {
+    if (this.fxStopping) return
+    this.fxStopping = true
+    this.time.timeScale = slow
+    this.tweens.timeScale = slow
+    window.setTimeout(() => {
+      this.time.timeScale = 1
+      this.tweens.timeScale = 1
+      this.fxStopping = false
+    }, ms)
+  }
+
+  /** 计谋释放的 spectacle：双重彩色冲击波 + 屏幕元素冲刷 + 主角符印放大闪光 + 震屏 + 顿帧。
+   *  明确"这一下是你主动按出来的大事件"，而不是普攻那种细碎的命中。 */
+  private stratBurst() {
+    const kind = this.stratagem ? this.stratagem.kind : ''
+    const color = this.kindColor(kind)
+    const x = this.player.x
+    const y = this.player.y
+
+    // 双重彩色冲击波：外环推得更远、内核更亮，层次拉开后"炸开"才读得出
+    for (const [scaleTo, dur, alp] of [[9, 540, 0.9], [5.5, 420, 0.65]] as [number, number, number][]) {
+      const r = this.add.image(x, y, 'cring').setTint(color)
+        .setBlendMode(Phaser.BlendModes.ADD).setDepth(62).setScale(0.25).setAlpha(alp)
+      this.tweens.add({
+        targets: r, scale: scaleTo, alpha: 0, duration: dur,
+        ease: 'Cubic.easeOut', onComplete: () => r.destroy()
+      })
+    }
+
+    // 屏幕元素冲刷：一层很淡的同色全屏闪，把"火/冰/金/盾"的气氛铺满视野
+    const wash = this.add.rectangle(0, 0, this.scale.width, this.scale.height, color, 0.2)
+      .setOrigin(0, 0).setScrollFactor(0).setDepth(85).setBlendMode(Phaser.BlendModes.ADD)
+    this.tweens.add({ targets: wash, alpha: 0, duration: 260, onComplete: () => wash.destroy() })
+
+    // 主角身上的放大符印闪光：把备战界面记住的那个图标，在发招瞬间"盖"到角色上
+    const gl = this.add.graphics().setDepth(63).setPosition(x, y)
+    this.drawStratGlyph(gl, kind, 0xffffff, 2.2)
+    gl.setBlendMode(Phaser.BlendModes.ADD).setScale(0.4).setAlpha(1)
+    this.tweens.add({
+      targets: gl, scale: 2.8, alpha: 0, duration: 440,
+      ease: 'Quad.easeOut', onComplete: () => gl.destroy()
+    })
+
+    // 发招分量的最后两块：角色提亮 + 一点震屏（计谋 20~30s 才放一次，震一下是"大事"不是"噪音"）
     this.heroImg.setAlpha(1)
+    this.shake(130, 0.0035)
+    this.hitStop(55, 0.1)
   }
 
   /** 受控的染色反馈（不覆盖贴图细节，与 hitFlash 的短暂白闪区分开） */
@@ -1475,6 +1564,7 @@ export class GameScene extends Phaser.Scene {
       this.time.delayedCall(130, () => g.destroy())
     }
     this.muzzleFlash(mz.x, mz.y, w.color, ang)
+    this.impactRing(ex, ey, w.color, 64)
     this.shake(80, 0.0022)
 
     const kids = this.enemies.getChildren() as Phaser.Physics.Arcade.Image[]
@@ -2122,6 +2212,7 @@ export class GameScene extends Phaser.Scene {
     const hp = ((e.getData('hp') as number) || 0) - dmg
     const col = (b.getData('col') as number) || 0xffe066
     this.spark(b.x, b.y, col, 2)
+    this.impactRing(b.x, b.y, col, 40)
     // 伤害飘字：打击感里性价比最高的一环。没有它，玩家只知道"在掉血"，
     // 不知道"这一发打了几分" —— 升级收益也就无从感知。
     // 现在它还要承担第二职责：**把兵种相克教给玩家**。克制时飘字放大并标"克"，
@@ -2164,6 +2255,7 @@ export class GameScene extends Phaser.Scene {
     const lab = this.damageLabel(mul)
     this.popDamage(e.x, e.y, dmg, lab?.text ?? '#8fd6ff', false, lab?.scale ?? 1, lab?.tag ?? '')
     this.spark(e.x, e.y, 0x4ecdc4, 2)
+    this.impactRing(e.x, e.y, 0x4ecdc4, 34)
     this.hitFlash(e)
     if (hp <= 0) this.killEnemy(e); else e.setData('hp', hp)
   }
@@ -2180,6 +2272,7 @@ export class GameScene extends Phaser.Scene {
     const dmg = ((e.getData('dmg') as number) || 0) * this.buffVuln
     this.hp -= dmg
     this.shake(160, 0.006)
+    this.hitStop(70, 0.1)  // 受击顿帧：被围住手忙脚乱时，"我挨打了"必须无条件可感知
     this.spark(this.player.x, this.player.y, 0xff6b6b, 4)
     this.popDamage(this.player.x, this.player.y - 12, dmg, '#ff6b6b')
     this.redFlash()
@@ -2231,8 +2324,11 @@ export class GameScene extends Phaser.Scene {
     // 死亡粒子：直接消失会让"击杀"毫无手感，炸成同色像素块才读得出"打爆了"
     this.deathBurst(e.x, e.y, col, isBoss ? 22 : 8)
     this.spark(e.x, e.y, col, isBoss ? 12 : 5)
+    // 击杀冲击环：比普通命中更大更亮，把"打爆"这件事故钉在画面上
+    this.impactRing(e.x, e.y, col, isBoss ? 100 : 56, isBoss ? 340 : 210)
     // 震屏只留在这里和受伤时 —— 逐发子弹震屏等于一直在抖
     this.shake(isBoss ? 340 : 70, isBoss ? 0.009 : 0.0016)
+    if (isBoss) this.hitStop(90, 0.06)  // Boss 倒下是主线唯一质变节点，顿一下才配得上
 
     e.setActive(false).setVisible(false)
     // 立刻清掉闪白，避免回收后残留到下一次出生

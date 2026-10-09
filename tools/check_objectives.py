@@ -255,7 +255,7 @@ async def main():
                          "n", 1, '火计：放出了火墙区域'),
                 'emptycity': ("s.stratagem={id:'emptycity',name:'空城计',quote:'',kind:'guard',cdSec:24};",
                               "return JSON.stringify({iv:Math.round(s.invuln)});",
-                              "iv", 2000, '空城计：给了无敌帧'),
+                              "iv", 1500, '空城计：给了大段无敌帧'),
                 'slowdown': ("s.stratagem={id:'slowdown',name:'缓兵计',quote:'',kind:'control',cdSec:24};",
                              "const es=s.enemies.getChildren().filter(e=>e.active);"
                              "return JSON.stringify({n:es.length,later:es.every(e=>s.slowUntil>s.elapsed)});",
