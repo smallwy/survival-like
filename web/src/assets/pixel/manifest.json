@@ -179,6 +179,42 @@
         ]
       }
     },
+    "foe_shield": {
+      "sheet": "foe_shield.png",
+      "upscale": 1,
+      "zoom": 1,
+      "cell": 32,
+      "bbox": [
+        3.0,
+        1.0,
+        29.0,
+        32.0
+      ],
+      "muzzle": {
+        "side": [
+          14.0,
+          3.0
+        ]
+      }
+    },
+    "foe_elite": {
+      "sheet": "foe_elite.png",
+      "upscale": 1,
+      "zoom": 1,
+      "cell": 32,
+      "bbox": [
+        7.0,
+        1.0,
+        28.0,
+        32.0
+      ],
+      "muzzle": {
+        "side": [
+          13.0,
+          3.0
+        ]
+      }
+    },
     "foe_boss_warlord": {
       "sheet": "foe_boss_warlord.png",
       "upscale": 2,
@@ -194,6 +230,60 @@
         "side": [
           14.0,
           3.0
+        ]
+      }
+    },
+    "foe_boss_yanliang": {
+      "sheet": "foe_boss_yanliang.png",
+      "upscale": 2,
+      "zoom": 2,
+      "cell": 64,
+      "bbox": [
+        5.0,
+        0.0,
+        29.0,
+        32.0
+      ],
+      "muzzle": {
+        "side": [
+          14.0,
+          3.0
+        ]
+      }
+    },
+    "foe_boss_caocao": {
+      "sheet": "foe_boss_caocao.png",
+      "upscale": 2,
+      "zoom": 2,
+      "cell": 64,
+      "bbox": [
+        4.0,
+        0.0,
+        29.0,
+        32.0
+      ],
+      "muzzle": {
+        "side": [
+          14.0,
+          3.0
+        ]
+      }
+    },
+    "foe_boss_ganning": {
+      "sheet": "foe_boss_ganning.png",
+      "upscale": 2,
+      "zoom": 2,
+      "cell": 64,
+      "bbox": [
+        9.0,
+        3.0,
+        27.0,
+        32.0
+      ],
+      "muzzle": {
+        "side": [
+          12.0,
+          2.0
         ]
       }
     },

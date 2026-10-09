@@ -57,16 +57,40 @@ func (s *Store) LoadGame(playerID string) (*Save, error) {
 }
 
 // Meta 是跨局成长（Roguelike meta-progression）的载体：
-// 记录解锁的武器/皮肤、累计击杀、最高分等。由后端按阈值权威解锁。
+// 记录解锁的武器/武将/计谋、主线通关进度、累计击杀、最高分等。由后端按阈值权威解锁。
+//
+// 为什么 UnlockedStrats / ClearedStages 必须放在服务端而不是 localStorage：
+// 主线是「通关本章 → 解锁下一章 + 本章奖励」的链式结构。这条链如果只活在浏览器内存里，
+// 换台设备（或用隐私窗口）打开就退回第一章，玩家会认为"存档丢了"。进度必须落服务端。
 type Meta struct {
 	PlayerID        string   `json:"playerId"`
 	UnlockedWeapons []string `json:"unlockedWeapons"`
 	UnlockedChars   []string `json:"unlockedChars"`
+	UnlockedStrats  []string `json:"unlockedStrats"`
+	ClearedStages   []string `json:"clearedStages"` // 形如 "c2s3"，只记通关的关
 	TotalKills      int      `json:"totalKills"`
 	BestScore       int      `json:"bestScore"`
 	Runs            int      `json:"runs"`
 	Souls           int      `json:"souls"` // 元货币，可后续做消费
 	Updated         int64    `json:"updated"`
+}
+
+// Normalize 把 nil 切片补成空切片。
+// 不补的话 encoding/json 会把 nil 序列化成 null，前端 `for (const x of m.clearedStages)`
+// 直接抛 TypeError —— 这类崩溃只在"新号第一次请求"时出现，本地测不出来。
+func (m *Meta) Normalize() {
+	if m.UnlockedWeapons == nil {
+		m.UnlockedWeapons = []string{}
+	}
+	if m.UnlockedChars == nil {
+		m.UnlockedChars = []string{}
+	}
+	if m.UnlockedStrats == nil {
+		m.UnlockedStrats = []string{}
+	}
+	if m.ClearedStages == nil {
+		m.ClearedStages = []string{}
+	}
 }
 
 func (s *Store) SaveMeta(m Meta) error {
@@ -87,6 +111,7 @@ func (s *Store) LoadMeta(playerID string) (*Meta, error) {
 	if err := json.Unmarshal(b, &m); err != nil {
 		return nil, err
 	}
+	m.Normalize()
 	return &m, nil
 }
 

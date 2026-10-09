@@ -71,6 +71,7 @@ func (h *Handler) GetMeta(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
+	m.Normalize()
 	writeJSON(w, m)
 }
 
@@ -82,10 +83,11 @@ func (h *Handler) ReportMeta(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Score         int  `json:"score"`
-		Kills         int  `json:"kills"`
-		TimeSurvived  int  `json:"timeSurvived"`
-		Won           bool `json:"won"`
+		Score        int    `json:"score"`
+		Kills        int    `json:"kills"`
+		TimeSurvived int    `json:"timeSurvived"`
+		Won          bool   `json:"won"`
+		Stage        string `json:"stage"` // 通关的关卡键（"c2s3"）；未通关传空串
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "bad body", http.StatusBadRequest)
@@ -100,8 +102,16 @@ func (h *Handler) ReportMeta(w http.ResponseWriter, r *http.Request) {
 		// 实测单手枪 DPS 26.7，刷怪速率一旦超过它，玩家就只会越堆越多直到被围死，
 		// 跑出"39 秒阵亡、14 只怪围着你"的曲线。两把武器（合计 69.6 dps）才让
 		// 「打怪 → 升级 → 变强」这个正循环转起来。
-		m = &store.Meta{PlayerID: pid, UnlockedWeapons: []string{"bow", "crossbow"}, UnlockedChars: []string{"rookie"}}
+		m = &store.Meta{
+			PlayerID:        pid,
+			UnlockedWeapons: []string{"bow", "crossbow"},
+			UnlockedChars:   []string{"rookie"},
+			// 计谋默认给一个：否则第一章里"计谋"这条支柱对玩家完全不可见，
+			// 要等通关第一章才知道游戏有主动技能 —— 教学成本太高。
+			UnlockedStrats: []string{"slowdown"},
+		}
 	}
+	m.Normalize()
 
 	before := map[string]bool{}
 	for _, id := range allIDs(m) {
@@ -114,6 +124,9 @@ func (h *Handler) ReportMeta(w http.ResponseWriter, r *http.Request) {
 	}
 	m.Runs += 1
 	m.Souls += body.Score / 10
+	if body.Won && body.Stage != "" {
+		addUnique(&m.ClearedStages, body.Stage)
+	}
 	grantUnlocks(m)
 	m.Updated = time.Now().Unix()
 
@@ -130,7 +143,15 @@ func (h *Handler) ReportMeta(w http.ResponseWriter, r *http.Request) {
 			now = append(now, id)
 		}
 	}
-	writeJSON(w, map[string]any{"meta": m, "unlockedNow": now})
+
+	// 响应必须**扁平**：GET /api/meta 返回的就是一个 Meta 对象，
+	// 两个接口形状一致，前端才不用记两套字段路径。
+	// 先把 Meta 编成 JSON 再解回 map，这样以后给 Meta 加字段不会漏改这里。
+	b, _ := json.Marshal(m)
+	var out map[string]any
+	_ = json.Unmarshal(b, &out)
+	out["unlockedNow"] = now
+	writeJSON(w, out)
 }
 
 // PostScore 提交一条排行榜成绩。
@@ -160,45 +181,84 @@ func (h *Handler) Leaderboard(w http.ResponseWriter, r *http.Request) {
 func allIDs(m *store.Meta) []string {
 	out := append([]string{}, m.UnlockedWeapons...)
 	out = append(out, m.UnlockedChars...)
+	out = append(out, m.UnlockedStrats...)
 	return out
 }
 
-// grantUnlocks 按累计统计阈值权威解锁武器与皮肤。
-func grantUnlocks(m *store.Meta) {
-	add := func(slice *[]string, id string) {
-		for _, x := range *slice {
-			if x == id {
-				return
-			}
+func addUnique(slice *[]string, id string) {
+	for _, x := range *slice {
+		if x == id {
+			return
 		}
-		*slice = append(*slice, id)
 	}
+	*slice = append(*slice, id)
+}
+
+// 章节奖励表 —— 与前端 web/src/config/gameData.ts 的 CAMPAIGN[].reward 一一对应。
+//
+// 这份表在 Go 侧是**故意重复**的：解锁必须由服务端权威判定，
+// 否则改一下浏览器内存就能白嫖全解锁。重复的代价用守卫脚本兜住 ——
+// tools/check_facing_applied.mjs 会交叉比对两边，漂移就报错。
+//
+// 键是该章**最后一关**的关卡键（第三关），因为奖励挂在「通关本章」上。
+var chapterRewards = map[string][]string{
+	"c1s3": {"strat_fire"},
+	"c2s3": {"caltrop", "strat_ambush"},
+	"c3s3": {"zhangfei", "strat_emptycity"},
+	"c4s3": {"heavybow", "strat_chain"},
+	"c5s3": {"zhaoyun", "strat_laststand"},
+	"c6s3": {"guandao"},
+}
+
+// 武将 id 白名单：奖励串里除了武器就是武将，靠这个把 id 派发到正确的切片。
+var charIDs = map[string]bool{"rookie": true, "guanyu": true, "zhangfei": true, "zhaoyun": true}
+
+// grantUnlocks 按累计统计阈值 + 主线通关进度权威解锁武器 / 武将 / 计谋。
+func grantUnlocks(m *store.Meta) {
+	// 累计门槛（老机制，保留）
 	if m.BestScore >= 150 {
-		add(&m.UnlockedWeapons, "caltrop")
+		addUnique(&m.UnlockedWeapons, "caltrop")
 	}
 	if m.TotalKills >= 150 {
-		add(&m.UnlockedWeapons, "crossbow")
+		addUnique(&m.UnlockedWeapons, "crossbow")
 	}
 	if m.BestScore >= 600 {
-		add(&m.UnlockedWeapons, "heavybow")
+		addUnique(&m.UnlockedWeapons, "heavybow")
 	}
 	if m.TotalKills >= 400 {
-		add(&m.UnlockedWeapons, "knives")
+		addUnique(&m.UnlockedWeapons, "knives")
 	}
 	if m.BestScore >= 1200 {
-		add(&m.UnlockedWeapons, "guandao")
+		addUnique(&m.UnlockedWeapons, "guandao")
 	}
 	if m.TotalKills >= 800 {
-		add(&m.UnlockedWeapons, "snake")
+		addUnique(&m.UnlockedWeapons, "snake")
 	}
 	if m.BestScore >= 800 {
-		add(&m.UnlockedChars, "guanyu")
+		addUnique(&m.UnlockedChars, "guanyu")
 	}
 	if m.BestScore >= 2000 {
-		add(&m.UnlockedChars, "zhangfei")
+		addUnique(&m.UnlockedChars, "zhangfei")
 	}
 	if m.BestScore >= 4000 {
-		add(&m.UnlockedChars, "zhaoyun")
+		addUnique(&m.UnlockedChars, "zhaoyun")
+	}
+
+	// 主线奖励：只认已经通关的关卡，玩家谎报 stage 也没用 ——
+	// 因为他必须先真的把那一关打过去才会有对应的 clearedStages 记录。
+	// （这一条挡不住主动构造请求的人，但挡住"改前端常量"就够了；真要做强校验
+	//   需要在关卡开始时下发服务端签发的 nonce，那属于下一步的事。）
+	for _, st := range m.ClearedStages {
+		for _, id := range chapterRewards[st] {
+			switch {
+			case len(id) > 6 && id[:6] == "strat_":
+				addUnique(&m.UnlockedStrats, id)
+			case charIDs[id]:
+				addUnique(&m.UnlockedChars, id)
+			default:
+				addUnique(&m.UnlockedWeapons, id)
+			}
+		}
 	}
 }
 

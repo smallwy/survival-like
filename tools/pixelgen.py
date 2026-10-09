@@ -184,11 +184,34 @@ FOES = {
     'shooter':      dict(kind='foe', weapon='bow', build='slim', upscale=1,
                          top='#a55eea', skin='#a55eea', horn=False,
                          third_eye=True, trim='#d9b8ff'),
+    # 盾卫：鱼鳞阵 / 方圆阵的前排。大盾 + 重甲，剪影是"一堵会走的墙"。
+    # 这是"兵种"第一次真的长出职能 —— 它站在阵型最前面，是玩家必须先破的那一环。
+    'shield':       dict(kind='foe', weapon='blade', build='wide', upscale=1,
+                         top='#8fa8c8', skin='#8fa8c8', horn=False,
+                         shield=True, shield_col='#aab8cc',
+                         shoulder='#4a5568', trim='#c8d4e4'),
+    # 骁将：精英侧翼。披风 + 长兵，比杂兵高一档，用于偃月阵的两翼。
+    'elite':        dict(kind='foe', weapon='spear', build='normal', upscale=1,
+                         top='#e05c9f', skin='#e05c9f', horn=False,
+                         shoulder='#7d2352', trim='#ffc2e0', cape='#5c1a3a'),
     # zoom：显示倍率（相对普通单位）。upscale 只管"画得精细些"，
     # 两者分开才不会出现"分辨率和体积一起翻倍"→ Boss 渲染成 256px 的荒唐结果。
     'boss_warlord': dict(kind='foe', weapon='blade', build='brute', upscale=2, zoom=2,
                          top='#9b59b6', skin='#9b59b6', horn=True,
                          shoulder='#4a2a63', trim='#e0c3ff', cape='#33193f'),
+    # 河北 · 颜良：袁绍麾下大将，偃月大刀，紫黑重甲（wide 体型 = 横里更宽）
+    'boss_yanliang': dict(kind='foe', weapon='guandao', build='wide', upscale=2, zoom=2,
+                          top='#7f5af0', skin='#7f5af0', horn=True,
+                          shoulder='#3a2a7a', trim='#cbb8ff', cape='#241a52'),
+    # 魏 · 曹操：金甲长枪，最厚重的一档（brute）
+    'boss_caocao':  dict(kind='foe', weapon='spear', build='brute', upscale=2, zoom=2,
+                         top='#c9a227', skin='#c9a227', horn=True,
+                         shoulder='#6b5310', trim='#ffe9a8', cape='#3a2c08'),
+    # 吴 · 甘宁：锦帆贼，瘦高 + 背刺，唯一一个"机动型 Boss"，
+    # 剪影和三个重甲 Boss 完全分得开
+    'boss_ganning': dict(kind='foe', weapon='blade', build='wisp', upscale=2, zoom=2,
+                         top='#e8613c', skin='#e8613c', horn=False, spikes=5,
+                         shoulder='#8a2f18', trim='#ffd0b8', cape='#4a1508'),
     'boss_tyrant':  dict(kind='foe', weapon='guandao', build='brute', upscale=2, zoom=2,
                          top='#ee5253', skin='#ee5253', horn=True,
                          shoulder='#7d2323', trim='#ffd0cd', cape='#45161a'),
@@ -467,6 +490,20 @@ def draw_marks(g, spec, b, cx, dy, d, tx, ty, w, th):
     if spec.get('third_eye') and d == 'down':
         g.r(cx - 2, b['hy0'] + dy + 4, 4, 3, C('#33204a'))
         g.r(cx - 1, b['hy0'] + dy + 5, 2, 1, C('#ff6bff'))
+
+    # 大盾：鱼鳞阵/方圆阵的前排招牌。
+    # 盾牌把单位横向再撑出 5px，剪影从"一个人"变成"一堵会走的墙" ——
+    # 这正是玩家在混乱里判断"哪边推不动"的依据。
+    if spec.get('shield'):
+        col = spec.get('shield_col') or '#9aa8bd'
+        if d == 'up':
+            # 背面：只看到盾沿和背带
+            g.r(tx - 1, ty - 2, w + 2, th + 4, mix(col, 0.72))
+        else:
+            g.r(tx - 5, ty - 2, 7, th + 4, C(col))          # 盾面
+            g.r(tx - 5, ty - 2, 7, 2, mix(col, 1.28))       # 上沿高光
+            g.r(tx - 5, ty + th, 7, 2, mix(col, 0.70))      # 下沿压暗
+            g.r(tx - 3, ty + 2, 3, 3, mix(col, 0.66))       # 盾心铆钉
 
 
 def draw_cape(g, spec, b, cx, dy, d, tx, ty, w, th):

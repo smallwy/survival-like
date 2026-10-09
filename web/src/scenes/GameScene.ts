@@ -1,8 +1,12 @@
 import Phaser from 'phaser'
 import {
-  WEAPONS, ENEMIES, UPGRADES, WAVE_STAGES, BOSS_SCHEDULE, CHARS, META_NAMES,
-  BALANCE, ARMOR_NAMES, WeaponDef, EnemyDef, CharDef, Armor,
-  enemyById, weaponById, charById
+  WEAPONS, ENEMIES, UPGRADES, WAVE_RAMP, CHARS,
+  FACTIONS, FORMATIONS, STRATAGEMS, CAMPAIGN, META_NAMES,
+  BALANCE, ARMOR_NAMES, ROLE_NAMES,
+  WeaponDef, EnemyDef, CharDef, Armor, ArmyRole,
+  FactionDef, FormationDef, StratagemDef, ChapterDef, StageDef,
+  enemyById, weaponById, charById,
+  factionById, formationById, stratagemById, chapterById, stageKey
 } from '../config/gameData'
 // 立绘只用于「静态展示」场合：HUD 头像、选人卡片。
 // 它们是静态展示品，不含动作信息 —— 放在游戏内当活动单位就只能靠程序变形去猜，
@@ -23,7 +27,12 @@ import pxFoeRunner from '../assets/pixel/foe_runner.png'
 import pxFoeTank from '../assets/pixel/foe_tank.png'
 import pxFoeSwarm from '../assets/pixel/foe_swarm.png'
 import pxFoeShooter from '../assets/pixel/foe_shooter.png'
+import pxFoeShield from '../assets/pixel/foe_shield.png'
+import pxFoeElite from '../assets/pixel/foe_elite.png'
 import pxFoeBossWarlord from '../assets/pixel/foe_boss_warlord.png'
+import pxFoeBossYanliang from '../assets/pixel/foe_boss_yanliang.png'
+import pxFoeBossCaocao from '../assets/pixel/foe_boss_caocao.png'
+import pxFoeBossGanning from '../assets/pixel/foe_boss_ganning.png'
 import pxFoeBossTyrant from '../assets/pixel/foe_boss_tyrant.png'
 
 // ---------------------------------------------------------------------------
@@ -37,6 +46,10 @@ const PX_DIRS = ['down', 'up', 'side'] as const
 const PX_ACTS = ['idle', 'walk', 'attack'] as const
 const PX_COLS = 4
 const PX_SCALE = 2 // 逻辑像素 -> 屏幕像素（整数倍，像素块才锐利）
+
+/** 右上角关卡目标进度条的宽度（逻辑像素，实际再乘 hudK）。
+ *  必须窄于「画布宽 - 左侧武将面板宽」，否则会压到面板上。 */
+const OBJ_BAR_W = 200
 
 type PxDir = typeof PX_DIRS[number]
 type PxAct = typeof PX_ACTS[number]
@@ -93,7 +106,12 @@ const PX_SHEETS: Record<string, string> = {
   foe_tank: pxFoeTank,
   foe_swarm: pxFoeSwarm,
   foe_shooter: pxFoeShooter,
+  foe_shield: pxFoeShield,
+  foe_elite: pxFoeElite,
   foe_boss_warlord: pxFoeBossWarlord,
+  foe_boss_yanliang: pxFoeBossYanliang,
+  foe_boss_caocao: pxFoeBossCaocao,
+  foe_boss_ganning: pxFoeBossGanning,
   foe_boss_tyrant: pxFoeBossTyrant
 }
 
@@ -141,15 +159,53 @@ export class GameScene extends Phaser.Scene {
   private spawnAccum = 0
   private orbitAngle = 0
   private bossesSpawned = new Set<string>()
-  /** 当前波次阶段下标。初值 -1 是为了让第 0 阶段（开场敌潮）也播报一次，
+  /** 当前波次强度阶段下标（WAVE_RAMP）。初值 -1 是为了让第 0 阶段（开场敌潮）也播报一次，
    *  否则玩家永远听不到「黄巾力士是轻甲、短弓可克」这条最关键的入门提示。 */
-  private stageIdx = -1
+  private waveIdx = -1
   private eidSeq = 0
   /** 受击无敌剩余时间（ms）。见 tickInvuln 的说明 —— 这是本作唯一一条
    *  能把「被围住」从必死改成可操作的保护机制。 */
   private invuln = 0
   /** 当前升级面板抽到的 3 个选项 id。仅供自动化测试读取，不参与游戏逻辑。 */
   private upgradePicks: string[] = []
+
+  // ---------------- 战役（章节 / 关卡 / 目标） ----------------
+  // 主线的三层结构：章 = 一个势力 + 阵型池 + Boss + 色调；关 = 章节内的三种强度与目标。
+  private chapter: ChapterDef = CAMPAIGN[0]
+  private stage: StageDef = CAMPAIGN[0].stages[0]
+  private faction: FactionDef = FACTIONS[0]
+  /** 已通关的关卡键（形如 "c2s3"）。跨局持久化，决定章节解锁。 */
+  private cleared = new Set<string>()
+  /** 本关目标是否已达成（kill 关 = 击杀达标；boss 关 = 击杀 Boss） */
+  private objDone = false
+  private objProgress = 0
+  private objLabel = ''
+  private objText!: Phaser.GameObjects.Text
+  private objBar!: Phaser.GameObjects.Graphics
+  /** 章节色调叠加层：零美术成本制造"这一章不一样"的直觉 */
+  private chapterTint!: Phaser.GameObjects.Rectangle
+  /** 本关是否已判负（超时未达成目标） */
+  private objFailed = false
+  /** boss 关：Boss 是否已被击杀 */
+  private bossDown = false
+
+  // ---------------- 计谋（玩家唯一的主动操作） ----------------
+  private stratagem: StratagemDef | null = null
+  private unlockedS = new Set<string>()
+  /** 计谋冷却剩余（ms） */
+  private stratCd = 0
+  private stratText!: Phaser.GameObjects.Text
+  private stratIcon!: Phaser.GameObjects.Graphics
+  private stratRing!: Phaser.GameObjects.Graphics
+  private stratReady = 0
+  /** 背水一战：临时攻击倍率 / 受伤倍率 / 剩余时间 */
+  private buffDmg = 1
+  private buffVuln = 1
+  private buffT = 0
+  /** 缓兵计：全场减速截止时间（秒） */
+  private slowUntil = -1
+  /** 最近生成的阵型 id（仅供自动化测试读取，判断阵型是否真的生效） */
+  private formationLog: string[] = []
 
   private hpText!: Phaser.GameObjects.Text
   private lvText!: Phaser.GameObjects.Text
@@ -184,6 +240,10 @@ export class GameScene extends Phaser.Scene {
   private started = false
   private restarting = false
   private selectOverlay!: Phaser.GameObjects.Container | null
+  // 备战界面的选择状态（不随面板重建而丢失）
+  private prepIdx = 0
+  private prepChar: CharDef = CHARS[0]
+  private prepStrat = ''
 
   private bg!: Phaser.GameObjects.TileSprite
   private moving = false
@@ -256,9 +316,21 @@ export class GameScene extends Phaser.Scene {
     this.facing = 'down'
     this.faceRight = true
     this.bossesSpawned = new Set<string>()
-    this.stageIdx = -1
+    this.waveIdx = -1
     this.popStack = 0
     this.lastPopAt = 0
+    // 战役与计谋的局内状态（跨局数据如 cleared / unlockedS 在 loadMeta 里恢复，不在这里清）
+    this.objDone = false
+    this.objFailed = false
+    this.bossDown = false
+    this.objProgress = 0
+    this.stratCd = 0
+    this.stratReady = 0
+    this.buffDmg = 1
+    this.buffVuln = 1
+    this.buffT = 0
+    this.slowUntil = -1
+    this.formationLog = []
 
     this.pid = this.resolvePid()
     this.hp = this.maxHp = BALANCE.playerMaxHp
@@ -308,6 +380,12 @@ export class GameScene extends Phaser.Scene {
       .setScrollFactor(0).setDepth(85)
       .setDisplaySize(this.scale.width, this.scale.height)
 
+    // 章节色调：每章一色，低透明度铺满全屏。
+    // 这是**零美术成本**的视觉身份 —— 换一个色块，玩家立刻知道"这章不一样"。
+    // 深度放在暗角之下（84），这样它压不住暗角收拢视线的作用。
+    this.chapterTint = this.add.rectangle(cx, cy, this.scale.width, this.scale.height, this.chapter.tint, 0.22)
+      .setScrollFactor(0).setDepth(84).setBlendMode(Phaser.BlendModes.ADD)
+
     this.enemies = this.physics.add.group()
     this.bullets = this.physics.add.group()
     this.pickups = this.physics.add.group()
@@ -331,6 +409,10 @@ export class GameScene extends Phaser.Scene {
       this.rebuildHud()
       this.toast(`界面大小：${HUD_LABELS[this.hudTier]}`)
     })
+    // Q / E：释放计谋。这是玩家除走位外的**第二个决策点** ——
+    // 所以按键必须好按（左手不用离开移动键），且两个键都认（不同人的习惯不同）。
+    this.input.keyboard!.on('keydown-Q', () => this.castStratagem())
+    this.input.keyboard!.on('keydown-E', () => this.castStratagem())
     this.scale.on('resize', this.layout, this)
     this.buildHud()
     this.loadMeta()
@@ -342,8 +424,40 @@ export class GameScene extends Phaser.Scene {
     const h = this.scale.height
     this.bg.setPosition(w / 2, h / 2).setSize(w, h)
     this.vig.setPosition(w / 2, h / 2).setDisplaySize(w, h)
+    if (this.chapterTint) {
+      this.chapterTint.setPosition(w / 2, h / 2).setSize(w, h)
+    }
     this.placeTimePanel()
+    this.placeObjective()
+    this.placeStratSlot()
     if (this.hintText) this.hintText.setPosition(10, h - 22)
+  }
+
+  /** 顶部中央的目标条：本关"要干什么"必须常驻可见，否则玩家只是在无目的挨打 */
+  private placeObjective() {
+    if (!this.objText) return
+    const k = this.hudK
+    const w = this.scale.width
+    const right = w - Math.round(12 * k)
+    this.objText.setPosition(right, Math.round(58 * k))
+    // 进度条也是右对齐：右端与文字、与上面的时间块对齐成一条线。
+    // 注意 bar 是从 **负 x 画到 0**（refreshObjective 里 `fillRect(-W, 0, W, H)`），
+    // 所以这里要放"右端"，不是"左端" —— 写成 `right - OBJ_BAR_W * k` 会让它
+    // 整体左移一个条宽，右端对不齐。
+    this.objBar.setPosition(right, Math.round(96 * k))
+  }
+
+  /** 右下角计谋槽：图标 + 环形冷却 + 就绪脉冲，位置随窗口走 */
+  private placeStratSlot() {
+    if (!this.stratIcon) return
+    const k = this.hudK
+    const w = this.scale.width
+    const h = this.scale.height
+    const cx = w - Math.round(58 * k)
+    const cy = h - Math.round(58 * k)
+    this.stratIcon.setPosition(cx, cy)
+    this.stratText.setPosition(cx, cy + Math.round(36 * k))
+    this.stratRing.setPosition(cx, cy)
   }
 
   /** 屏幕右上角的时间块：带底衬，否则会被走到角落的敌人盖住看不清 */
@@ -603,13 +717,36 @@ export class GameScene extends Phaser.Scene {
       fontSize: fs(22), color: '#ffffff', stroke: '#000000', strokeThickness: 3
     }).setOrigin(0.5, 0.5).setScrollFactor(0).setDepth(D + 2))
 
+    // ---- 右上角（时间块下方）：本关目标 ----
+    // 幸存者类的默认体验是"无目的地挨打"，主线必须把"这一关要干什么"钉在屏幕上。
+    //
+    // **为什么放右上而不是顶部居中**：左上角是武将面板（宽约 380px），
+    // 顶部居中的目标条实测会**压在面板上**（目标文字左端 297px < 面板右边界 390px），
+    // 两段文字叠在一起谁都看不清。右上角时间块正下方是唯一一块常年空着的区域，
+    // 而且"关卡目标"和"本局计时"本来就该挨着读。
+    this.objText = reg(this.add.text(0, 0, '', {
+      fontSize: fs(15), color: '#ffe066', stroke: '#000000', strokeThickness: 3,
+      align: 'right', lineSpacing: 4
+    }).setOrigin(1, 0).setScrollFactor(0).setDepth(D + 2))
+    this.objBar = reg(this.add.graphics().setScrollFactor(0).setDepth(D + 2))
+
+    // ---- 右下角：计谋槽 ----
+    // 玩家唯一的主动操作，必须常驻且冷却状态一眼可读（环形指示比数字快）。
+    this.stratIcon = reg(this.add.graphics().setScrollFactor(0).setDepth(D + 2))
+    this.stratRing = reg(this.add.graphics().setScrollFactor(0).setDepth(D + 3))
+    this.stratText = reg(this.add.text(0, 0, '', {
+      fontSize: fs(12), color: '#dbe4f0', stroke: '#000000', strokeThickness: 2
+    }).setOrigin(0.5, 0).setScrollFactor(0).setDepth(D + 3))
+
     // ---- 底部操作提示 ----
     this.hintText = reg(this.add.text(10, this.scale.height - 22,
-      'WASD / 方向键 移动　·　攻击自动瞄准最近敌人　·　F 切换界面大小', {
+      'WASD / 方向键 移动　·　攻击自动瞄准最近敌人　·　Q / E 施计谋　·　F 切换界面大小', {
         fontSize: fs(12), color: '#8f9bb0'
       }).setScrollFactor(0).setDepth(D))
 
     this.placeTimePanel()
+    this.placeObjective()
+    this.placeStratSlot()
     this.refreshHud()
   }
 
@@ -648,12 +785,139 @@ export class GameScene extends Phaser.Scene {
     this.expBar.clear()
     this.expBar.fillStyle(0x000000, 0.5).fillRect(bx, exY, bw, exH)
     this.expBar.fillStyle(0x4ecdc4, 1).fillRect(bx + 1, exY + 1, Math.max(0, (bw - 2) * exPct), exH - 2)
+
+    this.refreshObjective()
+    this.refreshStratSlot()
+  }
+
+  /** 顶部目标条：文字 + 进度 + 剩余时间，三者缺一玩家就不知道"还有多久" */
+  private refreshObjective() {
+    const k = this.hudK
+    if (!this.objText) return
+    const mm = Math.floor(this.elapsed / 60)
+    const ss = String(Math.floor(this.elapsed % 60)).padStart(2, '0')
+    const left = Math.max(0, this.stage.durationSec - this.elapsed)
+    const lm = Math.floor(left / 60)
+    const ls = String(Math.floor(left % 60)).padStart(2, '0')
+    const tag = this.objDone ? '　✓ 已达成' : this.objFailed ? '　✗ 未达成' : ''
+    // 上一版写的是 `0:24 / 3:35`，两个数字一个是"已过"一个是"剩余"却用了同一个
+    // 斜杠分隔 —— 玩家会读成"0:24 除以 3:35"，完全不知道 3:35 是什么。
+    // 改成明确标注「已 / 余」，剩多少一眼可读。
+    this.objText.setText(
+      `第${this.chapter.index}章 ${this.chapter.name} · ${this.stage.name}${tag}\n`
+      + `${this.objLabel}　已 ${mm}:${ss} · 余 ${lm}:${ls}`)
+    this.objText.setColor(this.objDone ? '#8ff0a4' : this.objFailed ? '#ff8f8f' : '#ffe066')
+
+    const W = Math.round(OBJ_BAR_W * k)
+    const H = Math.round(8 * k)
+    const x = -W
+    this.objBar.clear()
+    this.objBar.fillStyle(0x000000, 0.55).fillRect(x, 0, W, H)
+    this.objBar.fillStyle(this.objDone ? 0x6bcb77 : 0xffd93d, 1)
+      .fillRect(x + 1, 1, Math.max(0, (W - 2) * this.objProgress), H - 2)
+    this.objBar.lineStyle(1, 0xffffff, 0.22).strokeRect(x, 0, W, H)
+
+    // 把实际绘制的矩形记下来，供自动化布局自检读取。
+    // Graphics 没有 getBounds()（实测 TypeError），而"目标条有没有压在武将面板上"
+    // 这个断言必须能量到真实像素，否则只能靠人眼在截图里找 —— 那就等于没验。
+    this.objBar.setData('rect', {
+      l: this.objBar.x - W, t: this.objBar.y, w: W, h: H
+    })
+  }
+
+  /**
+   * 计谋槽：图标 + 环形冷却。
+   *
+   * 用**环形**而不是数字倒计时：环形是"还剩多少"的空间直觉，一眼可读；
+   * 数字要停下来看。就绪时方框整体脉冲一次，提醒"你现在有一个按钮可按"。
+   */
+  private refreshStratSlot() {
+    const k = this.hudK
+    if (!this.stratIcon || !this.stratText) return
+    const r = Math.round(30 * k)
+    const g = this.stratIcon
+    g.clear()
+    const ready = this.stratCd <= 0
+    // 就绪脉冲：0~1 的呼吸，配合下方的 ready 窗口
+    const pulse = this.stratReady > 0 ? 0.5 + 0.5 * Math.sin(this.time.now / 90) : 0
+    g.fillStyle(0x05050c, 0.78).fillRect(-r, -r, r * 2, r * 2)
+    g.lineStyle(2, ready ? 0xffd93d : 0x3b6f6b, 1).strokeRect(-r, -r, r * 2, r * 2)
+    if (pulse > 0) {
+      g.lineStyle(3, 0xffffff, pulse * 0.8).strokeRect(-r - 4, -r - 4, (r + 4) * 2, (r + 4) * 2)
+    }
+    this.drawStratGlyph(g, this.stratagem ? this.stratagem.kind : '', ready ? 0xffd93d : 0x4a5a70, k)
+
+    this.stratText.setText(this.stratagem
+      ? `${this.stratagem.name} ${ready ? '[Q]' : Math.ceil(this.stratCd / 1000) + 's'}`
+      : '无计谋')
+
+    const ring = this.stratRing
+    ring.clear()
+    if (!ready && this.stratagem) {
+      const pct = 1 - this.stratCd / (this.stratagem.cdSec * 1000)
+      // 顺时针扫过的弧 = 已恢复的进度
+      ring.lineStyle(Math.round(4 * k), 0x4ecdc4, 0.9)
+      ring.beginPath()
+      ring.arc(0, 0, Math.round(36 * k), -Math.PI / 2, -Math.PI / 2 + pct * Math.PI * 2, false)
+      ring.strokePath()
+    }
+  }
+
+  /**
+   * 计谋图标：按**类别**画不同形状，零贴图成本。
+   *
+   * 上一版六个计谋共用同一个「＋」十字。十字在玩家的肌肉记忆里是"加血/新增"，
+   * 跟火计、缓兵计毫无关系 —— 图标看不懂就等于没有图标，玩家只能去读下面那行小字。
+   * 现在：火苗（爆发）/ 雪花（控制）/ 上箭（增益）/ 盾形（格挡）。
+   *
+   * 第一版还踩了一个"形状本身有歧义"的坑：火苗画成「三角 + 一个柄」，
+   * 结果和"上箭"（三角 + 柄）**一模一样**，一眼分不出是打伤害还是加属性；
+   * 盾形用 6 点六边形，在 16px 下看着像菱形。
+   * 现在火苗改成**上尖下圆的水滴**（没有柄），盾形改成**平顶 + 下尖**的经典盾轮廓。
+   */
+  private drawStratGlyph(g: Phaser.GameObjects.Graphics, kind: string, color: number, k: number) {
+    const s = (v: number) => Math.round(v * k)
+    const P = (x: number, y: number) => new Phaser.Geom.Point(s(x), s(y))
+    g.fillStyle(color, 1)
+    switch (kind) {
+      case 'burst':
+        // 火苗：上尖下圆的水滴，**不带柄** —— 带了柄就变成"上箭"了
+        g.fillPoints([
+          P(0, -12), P(6, -2), P(6, 3), P(0, 8), P(-6, 3), P(-6, -2)
+        ], true)
+        break
+      case 'control':
+        // 雪花：三根交叉的针 —— "慢下来"的直觉
+        g.lineStyle(Math.max(2, s(2.5)), color, 1)
+        for (let i = 0; i < 3; i++) {
+          const a = (i * Math.PI) / 3
+          g.lineBetween(-Math.sin(a) * s(11), -Math.cos(a) * s(11),
+            Math.sin(a) * s(11), Math.cos(a) * s(11))
+        }
+        break
+      case 'buff':
+        // 上箭头：平底三角 + 短柄 —— 明确的"提升"
+        g.fillTriangle(0, s(-11), s(9), s(-1), s(-9), s(-1))
+        g.fillRect(s(-3), s(-1), s(6), s(10))
+        break
+      case 'guard':
+        // 盾形：平顶 + 两侧内收 + 下尖，经典盾轮廓（六边形会看成菱形）
+        g.fillPoints([
+          P(-9, -10), P(9, -10), P(9, 0), P(0, 11), P(-9, 0)
+        ], true)
+        break
+      default:
+        // 无计谋：留一个斜杠，表示"这里本该有东西"
+        g.lineStyle(Math.max(2, s(2)), color, 1)
+        g.lineBetween(s(-8), s(8), s(8), s(-8))
+    }
   }
 
   update(_t: number, delta: number) {
     if (!this.started || this.over || this.paused) return
     this.elapsed += delta / 1000
     this.tickInvuln(delta)
+    this.tickStratagem(delta)
     this.handleMove()
     this.animatePlayer(delta)
     this.tickWeapons(delta)
@@ -663,10 +927,223 @@ export class GameScene extends Phaser.Scene {
     this.driveEnemyBullets()
     this.drivePickups()
     this.refreshHud()
-    if (this.elapsed >= BALANCE.runMinutes * 60) this.gameOver(true)
+    this.tickObjective()
 
     this.bg.tilePositionX = this.cameras.main.scrollX
     this.bg.tilePositionY = this.cameras.main.scrollY
+  }
+
+  // ==========================================================================
+  // 计谋：玩家唯一的主动操作
+  // ==========================================================================
+  /**
+   * 计谋冷却与增益计时。
+   *
+   * 三个计时器合在一处：
+   *  - stratCd：技能冷却（HUD 的环形指示靠它）
+   *  - buffT：背水一战的持续时间（到点要把攻击/受伤倍率还原，否则会永久生效）
+   *  - slowUntil：缓兵计的减速窗口（用绝对时间戳而不是倒计时，
+   *    这样每次敌人被驱动时只需比较一次，不必逐只维护计时器）
+   */
+  private tickStratagem(delta: number) {
+    if (this.stratCd > 0) {
+      this.stratCd = Math.max(0, this.stratCd - delta)
+      if (this.stratCd === 0) {
+        this.stratReady = 600
+        this.toast(`计谋就绪：${this.stratagem?.name ?? ''}`)
+      }
+    }
+    if (this.stratReady > 0) this.stratReady = Math.max(0, this.stratReady - delta)
+    if (this.buffT > 0) {
+      this.buffT -= delta
+      if (this.buffT <= 0) {
+        this.buffT = 0
+        this.buffDmg = 1
+        this.buffVuln = 1
+      }
+    }
+  }
+
+  /**
+   * 释放计谋。
+   *
+   * 设计约束（见 docs/核心玩法与主线规划.md §1.4）：
+   *   1. **不打断自动攻击** —— 它只是"再按一个键"，不是重构操作；
+   *   2. **必须改变战局**，所以每个计谋都要创造一个可感知的场面变化；
+   *   3. 冷却 20~30 秒 —— 一局能用十几次，够用但每次都要想。
+   */
+  private castStratagem() {
+    if (!this.started || this.over || this.paused) return
+    if (!this.stratagem || this.stratCd > 0) return
+    const s = this.stratagem
+    this.stratCd = s.cdSec * 1000
+    this.stratReady = 0
+    // 释放的视觉：一次不震屏的白色脉冲 + 一圈扩散环，强调"这是你按的"
+    this.stratBurst()
+    switch (s.id) {
+      case 'fire': this.stratFire(); break
+      case 'emptycity': this.stratEmptyCity(); break
+      case 'slowdown': this.stratSlowdown(); break
+      case 'ambush': this.stratAmbush(); break
+      case 'chain': this.stratChain(); break
+      case 'laststand': this.stratLastStand(); break
+    }
+    this.toast(`${s.name} · ${s.quote}`)
+  }
+
+  /** 火计：身前放出三道火墙，持续灼烧 4 秒 —— 用来把合围的阵型烧开一条口子 */
+  private stratFire() {
+    const base = Math.atan2(this.moveVy || (this.facing === 'up' ? -1 : 1), this.moveVx || (this.facing === 'side' ? (this.faceRight ? 1 : -1) : 0))
+    for (let i = -1; i <= 1; i++) {
+      const a = base + i * 0.55
+      const x = this.player.x + Math.cos(a) * 78
+      const y = this.player.y + Math.sin(a) * 78
+      const z = this.add.zone(x, y, 70, 70)
+      this.physics.add.existing(z)
+      const g = this.add.graphics().setDepth(6)
+      const s = this.add.image(x, y, 'dot').setTint(0xff7b29).setDepth(5).setAlpha(0.5).setScale(4.2)
+      this.tweens.add({ targets: [s], alpha: 0.85, scale: 4.8, duration: 220, yoyo: true, repeat: 8 })
+      this.time.delayedCall(4000, () => { z.destroy(); g.destroy(); s.destroy() })
+      // 每 220ms 对区域内的敌人结算一次火伤
+      const tick = (n: number) => {
+        if (n <= 0 || !z.active) return
+        g.clear()
+        g.fillStyle(0xff7b29, 0.28).fillCircle(x, y, 34)
+        g.lineStyle(2, 0xffd166, 0.7).strokeCircle(x, y, 34)
+        const kids = this.enemies.getChildren() as Phaser.Physics.Arcade.Image[]
+        for (const e of kids) {
+          if (!e.active) continue
+          if (Phaser.Math.Distance.Between(e.x, e.y, x, y) > 40) continue
+          this.hurtEnemy(e, 9 * this.dmgScale * this.buffDmg, 0xff7b29, '#ff9f43')
+        }
+        this.time.delayedCall(220, () => tick(n - 1))
+      }
+      tick(18)
+    }
+  }
+
+  /** 空城计：2.5 秒无敌 + 全场击退 —— 被围死时的唯一解 */
+  private stratEmptyCity() {
+    this.invuln = Math.max(this.invuln, 2500)
+    const kids = this.enemies.getChildren() as Phaser.Physics.Arcade.Image[]
+    for (const e of kids) {
+      if (!e.active) continue
+      const a = Phaser.Math.Angle.Between(this.player.x, this.player.y, e.x, e.y)
+      e.setData('kbx', Math.cos(a) * 520)
+      e.setData('kby', Math.sin(a) * 520)
+      this.hitFlash(e)
+    }
+    this.shake(220, 0.004)
+  }
+
+  /** 缓兵计：全场减速 75% 持续 4 秒 —— 争取走位空间 */
+  private stratSlowdown() {
+    this.slowUntil = this.elapsed + 4
+    const kids = this.enemies.getChildren() as Phaser.Physics.Arcade.Image[]
+    for (const e of kids) {
+      if (!e.active) continue
+      this.tintFlash(e, 0x6ec6ff)
+    }
+  }
+
+  /** 十面埋伏：以自身为心 220 半径内落八波箭雨 —— 清场爆发 */
+  private stratAmbush() {
+    const R = 220
+    for (let n = 0; n < 8; n++) {
+      this.time.delayedCall(n * 190, () => {
+        if (this.over) return
+        const a = Math.random() * Math.PI * 2
+        const r = Math.random() * R
+        const x = this.player.x + Math.cos(a) * r
+        const y = this.player.y + Math.sin(a) * r
+        for (let i = 0; i < 4; i++) {
+          this.time.delayedCall(i * 40, () => this.spark(x + Phaser.Math.Between(-16, 16), y + Phaser.Math.Between(-16, 16), 0xffe066, 2))
+        }
+        const kids = this.enemies.getChildren() as Phaser.Physics.Arcade.Image[]
+        for (const e of kids) {
+          if (!e.active) continue
+          if (Phaser.Math.Distance.Between(e.x, e.y, x, y) > 52) continue
+          this.hurtEnemy(e, 26 * this.dmgScale * this.buffDmg, 0xffe066, '#ffe066')
+        }
+      })
+    }
+  }
+
+  /** 连环计：最近的十个敌人被铁索连起，共享一次重击 + 减速 */
+  private stratChain() {
+    const kids = (this.enemies.getChildren() as Phaser.Physics.Arcade.Image[])
+      .filter((e) => e.active)
+      .sort((a, b) => Phaser.Math.Distance.Between(a.x, a.y, this.player.x, this.player.y)
+        - Phaser.Math.Distance.Between(b.x, b.y, this.player.x, this.player.y))
+      .slice(0, 10)
+    const g = this.add.graphics().setDepth(8)
+    g.lineStyle(2, 0x9ad0ff, 0.9)
+    for (let i = 0; i < kids.length - 1; i++) {
+      g.lineBetween(kids[i].x, kids[i].y, kids[i + 1].x, kids[i + 1].y)
+    }
+    this.tweens.add({ targets: g, alpha: 0, duration: 900, onComplete: () => g.destroy() })
+    for (const e of kids) {
+      this.hurtEnemy(e, 40 * this.dmgScale * this.buffDmg, 0x9ad0ff, '#9ad0ff')
+      this.tintFlash(e, 0x9ad0ff)
+    }
+    this.slowUntil = Math.max(this.slowUntil, this.elapsed + 2.5)
+  }
+
+  /** 背水一战：攻击 +70% 持续 10 秒，但受伤 +50% —— 有代价的爆发 */
+  private stratLastStand() {
+    this.buffDmg = 1.7
+    this.buffVuln = 1.5
+    this.buffT = 10000
+    this.redFlash()
+  }
+
+  /** 计谋释放的通用视觉：一圈扩散环 + 角色提亮，明确"这是你按出来的" */
+  private stratBurst() {
+    const ring = this.add.image(this.player.x, this.player.y, 'ring')
+      .setTint(0xffffff).setDepth(60)
+    this.tweens.add({
+      targets: ring, scale: 6, alpha: 0, duration: 420, ease: 'Quad.easeOut',
+      onComplete: () => ring.destroy()
+    })
+    this.heroImg.setAlpha(1)
+  }
+
+  /** 受控的染色反馈（不覆盖贴图细节，与 hitFlash 的短暂白闪区分开） */
+  private tintFlash(e: Phaser.Physics.Arcade.Image, color: number) {
+    e.setTint(color)
+    this.tweens.add({
+      targets: e, alpha: 0.55, duration: 120, yoyo: true, repeat: 1,
+      onComplete: () => { if (e.active) { e.clearTint(); e.setAlpha(1) } }
+    })
+  }
+
+  /**
+   * 关卡目标判定。
+   *
+   * 三种目标（见 StageDef.objective）：
+   *   survive —— 撑满时长即通关
+   *   kill    —— 击杀数达标即通关（可以提前结束）
+   *   boss    —— 击杀 Boss 即通关；Boss 在 bossAt 秒出场
+   * 任何目标：超时未达成 = 未通关；中途阵亡 = 直接失败（走 gameOver 的另一条分支）。
+   */
+  private tickObjective() {
+    if (this.objDone || this.objFailed) return
+    const st = this.stage
+    switch (st.objective) {
+      case 'survive':
+        this.objProgress = Math.min(1, this.elapsed / st.durationSec)
+        if (this.elapsed >= st.durationSec) this.finishStage()
+        break
+      case 'kill':
+        this.objProgress = Math.min(1, this.kills / st.target)
+        if (this.kills >= st.target) this.finishStage()
+        else if (this.elapsed >= st.durationSec) this.failStage()
+        break
+      case 'boss':
+        this.objProgress = this.bossDown ? 1 : Math.min(0.95, this.elapsed / st.durationSec)
+        if (this.elapsed >= st.durationSec) this.failStage()
+        break
+    }
   }
 
   /**
@@ -821,9 +1298,16 @@ export class GameScene extends Phaser.Scene {
    * 而不是像通用幸存者那样无脑堆 dmg%。表在 gameData.ts 的 WEAPONS[].vs。
    */
   private armorMul(vs: Partial<Record<Armor, number>> | undefined, e: Phaser.Physics.Arcade.Image) {
-    if (!vs) return 1
-    const a = (e.getData('armor') as Armor) || 'none'
-    return vs[a] ?? 1
+    let m = 1
+    if (vs) {
+      const a = (e.getData('armor') as Armor) || 'none'
+      m = vs[a] ?? 1
+    }
+    // 盾卫顶盾：非破甲武器（vs.heavy < 1.3）打它只有 70% 伤害。
+    // 这是"盾阵必须用破甲武器破"这条战术的直接落点 —— 方圆阵/鱼鳞阵的前排
+    // 就是靠这个把"只能绕后"变成"该换武器了"。
+    if (e.getData('guard') && (vs?.heavy ?? 1) < 1.3) m *= 0.7
+    return m
   }
 
   /** 相克反馈：克制放大飘字并标"克"，被克缩小并压暗，让玩家一眼学会看兵种。 */
@@ -861,7 +1345,9 @@ export class GameScene extends Phaser.Scene {
       const body = b.body as Phaser.Physics.Arcade.Body
       body.setSize(24, 6, true)
       body.setVelocity(vx, vy)
-      b.setData('dmg', w.damage * this.dmgScale)
+      // buffDmg = 背水一战的临时攻击倍率。放在赋值处而不是各武器内部，
+      // 保证四条伤害路径（子弹/环绕/光束/光环）一致地吃到增益。
+      b.setData('dmg', w.damage * this.dmgScale * this.buffDmg)
       b.setData('pierce', w.pierce + this.pierceBonus)
       b.setData('hit', new Set())
       b.setData('col', w.color)
@@ -996,7 +1482,7 @@ export class GameScene extends Phaser.Scene {
       if (!e.active) continue
       if (this.distToSegment(e.x, e.y, mz.x, mz.y, ex, ey) < 26) {
         const mul = this.armorMul(w.vs, e)
-        const dmg = w.damage * this.dmgScale * mul
+        const dmg = w.damage * this.dmgScale * this.buffDmg * mul
         const hp = ((e.getData('hp') as number) || 0) - dmg
         const lab = this.damageLabel(mul)
         this.popDamage(e.x, e.y, dmg, lab?.text ?? '#7ef0c0', false, lab?.scale ?? 1, lab?.tag ?? '')
@@ -1021,7 +1507,7 @@ export class GameScene extends Phaser.Scene {
       if (!e.active) continue
       if (Phaser.Math.Distance.Between(px, py, e.x, e.y) <= w.radius) {
         const mul = this.armorMul(w.vs, e)
-        const dmg = w.damage * this.dmgScale * mul
+        const dmg = w.damage * this.dmgScale * this.buffDmg * mul
         const hp = ((e.getData('hp') as number) || 0) - dmg
         const lab = this.damageLabel(mul)
         this.popDamage(e.x, e.y, dmg, lab?.text ?? '#ffb347', false, lab?.scale ?? 1, lab?.tag ?? '')
@@ -1037,7 +1523,7 @@ export class GameScene extends Phaser.Scene {
       o.setActive(true).setVisible(true).setTint(def.color).setScale(Math.max(0.6, def.radius / 40))
       o.setBlendMode(Phaser.BlendModes.ADD)
       ;(o.body as Phaser.Physics.Arcade.Body).setCircle(8)
-      o.setData('dmg', def.damage * this.dmgScale)
+      o.setData('dmg', def.damage * this.dmgScale * this.buffDmg)
       o.setData('vs', def.vs)
       o.setData('cd', 0)
       o.setData('off', (Math.PI * 2 / def.count) * i)
@@ -1050,6 +1536,10 @@ export class GameScene extends Phaser.Scene {
     const kids = this.orbits.getChildren() as Phaser.Physics.Arcade.Image[]
     for (const o of kids) {
       if (!o.active) continue
+      // 环绕球的伤害每帧重算：dmgScale / buffDmg 会在升级与计谋中变化，
+      // 只在创建时赋一次，会让「拿到飞刀之后再点伤害升级」完全不生效。
+      const ow = this.weapons.find((x) => x.def.kind === 'orbit')
+      if (ow) o.setData('dmg', ow.def.damage * this.dmgScale * this.buffDmg)
       const off = o.getData('off') as number
       const radius = o.getData('radius') as number
       const a = off + this.orbitAngle
@@ -1074,36 +1564,58 @@ export class GameScene extends Phaser.Scene {
     return best
   }
 
-  private stageIndex() {
+  /** 当前波次强度阶段（只决定"刷多快 / 多大比例是阵型"，不决定出什么怪） */
+  private waveIndex() {
     let idx = 0
-    for (let i = 0; i < WAVE_STAGES.length; i++) {
-      if (this.elapsed / 60 >= WAVE_STAGES[i].startMin) idx = i
+    for (let i = 0; i < WAVE_RAMP.length; i++) {
+      if (this.elapsed / 60 >= WAVE_RAMP[i].startMin) idx = i
     }
     return idx
   }
 
-  private currentStage() {
-    return WAVE_STAGES[this.stageIndex()]
+  private currentWave() {
+    return WAVE_RAMP[this.waveIndex()]
   }
 
   /**
-   * 敌潮播报：把「这一波该用什么武器」直接告诉玩家。
+   * 章节播报：开局把「这是谁在打你、该用什么克」一次说清。
    *
    * 相克系统有一个致命前提 —— **它必须可读，否则等于不存在**。
    * 玩家不会去读策划案里的倍率表，唯一的教学入口就是这里：
-   * 每进入新阶段时报出主威胁的兵种与护甲，并点名一件克制它的武器。
-   * 三波之后玩家自己就会在升级时主动挑克制武器了。
+   * 报出主势力的兵种与护甲，并点名一件克制它的武器。
+   * 三章之后玩家自己就会在升级时主动挑克制武器了。
    */
-  private announceStage(idx: number) {
-    const st = WAVE_STAGES[idx]
-    if (!st) return
-    const top = Object.entries(st.weights).sort((a, b) => b[1] - a[1])[0]
-    const def = enemyById(top[0])
-    const armor = ARMOR_NAMES[def.armor]
+  private announceChapter() {
+    const f = this.faction
+    const topId = Object.entries(f.roster).sort((a, b) => b[1] - a[1])[0][0]
+    const def = enemyById(topId)
     const counter = WEAPONS.find((w) => (w.vs?.[def.armor] ?? 1) >= 1.3)
-    this.toast(counter
-      ? `敌军压境：${def.faction}·${def.name}（${armor}）　→　${counter.name} 可克`
-      : `敌军压境：${def.faction}·${def.name}（${armor}）`)
+    this.toast(`第${this.chapter.index}章 · ${this.chapter.name}　${f.name}军 · ${f.trait}`)
+    this.time.delayedCall(2600, () => {
+      if (this.over) return
+      this.toast(counter
+        ? `${f.name}·${def.name}（${ARMOR_NAMES[def.armor]}）　→　${counter.name} 可克　·　按 Q/E 施计`
+        : `${f.name}·${def.name}（${ARMOR_NAMES[def.armor]}）　·　按 Q/E 施计`)
+    })
+  }
+
+  /**
+   * 波次播报：每进入新强度阶段，提示"接下来会上阵型了"。
+   * 阵型是这一版最核心的变化，玩家必须知道它出现了 —— 否则只会觉得"怪忽然变多了"。
+   */
+  private announceWave(idx: number) {
+    const w = WAVE_RAMP[idx]
+    if (!w || w.formationChance <= 0) return
+    const pool = this.formationsFor(idx)
+    const f = formationById(pool[Math.min(pool.length - 1, Math.floor(idx / 2))])
+    this.toast(`${this.faction.name}军变阵：${f.name}阵　（${f.desc}）　→　${f.counter}`)
+  }
+
+  /** 当前波次阶段可用的阵型池：章节阵型按波次逐段解锁，后期才上最硬的阵 */
+  private formationsFor(idx: number): string[] {
+    const pool = this.chapter.formations
+    const n = Math.max(1, Math.min(pool.length, 1 + Math.floor(idx / 2)))
+    return pool.slice(0, n)
   }
 
   private pickWeighted(w: Record<string, number>): string {
@@ -1114,45 +1626,113 @@ export class GameScene extends Phaser.Scene {
     return Object.keys(w)[0]
   }
 
-  private spawnDirector(delta: number) {
-    for (const bs of BOSS_SCHEDULE) {
-      if (this.elapsed / 60 >= bs.atMin && !this.bossesSpawned.has(bs.enemyId)) {
-        this.bossesSpawned.add(bs.enemyId)
-        this.spawnEnemy(enemyById(bs.enemyId), true)
-      }
+  /**
+   * 阵型刷怪 —— 本轮最关键的创新。
+   *
+   * 现状问题：敌人是"随机撒在屏幕外一圈"，所以任何时刻看到的都是一团没有形状的点。
+   * 改法：以**阵型**为单位整组生成，一组 6~12 人，按槽位表落位。
+   *
+   * 所有幸存者类都在做"密度"，没人做"**阵形**"。而阵形是三国战争最核心的
+   * 视觉记忆 —— 玩家一眼能认出、一句话能说出。
+   *
+   * 关键设计：阵型只提供**骨架**（槽位 + role + 行为），
+   * **具体兵种由当前势力的 roles 表填**。所以同一个"锋矢阵"，
+   * 黄巾填出来是杂兵人海、西凉填出来是铁骑冲锋、魏填出来是盾甲精锐 ——
+   * 一张阵型表 × 六张势力表 = 大量组合，**零美术成本**。
+   */
+  private spawnFormation() {
+    const pool = this.formationsFor(this.waveIdx)
+    const f = formationById(Phaser.Utils.Array.GetRandom(pool) as string)
+    this.formationLog.push(f.id)
+
+    // 阵心放在**屏幕外**（按对角线半径 + 阵型自身展宽），保证不会凭空出现在画面里。
+    // 旧的固定半径 420 在这个窗口下同时犯了两个错：水平 420 < 半宽 472（左右两侧
+    // 直接在画面里冒出来），垂直 420 > 半高 324（上下两侧要走很久才进场）。
+    const spread = Math.max(...f.slots.map((s) => Math.abs(s.dx)))
+    const r = Math.hypot(this.scale.width, this.scale.height) / 2 + 90 + spread
+    const ang = Phaser.Math.FloatBetween(0, Math.PI * 2)
+    const ax = this.player.x + Math.cos(ang) * r
+    const ay = this.player.y + Math.sin(ang) * r
+    // 阵型的局部坐标：dx = 侧向，dy = 纵深（沿"玩家 → 阵心"方向向外）
+    const ux = Math.cos(ang)
+    const uy = Math.sin(ang)
+    const px2 = -uy
+    const py2 = ux
+
+    for (const slot of f.slots) {
+      // 蜂拥阵刻意加抖动：太整齐就不像"蜂拥"了
+      const jitter = f.id === 'swarm' ? 20 : 4
+      const jx = Phaser.Math.FloatBetween(-jitter, jitter)
+      const jy = Phaser.Math.FloatBetween(-jitter, jitter)
+      const sx = ax + px2 * (slot.dx + jx) + ux * (slot.dy + jy)
+      const sy = ay + py2 * (slot.dx + jx) + uy * (slot.dy + jy)
+      const def = enemyById(this.faction.roles[slot.role])
+      const e = this.spawnEnemy(def, false, sx, sy)
+      if (!e) continue
+      e.setData('behavior', f.behavior)
+      // hold / fireline：站位半径定在玩家武器射程的边缘（230~280），
+      // 逼玩家主动冲进危险区才能清掉 —— 否则"敌人不进攻"会让游戏变简单。
+      e.setData('holdR', f.behavior === 'hold' ? 230 : f.behavior === 'fireline' ? 280 : 0)
+      e.setData('fgt', f.id)
     }
-    const si = this.stageIndex()
-    if (si !== this.stageIdx) { this.stageIdx = si; this.announceStage(si) }
+    this.toast(`${this.faction.name}军 · ${f.name}阵　（破法：${f.counter}）`)
+  }
+
+  private spawnDirector(delta: number) {
+    // Boss 出场由**当前关卡**决定（StageDef.bossAt），不再是一张全局时间表 ——
+    // 这是"章 = 一个 Boss"能成立的前提。
+    const st = this.stage
+    if (st.objective === 'boss' && st.bossId && st.bossAt !== undefined
+      && this.elapsed >= st.bossAt && !this.bossesSpawned.has(st.bossId)) {
+      this.bossesSpawned.add(st.bossId)
+      this.spawnEnemy(enemyById(st.bossId), true)
+    }
+    // 已通关或已判负：停止刷怪，让玩家体面地把残局收完
+    if (this.objDone || this.objFailed) return
+
+    const wi = this.waveIndex()
+    if (wi !== this.waveIdx) {
+      this.waveIdx = wi
+      if (wi > 0) this.announceWave(wi)
+    }
     this.spawnAccum += delta
-    const st = this.currentStage()
+    const w = this.currentWave()
     // 节奏随等级和时间一起收紧。
-    // 这里的两条曲线都是**标定出来的**，不是拍脑袋：
-    // 手枪 450ms/发、12 伤，2 级杂兵 28 血 → 单杀 1.35s → 0.74 只/秒。
-    // 刷怪一旦超过这个速率，玩家就必然被越堆越多，与操作无关。
-    const base = Math.max(300, st.spawnInterval - this.level * 9 - this.elapsed * 0.4)
+    // 两条曲线都是**标定出来的**，不是拍脑袋：短弓 450ms/发、12 伤，
+    // 2 级杂兵 28 血 → 单杀 1.35s → 0.74 只/秒。刷怪一旦超过这个速率，
+    // 玩家就必然被越堆越多，与操作无关。
+    const base = Math.max(300, w.spawnInterval - this.level * 9 - this.elapsed * 0.4)
     // 反雪崩节流：场上敌人越多，刷怪越慢。
     // 这是幸存者类**必须有**的负反馈。没有它时会形成死亡螺旋 ——
-    // 玩家一被压制就杀不动，杀不动就堆得更多。实测数据就是这条曲线：
-    // t=29 场上 10 只（还能打）→ t=45 场上 22 只、血量 100 → 0，全程没有翻盘窗口。
-    // 节流保证「劣势」是压力而不是死刑：场上超过 10 只才开始刹车，越多刹得越狠。
-    // 阈值定在 10 是量出来的 —— 目标稳态是「站着能看清 6~10 只朝你压过来」，
-    // 这个数量在 944x649 的画面里已经足够有压迫感，又不至于糊成一片红。
+    // 玩家一被压制就杀不动，杀不动就堆得更多。节流保证「劣势」是压力而不是死刑。
     const alive = this.enemies.countActive(true)
     const throttle = Phaser.Math.Clamp(1 - (alive - 10) / 16, 0.3, 1)
     const interval = base / throttle
     if (this.spawnAccum < interval) return
     // 用减法推进累加器而不是清零：掉一帧不会整段丢掉刷怪节拍
     this.spawnAccum -= interval
-    // 成群刷，但**等玩家攒够升级之后再上量**。
-    // 幸存者类的压迫感来自「同时逼近的数量」，可数量必须和玩家的成长曲线同步 ——
-    // 开局就成群刷等于直接把新手按死。60 秒后才开始成双，上限 2。
-    const batch = Math.min(2, 1 + Math.floor(Math.max(0, this.elapsed - 60) / 80))
-    for (let i = 0; i < batch; i++) {
-      this.spawnEnemy(enemyById(this.pickWeighted(st.weights)), false)
+
+    // 阵型 vs 散兵：比例由波次阶段给定。
+    // 开局先给散兵热身，再让成建制的阵型压上来 —— 一上来就鱼鳞阵会把新手按死。
+    if (Math.random() < w.formationChance) {
+      this.spawnFormation()
+    } else {
+      for (let i = 0; i < 2; i++) {
+        this.spawnEnemy(enemyById(this.pickWeighted(this.faction.roster)), false)
+      }
     }
   }
 
-  private spawnEnemy(def: EnemyDef, boss: boolean) {
+  /**
+   * 生成一只敌人。
+   *
+   * `ox/oy` 可选：**阵型生成时必须传入具体坐标**（按槽位落位）；
+   * 不传则退回"沿屏幕外一圈出生"的散兵逻辑。
+   *
+   * 返回值是敌人实例 —— 阵型生成需要往上面挂 behavior / holdR，
+   * 所以这里不能再返回 void。
+   */
+  private spawnEnemy(def: EnemyDef, boss: boolean, ox?: number, oy?: number) {
     // 在「屏幕外一圈」出生，而不是固定半径 420 的圆上。
     // 固定半径在 944x649 的窗口里同时犯了两个错：420 小于水平半宽 472，
     // 于是左右两侧的怪直接在画面里凭空出现（pop-in）；420 又大于垂直半高 324，
@@ -1167,7 +1747,10 @@ export class GameScene extends Phaser.Scene {
     let t = Math.random() * (pw * 2 + ph * 2)
     let x: number
     let y: number
-    if (t < pw) { x = this.player.x - rx + t; y = this.player.y - ry }
+    if (ox !== undefined && oy !== undefined) {
+      x = ox
+      y = oy
+    } else if (t < pw) { x = this.player.x - rx + t; y = this.player.y - ry }
     else if ((t -= pw) < pw) { x = this.player.x + rx - t; y = this.player.y + ry }
     else if ((t -= pw) < ph) { x = this.player.x - rx; y = this.player.y - ry + t }
     else { t -= ph; x = this.player.x + rx; y = this.player.y + ry - t }
@@ -1175,7 +1758,7 @@ export class GameScene extends Phaser.Scene {
     // 因此所有单位之间的像素块大小一致 —— 像素游戏的核心美学规则。
     const unit = 'foe_' + def.id
     const e = this.enemies.get(x, y, pxKey(unit)) as Phaser.Physics.Arcade.Image | null
-    if (!e) return
+    if (!e) return null
     const s = pxScale(unit)
 
     // 复用对象池的实例：必须彻底重置上一次的残留状态，否则会出现"出生的敌人是白色的"
@@ -1193,16 +1776,29 @@ export class GameScene extends Phaser.Scene {
     e.setFlipX(false)
     e.clearTint()
     e.setData('baseScale', s)
-    e.setData('hp', def.hp + this.level * 4)
+    // 势力特性 + 关卡强度在这里落到**真实数值**上：
+    // 黄巾 hpMul 0.72（人多而脆）、魏 hpMul 1.3（砍不动）、章节 spawnMul 逐关递增。
+    // Boss 不吃势力的 hpMul（它本身就该是硬的），只吃关卡倍率。
+    const hpBase = def.hp + this.level * 4
+    e.setData('hp', hpBase * (boss ? 1 : this.faction.hpMul) * this.stage.spawnMul)
     e.setData('dmg', def.damage)
-    e.setData('sp', def.speed)
+    e.setData('sp', def.speed * this.faction.speedMul)
     e.setData('isBoss', !!def.isBoss)
+    // 名字必须写进实例数据：斩将播报是 `e.getData('bossName')`，
+    // 少了这一行 toast 会变成光秃秃的「斩将！」—— 玩家看不到自己斩的是谁，
+    // 而 Boss 战的全部意义就是这个"谁"。同一个 id 可能在不同关卡复用，
+    // 所以每次出生都重设，不依赖上一次的残留。
+    e.setData('bossName', def.bossName || def.name)
     e.setData('touchCd', 0)
     e.setData('shockCd', 4000)
     e.setData('col', def.color)
-    // 兵种护甲 —— 相克判定的输入。对象池复用必须重设，否则上一个单位的护甲会残留。
+    // 兵种护甲 + 阵型行为 —— 都是相克/阵型判定的输入，对象池复用必须重设，
+    // 否则上一个单位的护甲或阵型行为会残留到新单位身上。
     e.setData('armor', def.armor)
     e.setData('faction', def.faction)
+    e.setData('guard', !!def.guard)
+    e.setData('behavior', '')
+    e.setData('holdR', 0)
     if (def.shooter) {
       e.setData('shootMax', def.shootCd || 1600)
       e.setData('shootCd', def.shootCd || 1600)
@@ -1252,24 +1848,78 @@ export class GameScene extends Phaser.Scene {
         e.setData('hpBar', bar)
       }
       bar.setVisible(true)
-      e.setData('hpMax', def.hp + this.level * 4)
+      e.setData('hpMax', (e.getData('hp') as number) || hpBase)
       e.setData('visW', visW)
       e.setData('visH', visH)
     }
+    return e
   }
 
   private driveEnemies(delta: number) {
     const kids = this.enemies.getChildren() as Phaser.Physics.Arcade.Image[]
+    const slow = this.slowUntil > this.elapsed
     for (const e of kids) {
       if (!e.active) continue
-      const sp = (e.getData('sp') as number) || 70
+      let sp = (e.getData('sp') as number) || 70
       const a = Phaser.Math.Angle.Between(e.x, e.y, this.player.x, this.player.y)
+      const dist = Phaser.Math.Distance.Between(e.x, e.y, this.player.x, this.player.y)
       const body = e.body as Phaser.Physics.Arcade.Body
+
+      // 缓兵计：全场减速 75%
+      if (slow) sp *= 0.25
+
+      // ---- 阵型行为 ----
+      // 不是"所有怪都直线贴脸"。行为差异是阵型真正成立的证据 ——
+      // 只有名字不同而行为一致，那阵型就只是换了个播报文案。
+      const beh = (e.getData('behavior') as string) || ''
+      const cos = Math.cos(a)
+      const sin = Math.sin(a)
+      let vx: number
+      let vy: number
+      if (beh === 'charge') {
+        // 冲锋：更快、更直 —— "锋矢阵"的压迫感来自速度而不是血量
+        vx = cos * sp * 1.35
+        vy = sin * sp * 1.35
+      } else if (beh === 'hold' || beh === 'fireline') {
+        // 保持距离：远了压上、近了后撤、在射程环上横向绕行。
+        // 远程兵种**站定才是威胁**，这样玩家必须主动冲进危险区才能清掉它们，
+        // 而不是站在原地等它们自己送上门（那会让游戏变简单）。
+        const hold = (e.getData('holdR') as number) || 240
+        const sgn = ((e.getData('eid') as number) % 2) ? 1 : -1
+        if (dist < hold * 0.78) {
+          vx = -cos * sp
+          vy = -sin * sp
+        } else if (dist > hold * 1.22) {
+          vx = cos * sp
+          vy = sin * sp
+        } else {
+          vx = -sin * sp * 0.5 * sgn
+          vy = cos * sp * 0.5 * sgn
+        }
+      } else if (beh === 'encircle') {
+        // 包夹：目标点不是玩家本人，而是玩家**外侧的偏移点** —— 走位绕到侧面，
+        // 玩家的"往后退"不再等于"脱战"（偃月阵最难缠的地方）
+        const sgn = ((e.getData('eid') as number) % 2) ? 1 : -1
+        const gx = this.player.x + -sin * sgn * 120
+        const gy = this.player.y + cos * sgn * 120
+        const ga = Phaser.Math.Angle.Between(e.x, e.y, gx, gy)
+        vx = Math.cos(ga) * sp
+        vy = Math.sin(ga) * sp
+      } else if (beh === 'advance' || beh === '') {
+        // 推进 / 无阵型（Boss、散兵）：保持阵列整体前压，速度不加成。
+        // 鱼鳞阵靠"一排排推线 + 层层叠叠"制造压迫，而不是靠速度。
+        // **必须写出来** —— 让它落在兜底分支里，以后加行为时就会被悄悄改掉。
+        vx = cos * sp
+        vy = sin * sp
+      } else {
+        vx = cos * sp
+        vy = sin * sp
+      }
 
       // 击退：命中时叠加一个反向速度分量，按帧衰减。命中才有"把它顶开"的手感
       const kx = (e.getData('kbx') as number) || 0
       const ky = (e.getData('kby') as number) || 0
-      body.setVelocity(Math.cos(a) * sp + kx, Math.sin(a) * sp + ky)
+      body.setVelocity(vx + kx, vy + ky)
       if (kx !== 0 || ky !== 0) {
         e.setData('kbx', Math.abs(kx) < 4 ? 0 : kx * 0.82)
         e.setData('kby', Math.abs(ky) < 4 ? 0 : ky * 0.82)
@@ -1400,6 +2050,23 @@ export class GameScene extends Phaser.Scene {
 
   // ---------- 碰撞回调 ----------
   /**
+   * 统一的敌人受伤入口（计谋等**非武器**伤害走这里）。
+   *
+   * 武器命中有自己的额外职责（消耗穿透、沿弹道击退），不能合并；
+   * 但计谋只需要"扣血 + 飘字 + 闪光 + 死亡处理"这一套，抽出来避免
+   * 六个计谋各写一遍 —— 少一次复制就少一处会忘记处理死亡的地方。
+   */
+  private hurtEnemy(e: Phaser.Physics.Arcade.Image, dmg: number, col: number, colStr: string) {
+    if (!e.active) return
+    const hp = ((e.getData('hp') as number) || 0) - dmg
+    this.popDamage(e.x, e.y, dmg, colStr)
+    this.spark(e.x, e.y, col, 2)
+    this.hitFlash(e)
+    if (hp <= 0) this.killEnemy(e)
+    else e.setData('hp', hp)
+  }
+
+  /**
    * 命中闪光。
    *
    * 四条约束，全是被实测逼出来的：
@@ -1425,7 +2092,9 @@ export class GameScene extends Phaser.Scene {
         mix((c >> 16) & 0xff), mix((c >> 8) & 0xff), mix(c & 0xff)))
       const baseScale = (e.getData('baseScale') as number) || e.scaleX
       e.setData('baseScale', baseScale)
-      e.setScale(baseScale * 1.12)
+      // 只放大 7%。曾经是 12%，但配上 60% 提亮的 tintFill，静态帧里那只怪
+      // 会明显**比旁边的大一圈**，看起来像"冒出来个不一样的敌人"，而不是"它挨打了"。
+      e.setScale(baseScale * 1.07)
       this.tweens.add({
         targets: e,
         scaleX: baseScale,
@@ -1507,7 +2176,8 @@ export class GameScene extends Phaser.Scene {
     e.setData('touchCd', 600)
     // 龙胆：无敌帧比其它武将长 40%，"七进七出"靠的就是这个窗口
     this.invuln = this.activeChar.passiveId === 'dash' ? 980 : 700
-    const dmg = (e.getData('dmg') as number) || 0
+    // buffVuln：背水一战的代价（受伤 +50%）。增益必须带代价，否则计谋就只是白送。
+    const dmg = ((e.getData('dmg') as number) || 0) * this.buffVuln
     this.hp -= dmg
     this.shake(160, 0.006)
     this.spark(this.player.x, this.player.y, 0xff6b6b, 4)
@@ -1532,7 +2202,7 @@ export class GameScene extends Phaser.Scene {
     if (!b.active) return
     if (this.invuln > 0) return
     this.invuln = 600
-    const dmg = (b.getData('dmg') as number) || 0
+    const dmg = ((b.getData('dmg') as number) || 0) * this.buffVuln
     this.hp -= dmg
     b.setActive(false).setVisible(false)
     ;(b.body as Phaser.Physics.Arcade.Body).setVelocity(0, 0)
@@ -1588,6 +2258,14 @@ export class GameScene extends Phaser.Scene {
     if (this.activeChar.passiveId === 'lifesteal' && this.hp < this.maxHp) {
       this.hp = Math.min(this.maxHp, this.hp + 3)
       this.popDamage(this.player.x, this.player.y - 20, 3, '#8ff0a4', false, 0.82, '血')
+    }
+
+    // boss 关：Boss 倒下 = 目标达成。
+    // 这是主线唯一一个"质变节点" —— 从砍杂兵变成砍主将，必须立刻给足反馈。
+    if (isBoss && this.stage.objective === 'boss') {
+      this.bossDown = true
+      this.toast(`斩将！${e.getData('bossName') || ''}`)
+      this.time.delayedCall(900, () => this.finishStage())
     }
   }
 
@@ -1822,13 +2500,18 @@ export class GameScene extends Phaser.Scene {
         const m = await r.json()
         this.unlockedW = new Set<string>(m.unlockedWeapons || ['bow', 'crossbow'])
         this.unlockedC = new Set<string>(m.unlockedChars || ['rookie'])
+        // 计谋默认给一个：否则第一章的"计谋"这条支柱完全不可见，
+        // 玩家要到通关第一章之后才知道游戏里有主动技能。
+        this.unlockedS = new Set<string>(m.unlockedStrats || ['slowdown'])
+        this.cleared = new Set<string>(m.clearedStages || [])
       }
     } catch { /* 离线也可玩，仅无解锁内容 */ }
+    if (this.unlockedS.size === 0) this.unlockedS.add('slowdown')
     for (let i = CHARS.length - 1; i >= 0; i--) {
       if (this.unlockedC.has(CHARS[i].id)) { this.activeChar = CHARS[i]; break }
     }
     this.refreshPlayerLook()
-    this.showCharSelect()
+    this.showPrep()
   }
 
   private refreshPlayerLook() {
@@ -1838,84 +2521,271 @@ export class GameScene extends Phaser.Scene {
     this.portrait.setTexture('portrait_' + id)
   }
 
-  private showCharSelect() {
-    if (this.selectOverlay) return
-    this.started = false
-    const c = this.add.container(this.scale.width / 2, this.scale.height / 2).setScrollFactor(0).setDepth(500)
-    this.selectOverlay = c
-
-    this.uiAdd(c, this.add.rectangle(0, 0, 828, 468, 0x07070f, 0.96)
-      .setStrokeStyle(3, 0x4ecdc4))
-    this.uiAdd(c, this.add.text(0, -206, '选择你的武将', {
-      fontSize: '26px', color: '#ffffff'
-    }).setOrigin(0.5))
-    this.uiAdd(c, this.add.text(0, -174, '上方立绘用于展示　·　下方是在游戏里的实际形象', {
-      fontSize: '12px', color: '#8f9bb0'
-    }).setOrigin(0.5))
-
-    CHARS.forEach((ch, i) => {
-      const x = -288 + i * 192
-      const locked = !this.unlockedC.has(ch.id)
-      const card = this.add.container(x, 22).setScrollFactor(0)
-
-      const startW = weaponById(ch.weapon)
-      const bg = this.uiAdd(card, this.add.rectangle(0, 0, 168, 322, 0x14142a, 1)
-        .setStrokeStyle(2, locked ? 0x44445a : 0x4ecdc4))
-      this.uiAdd(card, this.add.text(0, -142, ch.name, {
-        fontSize: '17px', color: locked ? '#8a8a9a' : '#ffffff'
-      }).setOrigin(0.5))
-      // 定位：一句话说清"这个武将怎么玩"，取代旧版那个只显示名字的卡片
-      this.uiAdd(card, this.add.text(0, -121, ch.title, {
-        fontSize: '12px', color: locked ? '#6f7a90' : '#8fd6ff'
-      }).setOrigin(0.5))
-      this.uiAdd(card, this.add.image(0, -44, 'portrait_' + ch.id).setScale(0.4))
-
-      // 游戏内实际形象：像素帧。选人时看到的就是进游戏后操作的那个单位。
-      this.uiAdd(card, this.add.rectangle(0, 62, 108, 74, 0x0b0b16, 1)
-        .setStrokeStyle(1, 0x33334d))
-      this.uiAdd(card, this.add.sprite(0, 62, pxKey('hero_' + ch.id), pxFrame('down', 'idle', 0))
-        .setScale(pxScale('hero_' + ch.id)))
-
-      // 起始武器 + 被动 —— 这两行是"四个武将机制真的不同"的唯一对外说明。
-      // 不写出来，玩家会以为四人只是换色，那这套机制就白做了。
-      this.uiAdd(card, this.add.text(0, 112, `起始 ${startW ? startW.name : '—'}`, {
-        fontSize: '12px', color: locked ? '#6f7a90' : '#ffe066'
-      }).setOrigin(0.5))
-      this.uiAdd(card, this.add.text(0, 132, `${ch.passiveName} · ${ch.passiveDesc}`, {
-        fontSize: '12px', color: locked ? '#6f7a90' : '#9fe1cb'
-      }).setOrigin(0.5))
-      this.uiAdd(card, this.add.text(0, 150, `生命 ${ch.hp} · 移速 ${ch.speed}`, {
-        fontSize: '12px', color: locked ? '#5a6070' : '#8f9bb0'
-      }).setOrigin(0.5))
-
-      if (locked) {
-        this.uiAdd(card, this.add.rectangle(0, -44, 168, 190, 0x000000, 0.74))
-        this.uiAdd(card, this.add.text(0, -48, '未解锁', {
-          fontSize: '14px', color: '#ff6b6b'
-        }).setOrigin(0.5))
-        this.uiAdd(card, this.add.text(0, -22, '累计击杀可解锁', {
-          fontSize: '12px', color: '#9aa0b5'
-        }).setOrigin(0.5))
-      } else {
-        bg.setInteractive({ useHandCursor: true })
-        bg.on('pointerdown', () => this.startRun(ch))
-        bg.on('pointerover', () => bg.setFillStyle(0x22224a))
-        bg.on('pointerout', () => bg.setFillStyle(0x14142a))
-      }
-
-      c.add(card)
-    })
+  // ==========================================================================
+  // 备战界面（帐前点将）—— 章节 / 武将 / 计谋，一屏完成
+  // ==========================================================================
+  /** 章节是否已解锁：第 1 章永远开放，之后需先通关上一章的最后一关 */
+  private chapterUnlocked(c: ChapterDef): boolean {
+    if (c.index === 1) return true
+    const prev = CAMPAIGN[c.index - 2]
+    if (!prev) return false
+    const last = prev.stages[prev.stages.length - 1]
+    return this.cleared.has(stageKey(prev.id, last.index))
   }
 
-  private startRun(char: CharDef) {
-    this.activeChar = char
-    this.refreshPlayerLook()
-    this.applyCharStats(char)
+  /** 该章当前该打第几关：第一个未通关的关；全通则停在最后一关（可重打） */
+  private nextStageIndex(c: ChapterDef): number {
+    for (const s of c.stages) {
+      if (!this.cleared.has(stageKey(c.id, s.index))) return s.index
+    }
+    return c.stages[c.stages.length - 1].index
+  }
+
+  private objTextOf(s: StageDef): string {
+    const mm = Math.floor(s.durationSec / 60)
+    const ss = String(s.durationSec % 60).padStart(2, '0')
+    switch (s.objective) {
+      case 'survive': return `生存 ${mm}:${ss}`
+      case 'kill': return `击杀 ${s.target}`
+      case 'boss': return `斩将（${enemyById(s.bossId || '').name} 于 ${Math.floor((s.bossAt || 0) / 60)}:${String((s.bossAt || 0) % 60).padStart(2, '0')} 出场）`
+    }
+  }
+
+  private showPrep() {
+    this.started = false
+    // 默认选中：第一个解锁的章节
+    let idx = 0
+    for (let i = CAMPAIGN.length - 1; i >= 0; i--) {
+      if (this.chapterUnlocked(CAMPAIGN[i])) { idx = i; break }
+    }
+    this.prepIdx = idx
+    this.renderPrep()
+  }
+
+  /** 重建备战面板。切章 / 换将 / 换计谋都靠整体重建，比逐个改属性可靠得多 */
+  private renderPrep() {
     if (this.selectOverlay) {
       this.selectOverlay.destroy()
       this.selectOverlay = null
     }
+    const ch = CAMPAIGN[this.prepIdx]
+    const locked = !this.chapterUnlocked(ch)
+    const stageNo = this.nextStageIndex(ch)
+    const st = ch.stages.find((s) => s.index === stageNo) || ch.stages[0]
+    const fx = this.faction = factionById(ch.faction)
+
+    const c = this.add.container(this.scale.width / 2, this.scale.height / 2)
+      .setScrollFactor(0).setDepth(500)
+    this.selectOverlay = c
+
+    // ---- 全屏压暗底 ----
+    // 备战面板本身只有 900x646，画布比它大时四角会**漏出局内 HUD**
+    // （左上角的时间面板、左下角的操作提示），看起来像"两层界面叠在一起"。
+    // 这块底必须比面板大、比面板先加，把下面那层彻底压住。
+    this.uiAdd(c, this.add.rectangle(0, 0, this.scale.width + 8, this.scale.height + 8,
+      0x05050c, 0.93))
+
+    // ---- 外框 ----
+    this.uiAdd(c, this.add.rectangle(0, 0, 900, 646, 0x07070f, 0.97)
+      .setStrokeStyle(3, locked ? 0x44445a : 0x4ecdc4))
+    this.uiAdd(c, this.add.rectangle(0, -320, 900, 4, 0x4ecdc4, 0.85))
+    this.uiAdd(c, this.add.text(0, -296, '三　国　·　逐　鹿', {
+      fontSize: '26px', color: '#ffffff'
+    }).setOrigin(0.5))
+    this.uiAdd(c, this.add.text(0, -268, '兵种 · 阵型 · 势力 · 计谋', {
+      fontSize: '13px', color: '#8fd6ff'
+    }).setOrigin(0.5))
+
+    // ---- 章节条：◀ 第N章 ▶ ----
+    this.uiAdd(c, this.add.rectangle(0, -228, 860, 52, 0x12122a, 1)
+      .setStrokeStyle(2, locked ? 0x44445a : 0x3b6f6b))
+    const prevBtn = this.uiAdd(c, this.add.rectangle(-402, -228, 44, 44, 0x1b2436, 1)
+      .setStrokeStyle(1, 0x4ecdc4))
+    this.uiAdd(c, this.add.text(-402, -228, '◀', { fontSize: '18px', color: '#ffffff' }).setOrigin(0.5))
+    const nextBtn = this.uiAdd(c, this.add.rectangle(402, -228, 44, 44, 0x1b2436, 1)
+      .setStrokeStyle(1, 0x4ecdc4))
+    this.uiAdd(c, this.add.text(402, -228, '▶', { fontSize: '18px', color: '#ffffff' }).setOrigin(0.5))
+    const go = (d: number) => {
+      this.prepIdx = Phaser.Math.Wrap(this.prepIdx + d, 0, CAMPAIGN.length)
+      this.renderPrep()
+    }
+    prevBtn.setInteractive({ useHandCursor: true }).on('pointerdown', () => go(-1))
+    nextBtn.setInteractive({ useHandCursor: true }).on('pointerdown', () => go(1))
+
+    this.uiAdd(c, this.add.text(0, -242,
+      `第${ch.index}章　${ch.name}${locked ? '　（未解锁）' : ''}`, {
+        fontSize: '17px', color: locked ? '#8a8a9a' : '#ffffff'
+      }).setOrigin(0.5))
+    this.uiAdd(c, this.add.text(0, -216,
+      `${fx.name}军 · ${fx.motto}　·　特性：${fx.trait}`, {
+        fontSize: '13px', color: locked ? '#6f7a90' : '#ffd93d'
+      }).setOrigin(0.5))
+
+    // ---- 本关目标 + 首通奖励 ----
+    this.uiAdd(c, this.add.text(-440, -186, `第${st.index}关 · ${st.name}`, {
+      fontSize: '14px', color: '#ffe066'
+    }).setOrigin(0, 0.5))
+    this.uiAdd(c, this.add.text(-250, -186, `目标：${this.objTextOf(st)}`, {
+      fontSize: '13px', color: '#c9d2e0'
+    }).setOrigin(0, 0.5))
+    const rw = ch.reward.map((id) => META_NAMES[id] || id).join('、')
+    this.uiAdd(c, this.add.text(440, -186, `首通奖励：${rw}`, {
+      fontSize: '13px', color: '#9fe1cb'
+    }).setOrigin(1, 0.5))
+
+    // ---- 武将卡 ----
+    this.uiAdd(c, this.add.text(-440, -156, '选择武将', {
+      fontSize: '13px', color: '#8f9bb0'
+    }).setOrigin(0, 0.5))
+    CHARS.forEach((cdef, i) => {
+      const x = -285 + i * 190
+      const ck = !this.unlockedC.has(cdef.id)
+      const picked = this.prepChar.id === cdef.id
+      const card = this.add.container(x, -20).setScrollFactor(0)
+      const bg = this.uiAdd(card, this.add.rectangle(0, 0, 168, 268, 0x14142a, 1)
+        .setStrokeStyle(2, ck ? 0x44445a : picked ? 0xffd93d : 0x4ecdc4))
+      this.uiAdd(card, this.add.text(0, -120, cdef.name, {
+        fontSize: '16px', color: ck ? '#8a8a9a' : '#ffffff'
+      }).setOrigin(0.5))
+      this.uiAdd(card, this.add.text(0, -101, cdef.title, {
+        fontSize: '13px', color: ck ? '#6f7a90' : '#8fd6ff'
+      }).setOrigin(0.5))
+      this.uiAdd(card, this.add.image(0, -46, 'portrait_' + cdef.id).setScale(0.34))
+      this.uiAdd(card, this.add.sprite(0, 46, pxKey('hero_' + cdef.id), pxFrame('down', 'idle', 0))
+        .setScale(pxScale('hero_' + cdef.id) * 0.9))
+      const sw2 = weaponById(cdef.weapon)
+      this.uiAdd(card, this.add.text(0, 88, `起始 ${sw2 ? sw2.name : '—'}`, {
+        fontSize: '13px', color: ck ? '#6f7a90' : '#ffe066'
+      }).setOrigin(0.5))
+      this.uiAdd(card, this.add.text(0, 106, `${cdef.passiveName} · ${cdef.passiveDesc}`, {
+        fontSize: '13px', color: ck ? '#6f7a90' : '#9fe1cb'
+      }).setOrigin(0.5))
+      this.uiAdd(card, this.add.text(0, 124, `生命 ${cdef.hp} · 移速 ${cdef.speed}`, {
+        fontSize: '13px', color: ck ? '#5a6070' : '#8f9bb0'
+      }).setOrigin(0.5))
+      if (ck) {
+        this.uiAdd(card, this.add.rectangle(0, -46, 168, 152, 0x000000, 0.74))
+        this.uiAdd(card, this.add.text(0, -52, '未解锁', {
+          fontSize: '14px', color: '#ff6b6b'
+        }).setOrigin(0.5))
+        this.uiAdd(card, this.add.text(0, -28, '通关章节解锁', {
+          fontSize: '13px', color: '#9aa0b5'
+        }).setOrigin(0.5))
+      } else {
+        bg.setInteractive({ useHandCursor: true })
+        bg.on('pointerdown', () => { this.prepChar = cdef; this.renderPrep() })
+        bg.on('pointerover', () => bg.setFillStyle(0x22224a))
+        bg.on('pointerout', () => bg.setFillStyle(0x14142a))
+      }
+      c.add(card)
+    })
+
+    // ---- 计谋卡（6 选 1）----
+    this.uiAdd(c, this.add.text(-440, 132, '选择计谋　（局内按 Q / E 释放）', {
+      fontSize: '13px', color: '#8f9bb0'
+    }).setOrigin(0, 0.5))
+    STRATAGEMS.forEach((sg, i) => {
+      const x = -330 + i * 132
+      const uk = this.unlockedS.has(sg.id)
+      const picked = this.prepStrat === sg.id
+      const box = this.uiAdd(c, this.add.rectangle(x, 172, 124, 68, 0x14142a, 1)
+        .setStrokeStyle(2, uk ? (picked ? 0xffd93d : 0x3b6f6b) : 0x33334d))
+      // 局内计谋槽用的是同一套形状（火苗/雪花/上箭/盾形）。
+      // 备战阶段就让玩家把"形状 → 效果"记下来，进局后不用再读字。
+      const gl = this.add.graphics()
+      gl.setPosition(x - 46, 172)
+      this.drawStratGlyph(gl, sg.kind, uk ? (picked ? 0xffd93d : 0x9fe1cb) : 0x3a3a4a, 0.72)
+      this.uiAdd(c, gl)
+      this.uiAdd(c, this.add.text(x, 152, sg.name, {
+        fontSize: '13px', color: uk ? (picked ? '#ffd93d' : '#ffffff') : '#6f7a90'
+      }).setOrigin(0.5))
+      this.uiAdd(c, this.add.text(x, 172, uk ? sg.quote : '未解锁', {
+        fontSize: '13px', color: uk ? '#9fe1cb' : '#5a6070'
+      }).setOrigin(0.5))
+      this.uiAdd(c, this.add.text(x, 192, uk ? `冷却 ${sg.cdSec}s` : '—', {
+        fontSize: '13px', color: uk ? '#8f9bb0' : '#4a4a5a'
+      }).setOrigin(0.5))
+      if (uk) {
+        box.setInteractive({ useHandCursor: true })
+        box.on('pointerdown', () => { this.prepStrat = sg.id; this.renderPrep() })
+        box.on('pointerover', () => box.setFillStyle(0x22224a))
+        box.on('pointerout', () => box.setFillStyle(0x14142a))
+      }
+    })
+
+    // ---- 出征 ----
+    const canGo = !locked
+    const btn = this.uiAdd(c, this.add.rectangle(0, 250, 300, 56,
+      canGo ? 0x1b3b3a : 0x22222c, 1).setStrokeStyle(2, canGo ? 0x4ecdc4 : 0x44445a))
+    this.uiAdd(c, this.add.text(0, 250, canGo ? '出　征' : '通关上一章后解锁', {
+      fontSize: '18px', color: canGo ? '#ffffff' : '#7a7a8a'
+    }).setOrigin(0.5))
+    if (canGo) {
+      btn.setInteractive({ useHandCursor: true })
+      btn.on('pointerover', () => btn.setFillStyle(0x26504e))
+      btn.on('pointerout', () => btn.setFillStyle(0x1b3b3a))
+      btn.on('pointerdown', () => this.startRun(ch, st))
+    }
+    // 底部提示用 ◀ ▶ 而不是键盘的 ← →：屏幕上真正能点的就是章节条两端那两个方按钮，
+    // 提示必须和玩家眼睛看到的东西对得上（← → 缩放后细得像两道杠，会被读成符号噪声）。
+    this.uiAdd(c, this.add.text(0, 286, '◀ ▶ 切章　·　点击卡片选择', {
+      fontSize: '13px', color: '#9aa0b5'
+    }).setOrigin(0.5))
+
+    // 面板是 900x646 的固定版式，但画布尺寸随窗口变（RESIZE 模式）。
+    // 小窗口下必须整体等比缩放，否则两侧内容直接被裁掉 ——
+    // 实测 headless 视口只有 944x649，靠"刚好塞下"是不牢靠的。
+    const fit = Math.min(1,
+      (this.scale.width - 24) / 900,
+      (this.scale.height - 24) / 646)
+    c.setScale(fit)
+
+    // 键盘切章（顺手）
+    const kh = (ev: KeyboardEvent) => {
+      if (ev.key === 'ArrowLeft') { go(-1) }
+      else if (ev.key === 'ArrowRight') { go(1) }
+      else if (ev.key === 'Enter' && canGo) { this.startRun(ch, st) }
+    }
+    window.addEventListener('keydown', kh)
+    // 面板重建时把上一份监听摘掉（否则按一次方向键会触发 N 次重建）
+    const old = (c as unknown as { _kh?: (ev: KeyboardEvent) => void })._kh
+    if (old) window.removeEventListener('keydown', old)
+    ;(c as unknown as { _kh?: (ev: KeyboardEvent) => void })._kh = kh
+  }
+
+  private startRun(ch: ChapterDef, st: StageDef) {
+    this.chapter = ch
+    this.stage = st
+    this.faction = factionById(ch.faction)
+    this.chapterTint.setFillStyle(ch.tint, 0.22)
+    this.refreshPlayerLook()
+    this.applyCharStats(this.prepChar)
+    // 计谋：选中项若不可用（未解锁），回退到第一个已解锁的
+    const pick = stratagemById(this.prepStrat)
+    this.stratagem = pick && this.unlockedS.has(pick.id)
+      ? pick
+      : stratagemById(STRATAGEMS.find((s) => this.unlockedS.has(s.id))?.id || 'slowdown') || null
+    this.objLabel = this.objTextOf(st)
+    this.objDone = false
+    this.objFailed = false
+    this.bossDown = false
+    this.objProgress = 0
+    this.stratCd = 0
+    this.buffDmg = 1
+    this.buffVuln = 1
+    this.buffT = 0
+    this.slowUntil = -1
+    this.formationLog = []
+
+    if (this.selectOverlay) {
+      const kh = (this.selectOverlay as unknown as { _kh?: (ev: KeyboardEvent) => void })._kh
+      if (kh) window.removeEventListener('keydown', kh)
+      this.selectOverlay.destroy()
+      this.selectOverlay = null
+    }
     this.started = true
+    // 开局报幕：这是谁在打你、该用什么克、计谋怎么按
+    this.announceChapter()
   }
 
   /**
@@ -1945,22 +2815,47 @@ export class GameScene extends Phaser.Scene {
   }
 
   // ---------- 结算 ----------
+  /** 达成目标：标记通关并进入结算（存活/击杀/boss 三种目标共用这一条出口） */
+  private finishStage() {
+    if (this.objDone || this.over) return
+    this.objDone = true
+    this.objProgress = 1
+    this.gameOver(true)
+  }
+
+  /** 超时未达成目标 —— 不是死亡，但这一关没过 */
+  private failStage() {
+    if (this.objDone || this.objFailed || this.over) return
+    this.objFailed = true
+    this.gameOver(false)
+  }
+
   private gameOver(win: boolean) {
     if (this.over) return
     this.over = true
     this.physics.pause()
     this.submitScore()
+    if (win) this.cleared.add(stageKey(this.chapter.id, this.stage.index))
     this.submitMeta(win)
 
     const k = this.hudK
     const px = (v: number) => Math.round(v * k)
     const c = this.add.container(this.scale.width / 2, this.scale.height / 2)
       .setScrollFactor(0).setDepth(300)
-    this.uiAdd(c, this.add.rectangle(0, 0, px(460), px(310), 0x05050c, 0.95)
-      .setStrokeStyle(2, win ? 0x6bcb77 : 0xff6b6b))
-    this.uiAdd(c, this.add.text(0, px(-108), win ? '通　关' : '阵　亡', {
-      fontSize: `${Math.round(30 * k)}px`, color: win ? '#8ff0a4' : '#ff8f8f'
+    // 三种收场要分得开：通关 / 超时未达成 / 阵亡。
+    // 旧版只有"通关/阵亡"两种，超时也会显示"阵亡"，玩家会以为自己是被打死的。
+    const title = win ? '通　关' : this.objFailed ? '未　竟' : '阵　亡'
+    const tc = win ? '#8ff0a4' : this.objFailed ? '#ffd93d' : '#ff8f8f'
+    const bc = win ? 0x6bcb77 : this.objFailed ? 0xffd93d : 0xff6b6b
+    this.uiAdd(c, this.add.rectangle(0, 0, px(460), px(360), 0x05050c, 0.95)
+      .setStrokeStyle(2, bc))
+    this.uiAdd(c, this.add.text(0, px(-148), title, {
+      fontSize: `${Math.round(28 * k)}px`, color: tc
     }).setOrigin(0.5))
+    this.uiAdd(c, this.add.text(0, px(-118),
+      `第${this.chapter.index}章 · ${this.chapter.name}　—　第${this.stage.index}关 · ${this.stage.name}`, {
+        fontSize: `${Math.max(12, Math.round(13 * k))}px`, color: '#9aa4bb'
+      }).setOrigin(0.5))
 
     const mm = Math.floor(this.elapsed / 60)
     const ss = String(Math.floor(this.elapsed % 60)).padStart(2, '0')
@@ -1972,20 +2867,38 @@ export class GameScene extends Phaser.Scene {
     ]
     cols.forEach(([label, val], i) => {
       const bx = px(-165 + (i % 2) * 330)
-      const by = px(-28 + Math.floor(i / 2) * 70)
+      const by = px(-62 + Math.floor(i / 2) * 62)
       this.uiAdd(c, this.add.text(bx, by, val, {
-        fontSize: `${Math.round(24 * k)}px`, color: '#ffd93d'
+        fontSize: `${Math.round(22 * k)}px`, color: '#ffd93d'
       }).setOrigin(0.5))
-      this.uiAdd(c, this.add.text(bx, by + px(23), label, {
+      this.uiAdd(c, this.add.text(bx, by + px(21), label, {
         fontSize: `${Math.max(12, Math.round(12 * k))}px`, color: '#8f9bb0'
+      }).setOrigin(0.5))
+    })
+
+    // 本章进度：三关的完成状态。
+    // 这是"主线"在结算界面上唯一的体现 —— 没有它，玩家打完不知道自己走到哪了。
+    this.uiAdd(c, this.add.text(px(-200), px(66), '本章进度', {
+      fontSize: `${Math.max(12, Math.round(12 * k))}px`, color: '#8f9bb0'
+    }).setOrigin(0, 0.5))
+    this.chapter.stages.forEach((s, i) => {
+      const done = this.cleared.has(stageKey(this.chapter.id, s.index))
+      const x = px(-92 + i * 96)
+      const box = this.uiAdd(c, this.add.rectangle(x, px(66), px(84), px(30),
+        done ? 0x1b3b3a : this.stage.index === s.index ? 0x2a2440 : 0x15152a, 1)
+        .setStrokeStyle(2, done ? 0x4ecdc4 : this.stage.index === s.index ? 0x8f7bd6 : 0x33334d))
+      void box
+      this.uiAdd(c, this.add.text(x, px(66), `${done ? '★' : '・'} ${s.name}`, {
+        fontSize: `${Math.max(12, Math.round(11.5 * k))}px`,
+        color: done ? '#9fe1cb' : this.stage.index === s.index ? '#cbb8ff' : '#6f7a90'
       }).setOrigin(0.5))
     })
 
     // 必须有重开入口。旧版打完成绩就没了，只能手动刷新页面 ——
     // 幸存者类游戏的核心循环就是"再来一局"，这一环缺了整个手感就断了。
-    const btn = this.uiAdd(c, this.add.rectangle(0, px(106), px(250), px(54), 0x1b3b3a, 1)
+    const btn = this.uiAdd(c, this.add.rectangle(0, px(130), px(250), px(52), 0x1b3b3a, 1)
       .setStrokeStyle(2, 0x4ecdc4))
-    this.uiAdd(c, this.add.text(0, px(106), '再来一局　(R)', {
+    this.uiAdd(c, this.add.text(0, px(130), '返回备战　(R)', {
       fontSize: `${Math.round(17 * k)}px`, color: '#ffffff'
     }).setOrigin(0.5))
     btn.setInteractive({ useHandCursor: true })
@@ -2010,13 +2923,21 @@ export class GameScene extends Phaser.Scene {
           score: this.score,
           kills: this.kills,
           timeSurvived: Math.floor(this.elapsed),
-          won: win
+          won: win,
+          // 关卡键（"c2s3"）：后端据此累加通关进度并权威解锁章节奖励。
+          // **必须上报** —— 否则"通关解锁下一章"只在本地内存里生效，换台设备就丢档。
+          stage: win ? stageKey(this.chapter.id, this.stage.index) : ''
         })
       })
       if (r.ok) {
         const m = await r.json()
         const now = (m.unlockedNow as string[]) || []
         if (now.length) this.showUnlockBanner(now)
+        // 后端回传的权威进度覆盖本地：保证多设备一致
+        if (Array.isArray(m.clearedStages)) this.cleared = new Set<string>(m.clearedStages)
+        if (Array.isArray(m.unlockedStrats)) this.unlockedS = new Set<string>(m.unlockedStrats)
+        if (Array.isArray(m.unlockedWeapons)) this.unlockedW = new Set<string>(m.unlockedWeapons)
+        if (Array.isArray(m.unlockedChars)) this.unlockedC = new Set<string>(m.unlockedChars)
       }
     } catch { /* 忽略上报失败 */ }
   }
