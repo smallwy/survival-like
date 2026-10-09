@@ -39,6 +39,20 @@ const PLAYER_SCALE = 0.22 // 256 * 0.22 ≈ 56px
 type Facing = 'front' | 'back' | 'side'
 const charTex = (id: string, dir: Facing) => `char_${dir}_${id}`
 
+// 各角色「侧身贴图里武器前端」相对角色中心的屏幕偏移（单位：屏幕像素，已乘 PLAYER_SCALE）。
+// 由贴图 alpha 轮廓实测得出（取最右侧不透明像素），不是拍脑袋估的：
+//   rookie   手持手枪平举  -> 右前方 (+17.2, +1.8)
+//   guanyu   偃月刀        -> 右前方 (+23.3, -7.0)
+//   zhangfei 蛇矛斜举      -> 右上方 (+27.5, -19.4)
+//   zhaoyun  长枪          -> 右前方 (+24.6, -7.9)
+// 子弹与枪口火光都从这个点发出，否则会出现"子弹从身上冒出来"。
+const MUZZLE_SIDE: Record<string, [number, number]> = {
+  rookie: [17.2, 1.8],
+  guanyu: [23.3, -7.0],
+  zhangfei: [27.5, -19.4],
+  zhaoyun: [24.6, -7.9]
+}
+
 interface WeaponRT { def: WeaponDef; cd: number; angle: number }
 
 // 幸存者类核心场景：
@@ -52,6 +66,7 @@ export class GameScene extends Phaser.Scene {
   // 之所以不再做"上下半身分层绕腰旋转"：静态正面图无论怎么转都转不出侧面/背面，
   // 反而会把身体切歪。现在改用三张真实姿态图，转向与施法都靠换图 + 姿态变形完成。
   private heroImg!: Phaser.GameObjects.Image
+  private curDir: Facing = 'front' // 当前实际贴在图上的朝向，避免每帧重复 setTexture
   private shadow!: Phaser.GameObjects.Ellipse
   private enemies!: Phaser.Physics.Arcade.Group
   private bullets!: Phaser.Physics.Arcade.Group
@@ -441,10 +456,16 @@ export class GameScene extends Phaser.Scene {
     const dir: Facing = casting ? this.aimDir : this.facing
     const right = casting ? this.aimFacing > 0 : this.faceRight
 
+    // ★ 转身就是在这里换图。曾经这里只改了 flipX 而漏掉 setTexture，
+    //   结果朝向算了一堆却从没贴到角色身上 —— 角色永远显示正面图。
+    if (this.curDir !== dir) {
+      this.curDir = dir
+      this.heroImg.setTexture(charTex(this.activeChar.id, dir))
+    }
     // 侧面图是按"朝右"画的，朝左时水平翻转；正面/背身左右基本对称，不翻。
     this.heroImg.setFlipX(dir === 'side' && !right)
 
-    // ---- 施法：朝目标方向前冲 + 回弹 ----
+    // ---- 施法：朝目标反方向后坐 + 归位 ----
     let px = 0
     let py = 0
     let rot = leanX + leanY * 0.6
@@ -454,15 +475,16 @@ export class GameScene extends Phaser.Scene {
       const p = 1 - this.castAnim // 0(刚触发) -> 1(结束)
       const dirX = Math.cos(this.fireAngle)
       const dirY = Math.sin(this.fireAngle)
-      // 0~0.22 快速前冲(出手) -> 0.22~1 缓慢回弹(收势)
-      const e = p < 0.22
-        ? Phaser.Math.SmoothStep(p / 0.22, 0, 1)
-        : 1 - Phaser.Math.SmoothStep((p - 0.22) / 0.78, 0, 1)
-      const push = 13 * e
-      px = dirX * push
-      py = dirY * push * 0.7
-      stretch = 1 + 0.09 * e
-      rot += dirX * 0.06 * e // 出手瞬间朝目标方向前倾
+      // 0~0.18 受后坐力整体后弹 -> 0.18~1 缓慢归位。
+      // 开枪是"往后坐"，不是"往前顶"，方向反了就会像在推枪而不是射枪。
+      const e = p < 0.18
+        ? Phaser.Math.SmoothStep(p / 0.18, 0, 1)
+        : 1 - Phaser.Math.SmoothStep((p - 0.18) / 0.82, 0, 1)
+      const recoil = -7 * e
+      px = dirX * recoil
+      py = dirY * recoil * 0.6
+      stretch = 1 + 0.07 * e
+      rot -= dirX * 0.05 * e // 后坐导致的枪口上扬
     }
 
     this.heroImg.x = px
@@ -517,12 +539,14 @@ export class GameScene extends Phaser.Scene {
     // 瞄准即转身：开火瞬间把朝向锁到目标方向，施法期间保持不变
     this.lockAim(base)
     this.castAnim = 1
-    this.muzzleFlash(px, py, base, w.color)
+    // 出弹点 = 武器口（侧身时是贴图里枪/刀/矛的真实前端），不再从角色中心冒出来
+    const mz = this.muzzlePoint(base)
+    this.muzzleFlash(mz.x, mz.y, w.color)
     this.shake(60, 0.0015)
 
     for (let i = 0; i < w.count; i++) {
       const a = base + (i - (w.count - 1) / 2) * (w.spread || 0)
-      const b = this.bullets.get(px, py, 'tracer') as Phaser.Physics.Arcade.Image | null
+      const b = this.bullets.get(mz.x, mz.y, 'tracer') as Phaser.Physics.Arcade.Image | null
       if (!b) continue
       const vx = Math.cos(a) * w.speed
       const vy = Math.sin(a) * w.speed
@@ -549,16 +573,31 @@ export class GameScene extends Phaser.Scene {
     this.aimFacing = dx >= 0 ? 1 : -1
     if (Math.abs(dx) >= 0.45) this.aimDir = 'side'
     else this.aimDir = dy < 0 ? 'back' : 'front'
-    this.aimLock = 320
+    // 略长于常见武器冷却：否则两发之间的空档朝向会闪回移动方向，看起来像抽搐
+    this.aimLock = 500
   }
 
-  // 枪口火光：开火瞬间的加色光斑，快速放大淡出
-  private muzzleFlash(x: number, y: number, angle: number, color: number) {
-    const d = 30
-    // 抬高一点，让火光落在角色的手/武器高度，而不是脚边
-    const baseY = y - 8
+  // 当前朝向下的「武器口」世界坐标，子弹与枪口火光都从这里发出。
+  // 侧身时取贴图实测的武器前端（MUZZLE_SIDE）；正面/背身时武器贴在身上，
+  // 就从身体中上部朝目标方向偏一点出，避免子弹从身体正中冒出来。
+  private muzzlePoint(angle: number): { x: number; y: number } {
+    const casting = this.aimLock > 0
+    const dir: Facing = casting ? this.aimDir : this.facing
+    const right = casting ? this.aimFacing > 0 : this.faceRight
+    if (dir === 'side') {
+      const [mx, my] = MUZZLE_SIDE[this.activeChar.id] ?? [18, 0]
+      return { x: this.player.x + mx * (right ? 1 : -1), y: this.player.y + my }
+    }
+    return {
+      x: this.player.x + Math.cos(angle) * 9,
+      y: this.player.y - 6 + Math.sin(angle) * 7
+    }
+  }
+
+  // 枪口火光：开火瞬间的加色光斑，快速放大淡出（坐标由 muzzlePoint 给出）
+  private muzzleFlash(x: number, y: number, color: number) {
     const f = this.add
-      .image(x + Math.cos(angle) * d, baseY + Math.sin(angle) * d, 'glow')
+      .image(x, y, 'glow')
       .setTint(color)
       .setBlendMode(Phaser.BlendModes.ADD)
       .setScale(0.55)
@@ -603,26 +642,28 @@ export class GameScene extends Phaser.Scene {
     const px = this.player.x
     const py = this.player.y
     const ang = target ? Phaser.Math.Angle.Between(px, py, target.x, target.y) : -Math.PI / 2
-    const ex = px + Math.cos(ang) * w.range
-    const ey = py + Math.sin(ang) * w.range
+    this.fireAngle = ang
+    this.lockAim(ang)
+    this.castAnim = 1
+    // 光束同样从武器口起，而不是角色中心
+    const mz = this.muzzlePoint(ang)
+    const ex = mz.x + Math.cos(ang) * w.range
+    const ey = mz.y + Math.sin(ang) * w.range
 
     // 外层辉光 + 内层高亮核心
     for (const [wdt, alp] of [[14, 0.28], [6, 0.9]] as [number, number][]) {
       const g = this.add.graphics().setDepth(50).setBlendMode(Phaser.BlendModes.ADD)
       g.lineStyle(wdt, w.color, alp)
-      g.beginPath(); g.moveTo(px, py); g.lineTo(ex, ey); g.strokePath()
+      g.beginPath(); g.moveTo(mz.x, mz.y); g.lineTo(ex, ey); g.strokePath()
       this.time.delayedCall(130, () => g.destroy())
     }
-    this.fireAngle = ang
-    this.lockAim(ang)
-    this.castAnim = 1
-    this.muzzleFlash(px, py, ang, w.color)
+    this.muzzleFlash(mz.x, mz.y, w.color)
     this.shake(70, 0.002)
 
     const kids = this.enemies.getChildren() as Phaser.Physics.Arcade.Image[]
     for (const e of kids) {
       if (!e.active) continue
-      if (this.distToSegment(e.x, e.y, px, py, ex, ey) < 26) {
+      if (this.distToSegment(e.x, e.y, mz.x, mz.y, ex, ey) < 26) {
         const hp = ((e.getData('hp') as number) || 0) - w.damage * this.dmgScale
         if (hp <= 0) this.killEnemy(e); else e.setData('hp', hp)
         this.spark(e.x, e.y, w.color, 2)
@@ -1041,7 +1082,8 @@ export class GameScene extends Phaser.Scene {
 
   private refreshPlayerLook() {
     const id = this.activeChar.id
-    this.heroImg.setTexture(charTex(id, this.facing))
+    this.curDir = this.facing
+    this.heroImg.setTexture(charTex(id, this.curDir))
     this.portrait.setTexture('portrait_' + id)
   }
 
