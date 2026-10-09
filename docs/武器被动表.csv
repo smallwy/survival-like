@@ -1,0 +1,10 @@
+﻿type,id,name,damage,cooldown,speed,count,desc
+weapon,pistol,手枪,12,450,480,1,
+weapon,shotgun,霰弹,7,850,420,5,
+weapon,orbit,环绕球,9,600,300,2,
+upgrade,dmg,伤害 +20%,,,,,所有武器伤害提升
+upgrade,spd,移速 +15%,,,,,玩家移动更快
+upgrade,cd,攻速 +15%,,,,,武器冷却缩短
+upgrade,hp,血量 +25,,,,,"最大生命提升,并回满该值"
+upgrade,magnet,拾取 +,,,,,"经验拾取范围扩大"
+upgrade,newgun,新武器,,,,,"随机获得一把武器"
