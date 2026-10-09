@@ -1,10 +1,8 @@
-﻿type,id,name,damage,cooldown,speed,count,desc
-weapon,pistol,手枪,12,450,480,1,
-weapon,shotgun,霰弹,7,850,420,5,
-weapon,orbit,环绕球,9,600,300,2,
-upgrade,dmg,伤害 +20%,,,,,所有武器伤害提升
-upgrade,spd,移速 +15%,,,,,玩家移动更快
-upgrade,cd,攻速 +15%,,,,,武器冷却缩短
-upgrade,hp,血量 +25,,,,,"最大生命提升,并回满该值"
-upgrade,magnet,拾取 +,,,,,"经验拾取范围扩大"
-upgrade,newgun,新武器,,,,,"随机获得一把武器"
+﻿id,name,kind,damage,cooldown,speed,count,spread,pierce,radius,range,color,unlock_by
+pistol,手枪,gun,12,450,480,1,0,0,0,0,0xffe066,初始
+smg,冲锋枪,gun,6,140,540,1,0.12,0,0,0,0xffe066,累计击杀150
+shotgun,霰弹枪,gun,7,850,420,5,0.5,0,0,0,0xffa502,最高分150
+rifle,穿透步枪,gun,20,700,720,1,0,3,0,0,0xff7f50,最高分600
+orbit,环绕球,orbit,9,0,2.2,3,0,0,95,0,0x4ecdc4,累计击杀400
+beam,激光束,beam,38,1500,0,1,0,0,0,420,0xff6bff,最高分1200
+aura,灼烧光环,aura,7,480,0,0,0,0,75,0,0xff4757,累计击杀800

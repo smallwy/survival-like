@@ -19,6 +19,9 @@ func New(dir string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Join(dir, "saves"), 0o755); err != nil {
 		return nil, err
 	}
+	if err := os.MkdirAll(filepath.Join(dir, "meta"), 0o755); err != nil {
+		return nil, err
+	}
 	return &Store{dir: dir}, nil
 }
 
@@ -51,6 +54,40 @@ func (s *Store) LoadGame(playerID string) (*Save, error) {
 		return nil, err
 	}
 	return &sv, nil
+}
+
+// Meta 是跨局成长（Roguelike meta-progression）的载体：
+// 记录解锁的武器/皮肤、累计击杀、最高分等。由后端按阈值权威解锁。
+type Meta struct {
+	PlayerID        string   `json:"playerId"`
+	UnlockedWeapons []string `json:"unlockedWeapons"`
+	UnlockedChars   []string `json:"unlockedChars"`
+	TotalKills      int      `json:"totalKills"`
+	BestScore       int      `json:"bestScore"`
+	Runs            int      `json:"runs"`
+	Souls           int      `json:"souls"` // 元货币，可后续做消费
+	Updated         int64    `json:"updated"`
+}
+
+func (s *Store) SaveMeta(m Meta) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, _ := json.Marshal(m)
+	return os.WriteFile(filepath.Join(s.dir, "meta", m.PlayerID+".json"), b, 0o644)
+}
+
+func (s *Store) LoadMeta(playerID string) (*Meta, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, err := os.ReadFile(filepath.Join(s.dir, "meta", playerID+".json"))
+	if err != nil {
+		return nil, err
+	}
+	var m Meta
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, err
+	}
+	return &m, nil
 }
 
 type Score struct {

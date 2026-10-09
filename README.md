@@ -93,8 +93,8 @@ go build -o ../bin/server ./server && ../bin/server
 - 后端已做接口隔离，迁移成本低。
 
 ## 已知 TODO
-- [ ] 更多武器 / 敌人 / Boss 与波次
-- [ ] meta 解锁（后端存档驱动角色/武器解锁）
+- [x] 更多武器 / 敌人 / Boss 与波次（gun/orbit/beam/aura + 射手 + 双 Boss + 波次导演）
+- [x] meta 解锁（后端 /api/meta 驱动武器/皮肤解锁，结算自动上报）
 - [ ] 音效与轻量特效（提升"爽感"）
 - [ ] 美术换皮选项（如三国皮肤包：仅换着色与文案）
 - [ ] Steam 接入与商店页 / 预告片
