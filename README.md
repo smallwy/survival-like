@@ -27,7 +27,9 @@ survivors-game/
 │       ├── scenes/GameScene.ts  # 核心玩法
 │       ├── config/gameData.ts   # 数值/内容数据表（策划改这里）
 │       ├── types.d.ts     # 静态资源类型声明
-│       └── assets/portraits/    # AI 生成的角色 + 敌人/BOSS 立绘（PNG）
+│       └── assets/portraits/    # 处理后的立绘（透明底 256px）
+├── tools/
+│   └── process_portraits.py   # 立绘后处理：抠白底 + 归一化到 256（改动原图后重跑）
 ├── docs/                  # 策划文档 + 数据表
 │   ├── 立项策划案.md
 │   ├── 武器被动表.csv
@@ -95,10 +97,17 @@ go build -o ../bin/server ./server && ../bin/server
 - 后端已做接口隔离，迁移成本低。
 
 ## 美术说明与 AI 披露
-- 游戏内角色 / 敌人 / BOSS：`web/src/assets/portraits/*.png` 为 AI 生成的 chibi 卡通立绘（1024×1024，按游戏内尺寸缩放显示）。
-- 玩家移动：带落地阴影、按方向翻转、移动时上下起伏（bob）+ 轻微 squash，不再是平移。
-- 背景：世界网格 TileSprite，随镜头移动产生空间感。
-- HUD：半透明面板 + 血条/经验条可视化 + 描边文字，比纯文本更清晰。
+- 立绘来源：`web/src/assets/portraits_raw/`（不入库）由 AI 生成的 chibi 卡通立绘。
+- 入库版本由 `tools/process_portraits.py` 后处理：
+  1. **抠白底**——ImageGen 返回的多为白底而非真透明（会导致每个单位套白方块），脚本用「从图像四周边界开始的 flood fill」只删除与边缘连通的近白像素，因此角色内部眼白等白色会被保留；
+  2. **归一化**——裁切到角色边界后放大到填满 `256x256`，于是代码里 `scale = 直径 / 256`，`ENEMIES[].radius` 就是角色真实身高半径（所见即所得）；
+  3. **降采样**——预乘 alpha + LANCZOS 到 256px，避免透明边白边，同时把立绘总包体从约 11MB 压到约 1MB。
+- 重新生成立绘后，**务必重跑**该脚本：
+  ```bash
+  python tools/process_portraits.py
+  ```
+  （首次运行会把原图备份到 `portraits_raw/`，之后重复运行是幂等的。）
+- 表现层：玩家走路含上下起伏 / 倾斜 / 迈步压扁 / 脚下扬尘 / 后坐力；射击含枪口火光、旋转曳光弹、命中火花与闪白、震屏；敌人会朝玩家水平翻转。
 - **Steam 发布要求**：上架时需在商店页勾选「AI 生成内容」披露，因角色/敌人立绘为 AI 生成。这是平台合规项，不影响审核。
 
 ## 已知 TODO

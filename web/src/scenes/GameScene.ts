@@ -15,16 +15,21 @@ import enemyShooter from '../assets/portraits/enemy_shooter.png'
 import enemyBossWarlord from '../assets/portraits/enemy_boss_warlord.png'
 import enemyBossTyrant from '../assets/portraits/enemy_boss_tyrant.png'
 
-// 幸存者类核心场景：
-// 移动 + 多类型自动武器 + 波次导演刷怪 + 射手远程 + Boss + 经验升级三选一 + 计时结算 + meta 解锁。
-// 美术策略：
-// - 主角 + 敌人/BOSS：AI 生成的 1024x1024 chibi 立绘（按比例缩小到约 20-80px），不再是圆点。
-// - 选人/HUD/结算：同一套 AI 立绘 PNG。
-// - 子弹/拾取/环绕球：白色圆点运行时着色。
+// 立绘统一规格（由 tools/process_portraits.py 生成）：
+// - 真透明底（flood fill 抠掉与边缘连通的白底，角色内部眼白保留）
+// - 裁切到角色边界后放大，角色填满 256x256 画布
+// 因此下面所有 scale 都基于 TEX=256，所见即所得。
+const TEX = 256
+const PLAYER_SCALE = 0.22 // 256 * 0.22 ≈ 56px
+
 interface WeaponRT { def: WeaponDef; cd: number; angle: number }
 
+// 幸存者类核心场景：
+// 移动 + 多类型自动武器 + 波次导演刷怪 + 射手远程 + Boss + 经验升级三选一 + 计时结算 + meta 解锁。
+// 表现层：主角走路动画（bob/倾斜/压扁/扬尘）、枪口火光 + 曳光弹 + 后坐力、命中火花与闪白、震屏。
 export class GameScene extends Phaser.Scene {
-  // 玩家用 Container 承载 AI 立绘：可见层是缩放后的立绘图片，物理碰撞框独立设为世界单位。
+  // 玩家用 Container 承载 AI 立绘：可见层是缩放后的立绘图片，物理碰撞框独立设为世界单位，
+  // 避免大图缩放把 Arcade 圆形碰撞框带成超大/超小（不同 Phaser 版本行为不一致）。
   private player!: Phaser.GameObjects.Container
   private playerImg!: Phaser.GameObjects.Image
   private shadow!: Phaser.GameObjects.Ellipse
@@ -68,6 +73,10 @@ export class GameScene extends Phaser.Scene {
   private bg!: Phaser.GameObjects.TileSprite
   private moving = false
   private faceRight = true
+  private walkPhase = 0     // 走路循环相位
+  private recoil = 0        // 后坐力（开火瞬间升高，逐帧衰减）
+  private fireAngle = 0     // 最近一次开火方向，用于后坐力反方向位移
+  private dustTimer = 0     // 走路扬尘计时
 
   // meta（跨局解锁）
   private unlockedW = new Set<string>(['pistol'])
@@ -78,7 +87,6 @@ export class GameScene extends Phaser.Scene {
   constructor() { super('game') }
 
   preload() {
-    // 预加载 AI 生成的 chibi 立绘（Vite 会把 import 解析为打包后 URL）
     this.load.image('portrait_rookie', rookiePortrait)
     this.load.image('portrait_guanyu', guanyuPortrait)
     this.load.image('portrait_zhangfei', zhangfeiPortrait)
@@ -112,17 +120,17 @@ export class GameScene extends Phaser.Scene {
       .setDepth(-20)
 
     // 玩家脚下的阴影
-    this.shadow = this.add.ellipse(cx, cy + 30, 40, 12, 0x000000, 0.25).setDepth(-1)
+    this.shadow = this.add.ellipse(cx, cy + 26, 42, 13, 0x000000, 0.3).setDepth(-1)
 
-    // 游戏内主角 = AI 立绘：Container 承载缩放后的立绘图片，碰撞框独立设成世界单位。
+    // 游戏内主角 = AI 立绘
     this.playerImg = this.add.image(0, 0, 'portrait_' + this.activeChar.id)
-      .setScale(0.06)
+      .setScale(PLAYER_SCALE)
       .setDepth(10)
     this.player = this.add.container(cx, cy, [this.playerImg])
     this.physics.add.existing(this.player)
     const pbody = this.player.body as Phaser.Physics.Arcade.Body
-    pbody.setSize(46, 46)
-    pbody.setOffset(-23, -23)
+    pbody.setSize(42, 42)
+    pbody.setOffset(-21, -21)
 
     this.enemies = this.physics.add.group()
     this.bullets = this.physics.add.group()
@@ -137,7 +145,7 @@ export class GameScene extends Phaser.Scene {
     this.physics.add.overlap(this.orbits, this.enemies, this.onOrbitHit as any, undefined, this)
 
     this.cameras.main.startFollow(this.player, true, 0.1, 0.1)
-    this.cameras.main.setBackgroundColor('#1a1a2e')
+    this.cameras.main.setBackgroundColor('#14142b')
 
     this.keys = this.input.keyboard!.addKeys('W,A,S,D,UP,LEFT,DOWN,RIGHT')
     this.buildHud()
@@ -153,16 +161,34 @@ export class GameScene extends Phaser.Scene {
     return v
   }
 
-  // 程序绘制所有纹理：dot 供子弹/敌人子弹/拾取；hero_ 为代码小人纹理（保留备用）。
+  // 程序绘制：dot（子弹/拾取）、tracer（曳光弹）、glow（火光/光晕）、grid（背景网格）
   private makeTextures() {
-    // 通用圆点（白底，运行时着色）
     const g = this.make.graphics({ x: 0, y: 0 }, false)
     g.fillStyle(0xffffff, 1)
     g.fillCircle(8, 8, 8)
     g.generateTexture('dot', 16, 16)
     g.destroy()
 
-    // 世界网格纹理（极淡，作为移动参照）
+    // 曳光弹：外层柔光 + 高亮核心，旋转后沿速度方向像一条弹道
+    const t = this.make.graphics({ x: 0, y: 0 }, false)
+    t.fillStyle(0xffffff, 0.3)
+    t.fillEllipse(14, 4.5, 28, 9)
+    t.fillStyle(0xffffff, 0.75)
+    t.fillEllipse(14, 4.5, 19, 6)
+    t.fillStyle(0xffffff, 1)
+    t.fillEllipse(15, 4.5, 11, 3.5)
+    t.generateTexture('tracer', 28, 9)
+    t.destroy()
+
+    // 径向光晕（叠加混合用）：越靠近中心越亮
+    const gl = this.make.graphics({ x: 0, y: 0 }, false)
+    for (let r = 24; r > 0; r--) {
+      gl.fillStyle(0xffffff, 0.05)
+      gl.fillCircle(24, 24, r)
+    }
+    gl.generateTexture('glow', 48, 48)
+    gl.destroy()
+
     const gg = this.make.graphics({ x: 0, y: 0 }, false)
     gg.lineStyle(1, 0xffffff, 0.08)
     gg.strokeRect(0, 0, 128, 128)
@@ -171,14 +197,13 @@ export class GameScene extends Phaser.Scene {
     gg.generateTexture('grid', 128, 128)
     gg.destroy()
 
-    // 角色立绘（分辨率统一 28x38，按角色换色 + 换配件区分）
-    this.makeHero('hero_rookie', 0x4ecdc4, {})                       // 新人：青衫，无配件
-    this.makeHero('hero_guanyu', 0xd63031, { beard: true })           // 关二哥：红袍 + 长髯
-    this.makeHero('hero_zhangfei', 0x0984e3, { big: true, fierce: true }) // 张三爷：蓝甲 + 壮 + 怒眉
-    this.makeHero('hero_zhaoyun', 0x00b894, { spear: true })          // 赵子龙：白甲 + 长枪
+    // 代码小人纹理（保留备用，当前主角与敌人都用 AI 立绘）
+    this.makeHero('hero_rookie', 0x4ecdc4, {})
+    this.makeHero('hero_guanyu', 0xd63031, { beard: true })
+    this.makeHero('hero_zhangfei', 0x0984e3, { big: true, fierce: true })
+    this.makeHero('hero_zhaoyun', 0x00b894, { spear: true })
   }
 
-  // 绘制一个 chibi 小人：头(肤色) + 身(角色色) + 腿 + 可选项(髯/枪/壮/怒眉)，全部程序生成、零图片。
   private makeHero(key: string, color: number, o: { beard?: boolean; spear?: boolean; big?: boolean; fierce?: boolean }) {
     const W = 28
     const H = 38
@@ -186,44 +211,36 @@ export class GameScene extends Phaser.Scene {
     const outline = 0x141414
     const g = this.make.graphics({ x: 0, y: 0 }, false)
 
-    // 腿
     g.fillStyle(0x2f2f3a, 1)
     g.fillRect(cx - 6, H - 11, 4, 11)
     g.fillRect(cx + 2, H - 11, 4, 11)
 
-    // 身体（壮角色更宽）
     const bw = o.big ? 20 : 15
     g.fillStyle(color, 1)
     g.fillRoundedRect(cx - bw / 2, 16, bw, 14, 4)
     g.lineStyle(2, outline, 1)
     g.strokeRoundedRect(cx - bw / 2, 16, bw, 14, 4)
 
-    // 手臂
     g.fillStyle(color, 1)
     g.fillRect(cx - bw / 2 - 3, 18, 3, 9)
     g.fillRect(cx + bw / 2, 18, 3, 9)
 
-    // 头
     g.fillStyle(0xffe0bd, 1)
     g.fillCircle(cx, 10, 7)
     g.lineStyle(2, outline, 1)
     g.strokeCircle(cx, 10, 7)
-    // 眼睛
     g.fillStyle(0x222222, 1)
     g.fillCircle(cx - 2.5, 9, 1.2)
     g.fillCircle(cx + 2.5, 9, 1.2)
-    // 怒眉（张飞）
     if (o.fierce) {
       g.lineStyle(1.5, 0x222222, 1)
       g.beginPath(); g.moveTo(cx - 5, 6); g.lineTo(cx - 1, 8); g.strokePath()
       g.beginPath(); g.moveTo(cx + 5, 6); g.lineTo(cx + 1, 8); g.strokePath()
     }
-    // 长髯（关羽）
     if (o.beard) {
       g.fillStyle(0x222222, 1)
       g.fillRoundedRect(cx - 5, 13, 10, 9, 3)
     }
-    // 长枪（赵云）
     if (o.spear) {
       g.lineStyle(2, 0xc9c9c9, 1)
       g.beginPath(); g.moveTo(cx + bw / 2 + 6, 3); g.lineTo(cx + bw / 2 + 6, 35); g.strokePath()
@@ -237,23 +254,21 @@ export class GameScene extends Phaser.Scene {
 
   private buildHud() {
     const hudBase = 99
-    // 半透明 HUD 面板
-    this.add.rectangle(4, 4, 330, 88, 0x0b0b16, 0.55)
+    this.add.rectangle(4, 4, 336, 90, 0x0b0b16, 0.6)
       .setOrigin(0, 0)
       .setScrollFactor(0)
       .setDepth(hudBase)
-      .setStrokeStyle(1, 0x4ecdc4, 0.4)
+      .setStrokeStyle(1, 0x4ecdc4, 0.45)
 
-    // 左上角 AI 立绘
-    this.portrait = this.add.image(42, 48, 'portrait_' + this.activeChar.id)
-      .setScale(0.06)
+    this.portrait = this.add.image(44, 49, 'portrait_' + this.activeChar.id)
+      .setScale(PLAYER_SCALE * 0.92)
       .setScrollFactor(0)
       .setDepth(hudBase + 1)
 
-    this.hpText = this.add.text(90, 14, '', {
+    this.hpText = this.add.text(94, 14, '', {
       fontSize: '18px', color: '#ffffff', stroke: '#000000', strokeThickness: 3
     }).setScrollFactor(0).setDepth(hudBase + 1)
-    this.lvText = this.add.text(90, 38, '', {
+    this.lvText = this.add.text(94, 38, '', {
       fontSize: '15px', color: '#ffd93d', stroke: '#000000', strokeThickness: 2
     }).setScrollFactor(0).setDepth(hudBase + 1)
     this.timeText = this.add
@@ -270,22 +285,20 @@ export class GameScene extends Phaser.Scene {
 
   private refreshHud() {
     this.hpText.setText(`HP ${Math.max(0, Math.ceil(this.hp))}/${this.maxHp}`)
-    this.lvText.setText(`${this.activeChar.name}  Lv.${this.level}  分 ${this.score}  杀 ${this.kills}`)
+    this.lvText.setText(`${this.activeChar.name}  Lv.${this.level}  分 ${this.score} 杀 ${this.kills}`)
     const m = Math.floor(this.elapsed / 60)
     const s = String(Math.floor(this.elapsed % 60)).padStart(2, '0')
     this.timeText.setText(`${m}:${s}`)
 
-    // 血条
     this.hpBar.clear()
-    this.hpBar.fillStyle(0x000000, 0.55).fillRect(90, 60, 150, 8)
+    this.hpBar.fillStyle(0x000000, 0.55).fillRect(94, 60, 158, 8)
     const hpPct = Math.max(0, Math.min(1, this.hp / this.maxHp))
     const hpColor = hpPct > 0.5 ? 0x6bcb77 : hpPct > 0.25 ? 0xffd93d : 0xff6b6b
-    this.hpBar.fillStyle(hpColor, 1).fillRect(90, 60, 150 * hpPct, 8)
+    this.hpBar.fillStyle(hpColor, 1).fillRect(94, 60, 158 * hpPct, 8)
 
-    // 经验条
     this.expBar.clear()
-    this.expBar.fillStyle(0x000000, 0.4).fillRect(90, 72, 150, 6)
-    this.expBar.fillStyle(0x4ecdc4, 1).fillRect(90, 72, 150 * Math.min(1, this.exp / this.expNeed), 6)
+    this.expBar.fillStyle(0x000000, 0.45).fillRect(94, 72, 158, 6)
+    this.expBar.fillStyle(0x4ecdc4, 1).fillRect(94, 72, 158 * Math.min(1, this.exp / this.expNeed), 6)
   }
 
   update(_t: number, delta: number) {
@@ -302,7 +315,6 @@ export class GameScene extends Phaser.Scene {
     this.refreshHud()
     if (this.elapsed >= BALANCE.runMinutes * 60) this.gameOver(true)
 
-    // 网格背景跟随镜头产生视差/空间感
     this.bg.tilePositionX = this.cameras.main.scrollX
     this.bg.tilePositionY = this.cameras.main.scrollY
   }
@@ -323,35 +335,82 @@ export class GameScene extends Phaser.Scene {
     body.setVelocity((vx / len) * this.speed, (vy / len) * this.speed)
   }
 
-  // 玩家立绘动态：移动时上下起伏 + 轻微 squash，左右翻转表示面向
+  // 走路视觉：上下起伏 + 左右倾斜 + 迈步压扁拉伸 + 脚下扬尘 + 后坐力位移
   private animatePlayer(delta: number) {
-    // 阴影始终贴地跟随
-    this.shadow.setPosition(this.player.x, this.player.y + 30)
+    this.shadow.setPosition(this.player.x, this.player.y + 26)
+    this.recoil = Math.max(0, this.recoil - delta * 0.006)
 
     if (this.moving) {
-      const t = this.time.now / 1000
-      const bob = Math.abs(Math.sin(t * 10)) * 5
+      this.walkPhase += delta * 0.013
+      const step = Math.sin(this.walkPhase)          // 迈步周期
+      const step2 = Math.sin(this.walkPhase * 2)     // 双倍频（压扁拉伸）
+      const dir = this.faceRight ? 1 : -1
+
+      // 上下起伏：每一步最高点抬升
+      const bob = Math.abs(Math.sin(this.walkPhase)) * 5
+      // 迈步压扁：落脚时压扁、抬起时拉长
+      const sx = PLAYER_SCALE * (1 - step2 * 0.055)
+      const sy = PLAYER_SCALE * (1 + step2 * 0.055)
+
       this.playerImg.y = -bob
-      const sx = 0.06
-      const sy = 0.06 * (1 + Math.sin(t * 10) * 0.04)
+      this.playerImg.rotation = dir * (0.045 + step * 0.05)
       this.playerImg.setScale(sx, sy)
       this.playerImg.setFlipX(!this.faceRight)
-      // 阴影随起伏缩放，制造"离地"错觉
-      this.shadow.setScale(1 - bob * 0.04)
+      this.shadow.setScale(1 - bob * 0.035, 1 - bob * 0.05)
+
+      // 扬尘：每隔一段时间在脚下踢起一小团灰
+      this.dustTimer -= delta
+      if (this.dustTimer <= 0) {
+        this.dustTimer = 190
+        this.footDust()
+      }
     } else {
-      // 静止时缓慢回到原位
-      const ease = delta * 0.012
-      this.playerImg.y += (0 - this.playerImg.y) * ease
-      this.playerImg.setScale(0.06, 0.06)
+      // 站立：轻微呼吸感 + 后坐力回弹
+      this.walkPhase = 0
+      const breathe = 1 + Math.sin(this.elapsed * 2.2) * 0.012
+      this.playerImg.y *= 0.85
+      this.playerImg.rotation *= 0.85
+      this.playerImg.setScale(PLAYER_SCALE * breathe, PLAYER_SCALE * breathe)
       this.playerImg.setFlipX(!this.faceRight)
-      this.shadow.setScale(1)
+      this.shadow.setScale(1, 1)
+    }
+
+    // 后坐力：沿开火反方向轻微位移 + 挤压
+    if (this.recoil > 0.01) {
+      const k = this.recoil * this.recoil
+      this.playerImg.x = -Math.cos(this.fireAngle) * 7 * k
+      this.playerImg.y += -Math.sin(this.fireAngle) * 7 * k
+      this.playerImg.setScale(
+        PLAYER_SCALE * (1 + k * 0.1),
+        PLAYER_SCALE * (1 - k * 0.1)
+      )
+    } else {
+      this.playerImg.x *= 0.8
+    }
+  }
+
+  private footDust() {
+    for (let i = 0; i < 2; i++) {
+      const d = this.add.image(
+        this.player.x + Phaser.Math.FloatBetween(-9, 9),
+        this.player.y + 22 + Phaser.Math.FloatBetween(-3, 3),
+        'dot'
+      ).setTint(0x9aa0b5).setAlpha(0.5).setScale(Phaser.Math.FloatBetween(0.12, 0.26)).setDepth(1)
+      this.tweens.add({
+        targets: d,
+        y: d.y - Phaser.Math.FloatBetween(8, 18),
+        alpha: 0,
+        scale: d.scale * 1.8,
+        duration: Phaser.Math.Between(280, 420),
+        onComplete: () => d.destroy()
+      })
     }
   }
 
   // ---------- 武器 ----------
   private tickWeapons(delta: number) {
     for (const w of this.weapons) {
-      if (w.def.kind === 'orbit') continue // 环绕球由 driveOrbits 处理移动，伤害走 overlap
+      if (w.def.kind === 'orbit') continue
       w.cd -= delta
       if (w.cd > 0) continue
       w.cd = w.def.cooldown * this.fireCdScale
@@ -366,18 +425,74 @@ export class GameScene extends Phaser.Scene {
     const px = this.player.x
     const py = this.player.y
     const base = target ? Phaser.Math.Angle.Between(px, py, target.x, target.y) : -Math.PI / 2
+    this.fireAngle = base
+    this.recoil = 1
+    this.muzzleFlash(px, py, base, w.color)
+    this.shake(60, 0.0015)
+
     for (let i = 0; i < w.count; i++) {
       const a = base + (i - (w.count - 1) / 2) * (w.spread || 0)
-      const b = this.bullets.get(px, py, 'dot') as Phaser.Physics.Arcade.Image | null
+      const b = this.bullets.get(px, py, 'tracer') as Phaser.Physics.Arcade.Image | null
       if (!b) continue
-      b.setActive(true).setVisible(true).setTint(w.color).setScale(0.5)
+      const vx = Math.cos(a) * w.speed
+      const vy = Math.sin(a) * w.speed
+      b.setActive(true).setVisible(true).setTint(w.color)
+      b.setBlendMode(Phaser.BlendModes.ADD)
+      b.setRotation(a)
+      b.setScale(1)
       const body = b.body as Phaser.Physics.Arcade.Body
-      body.setCircle(8)
-      body.setVelocity(Math.cos(a) * w.speed, Math.sin(a) * w.speed)
+      body.setSize(24, 6, true)
+      body.setVelocity(vx, vy)
       b.setData('dmg', w.damage * this.dmgScale)
       b.setData('pierce', w.pierce + this.pierceBonus)
       b.setData('hit', new Set())
+      b.setData('col', w.color)
     }
+  }
+
+  // 枪口火光：开火瞬间的加色光斑，快速放大淡出
+  private muzzleFlash(x: number, y: number, angle: number, color: number) {
+    const d = 26
+    const f = this.add
+      .image(x + Math.cos(angle) * d, y + Math.sin(angle) * d, 'glow')
+      .setTint(color)
+      .setBlendMode(Phaser.BlendModes.ADD)
+      .setScale(0.5)
+      .setDepth(60)
+    this.tweens.add({
+      targets: f,
+      scale: 1.15,
+      alpha: 0,
+      duration: 95,
+      ease: 'Quad.easeOut',
+      onComplete: () => f.destroy()
+    })
+  }
+
+  // 命中火花
+  private spark(x: number, y: number, color: number, n = 3) {
+    for (let i = 0; i < n; i++) {
+      const a = Phaser.Math.FloatBetween(0, Math.PI * 2)
+      const sp = Phaser.Math.FloatBetween(40, 120)
+      const p = this.add
+        .image(x, y, 'dot')
+        .setTint(color)
+        .setBlendMode(Phaser.BlendModes.ADD)
+        .setScale(Phaser.Math.FloatBetween(0.16, 0.34))
+        .setDepth(55)
+      this.tweens.add({
+        targets: p,
+        x: x + Math.cos(a) * sp,
+        y: y + Math.sin(a) * sp,
+        alpha: 0,
+        duration: Phaser.Math.Between(160, 300),
+        onComplete: () => p.destroy()
+      })
+    }
+  }
+
+  private shake(dur: number, intensity: number) {
+    this.cameras.main.shake(dur, intensity, false)
   }
 
   private fireBeam(w: WeaponDef, target: Phaser.Physics.Arcade.Image | null) {
@@ -386,16 +501,24 @@ export class GameScene extends Phaser.Scene {
     const ang = target ? Phaser.Math.Angle.Between(px, py, target.x, target.y) : -Math.PI / 2
     const ex = px + Math.cos(ang) * w.range
     const ey = py + Math.sin(ang) * w.range
-    const g = this.add.graphics().setDepth(50)
-    g.lineStyle(4, w.color, 0.9)
-    g.beginPath(); g.moveTo(px, py); g.lineTo(ex, ey); g.strokePath()
-    this.time.delayedCall(120, () => g.destroy())
+
+    // 外层辉光 + 内层高亮核心
+    for (const [wdt, alp] of [[14, 0.28], [6, 0.9]] as [number, number][]) {
+      const g = this.add.graphics().setDepth(50).setBlendMode(Phaser.BlendModes.ADD)
+      g.lineStyle(wdt, w.color, alp)
+      g.beginPath(); g.moveTo(px, py); g.lineTo(ex, ey); g.strokePath()
+      this.time.delayedCall(130, () => g.destroy())
+    }
+    this.muzzleFlash(px, py, ang, w.color)
+    this.shake(70, 0.002)
+
     const kids = this.enemies.getChildren() as Phaser.Physics.Arcade.Image[]
     for (const e of kids) {
       if (!e.active) continue
       if (this.distToSegment(e.x, e.y, px, py, ex, ey) < 26) {
         const hp = ((e.getData('hp') as number) || 0) - w.damage * this.dmgScale
         if (hp <= 0) this.killEnemy(e); else e.setData('hp', hp)
+        this.spark(e.x, e.y, w.color, 2)
       }
     }
   }
@@ -403,9 +526,9 @@ export class GameScene extends Phaser.Scene {
   private fireAura(w: WeaponDef) {
     const px = this.player.x
     const py = this.player.y
-    const g = this.add.graphics().setDepth(40)
-    g.fillStyle(w.color, 0.22); g.fillCircle(px, py, w.radius)
-    g.lineStyle(3, w.color, 0.8); g.strokeCircle(px, py, w.radius)
+    const g = this.add.graphics().setDepth(40).setBlendMode(Phaser.BlendModes.ADD)
+    g.fillStyle(w.color, 0.16); g.fillCircle(px, py, w.radius)
+    g.lineStyle(3, w.color, 0.7); g.strokeCircle(px, py, w.radius)
     this.time.delayedCall(200, () => g.destroy())
     const kids = this.enemies.getChildren() as Phaser.Physics.Arcade.Image[]
     for (const e of kids) {
@@ -422,6 +545,7 @@ export class GameScene extends Phaser.Scene {
       const o = this.orbits.get(this.player.x, this.player.y, 'dot') as Phaser.Physics.Arcade.Image | null
       if (!o) continue
       o.setActive(true).setVisible(true).setTint(def.color).setScale(Math.max(0.6, def.radius / 40))
+      o.setBlendMode(Phaser.BlendModes.ADD)
       ;(o.body as Phaser.Physics.Arcade.Body).setCircle(8)
       o.setData('dmg', def.damage * this.dmgScale)
       o.setData('cd', 0)
@@ -497,15 +621,16 @@ export class GameScene extends Phaser.Scene {
     const e = this.enemies.get(x, y, tex) as Phaser.Physics.Arcade.Image | null
     if (!e) return
 
-    // 敌人大小 = 2*radius，纹理 1024 => 缩放 (2r)/1024
-    const s = (def.radius * 2) / 1024
-    e.setActive(true).setVisible(true).setScale(s)
+    // 立绘已归一化填满 256 画布，故 scale = 直径 / 256，radius 即角色真实身高半径
+    const s = (def.radius * 2) / TEX
+    e.setActive(true).setVisible(true).setScale(s).setAngle(0)
     e.setData('hp', def.hp + this.level * 4)
     e.setData('dmg', def.damage)
     e.setData('sp', def.speed)
     e.setData('isBoss', !!def.isBoss)
     e.setData('touchCd', 0)
     e.setData('shockCd', 4000)
+    e.setData('col', def.color)
     if (def.shooter) {
       e.setData('shootMax', def.shootCd || 1600)
       e.setData('shootCd', def.shootCd || 1600)
@@ -513,11 +638,15 @@ export class GameScene extends Phaser.Scene {
     }
     e.setData('eid', ++this.eidSeq)
 
-    // 矩形碰撞框按显示大小设（除以当前缩放 = 回到 source 像素，updateBounds 再乘回正确世界尺寸）
+    // 碰撞框取视觉尺寸的 78%，让走位更宽容（除以 scale 换回 source 像素）
+    const hb = def.radius * 2 * 0.78
     const body = e.body as Phaser.Physics.Arcade.Body
-    body.setSize((def.radius * 2) / s, (def.radius * 2) / s, true)
+    body.setSize(hb / s, hb / s, true)
 
-    if (def.isBoss) this.bossBanner(def.bossName || def.name)
+    if (def.isBoss) {
+      this.bossBanner(def.bossName || def.name)
+      this.shake(420, 0.006)
+    }
   }
 
   private driveEnemies(delta: number) {
@@ -527,6 +656,9 @@ export class GameScene extends Phaser.Scene {
       const sp = (e.getData('sp') as number) || 70
       const a = Phaser.Math.Angle.Between(e.x, e.y, this.player.x, this.player.y)
       ;(e.body as Phaser.Physics.Arcade.Body).setVelocity(Math.cos(a) * sp, Math.sin(a) * sp)
+
+      // 朝向玩家（水平翻转），比纯色块更有"在追你"的感觉
+      e.setFlipX(e.x > this.player.x)
 
       let touch = (e.getData('touchCd') as number) - delta
       if (touch < 0) touch = 0
@@ -539,6 +671,7 @@ export class GameScene extends Phaser.Scene {
           if (Phaser.Math.Distance.Between(e.x, e.y, this.player.x, this.player.y) < e.displayWidth / 2 + 130) {
             this.hp -= (e.getData('dmg') as number) || 0
             if (this.hp <= 0) this.gameOver(false)
+            this.shake(160, 0.005)
           }
         }
         e.setData('shockCd', sc)
@@ -558,11 +691,20 @@ export class GameScene extends Phaser.Scene {
   private enemyShoot(e: Phaser.Physics.Arcade.Image, dmg: number) {
     const b = this.enemyBullets.get(e.x, e.y, 'dot') as Phaser.Physics.Arcade.Image | null
     if (!b) return
-    b.setActive(true).setVisible(true).setTint(0xff3b3b).setScale(0.45)
-    ;(b.body as Phaser.Physics.Arcade.Body).setCircle(8)
     const a = Phaser.Math.Angle.Between(e.x, e.y, this.player.x, this.player.y)
+    b.setActive(true).setVisible(true).setTint(0xff3b3b)
+    b.setBlendMode(Phaser.BlendModes.ADD)
+    b.setScale(0.55)
+    ;(b.body as Phaser.Physics.Arcade.Body).setCircle(8)
     b.setVelocity(Math.cos(a) * 260, Math.sin(a) * 260)
     b.setData('dmg', dmg)
+    // 射手开火也有火光，给玩家预警
+    const f = this.add.image(e.x, e.y, 'glow').setTint(0xff3b3b)
+      .setBlendMode(Phaser.BlendModes.ADD).setScale(0.4).setDepth(60)
+    this.tweens.add({
+      targets: f, scale: 0.9, alpha: 0, duration: 130,
+      onComplete: () => f.destroy()
+    })
   }
 
   private driveEnemyBullets() {
@@ -596,10 +738,18 @@ export class GameScene extends Phaser.Scene {
     if (hit.has(e)) return
     hit.add(e)
     const hp = ((e.getData('hp') as number) || 0) - (b.getData('dmg') as number)
+    this.spark(b.x, b.y, (b.getData('col') as number) || 0xffe066, 2)
     if (hp <= 0) this.killEnemy(e); else e.setData('hp', hp)
+    // 命中闪白，给即时反馈
+    e.setTintFill(0xffffff)
+    this.time.delayedCall(55, () => { if (e.active) e.clearTint() })
+
     let pierce = (b.getData('pierce') as number) || 0
     if (pierce > 0) b.setData('pierce', pierce - 1)
-    else { b.setActive(false).setVisible(false); (b.body as Phaser.Physics.Arcade.Body).setVelocity(0, 0) }
+    else {
+      b.setActive(false).setVisible(false)
+      ;(b.body as Phaser.Physics.Arcade.Body).setVelocity(0, 0)
+    }
   }
 
   private onOrbitHit = (oObj: any, eObj: any) => {
@@ -618,6 +768,8 @@ export class GameScene extends Phaser.Scene {
     if ((e.getData('touchCd') as number) > 0) return
     e.setData('touchCd', 600)
     this.hp -= (e.getData('dmg') as number) || 0
+    this.shake(150, 0.005)
+    this.spark(this.player.x, this.player.y, 0xff6b6b, 4)
     if (this.hp <= 0) this.gameOver(false)
   }
 
@@ -627,6 +779,8 @@ export class GameScene extends Phaser.Scene {
     this.hp -= (b.getData('dmg') as number) || 0
     b.setActive(false).setVisible(false)
     ;(b.body as Phaser.Physics.Arcade.Body).setVelocity(0, 0)
+    this.spark(this.player.x, this.player.y, 0xff3b3b, 4)
+    this.shake(150, 0.005)
     if (this.hp <= 0) this.gameOver(false)
   }
 
@@ -643,6 +797,9 @@ export class GameScene extends Phaser.Scene {
   }
 
   private killEnemy(e: Phaser.Physics.Arcade.Image) {
+    const col = (e.getData('col') as number) || 0xffffff
+    this.spark(e.x, e.y, col, e.getData('isBoss') ? 12 : 5)
+    if (e.getData('isBoss')) this.shake(320, 0.008)
     e.setActive(false).setVisible(false)
     ;(e.body as Phaser.Physics.Arcade.Body).setVelocity(0, 0)
     this.kills += 1
@@ -652,9 +809,15 @@ export class GameScene extends Phaser.Scene {
 
   private dropExp(x: number, y: number, n = 1) {
     for (let i = 0; i < n; i++) {
-      const k = this.pickups.get(x + Phaser.Math.FloatBetween(-12, 12), y + Phaser.Math.FloatBetween(-12, 12), 'dot') as Phaser.Physics.Arcade.Image | null
+      const k = this.pickups.get(
+        x + Phaser.Math.FloatBetween(-12, 12),
+        y + Phaser.Math.FloatBetween(-12, 12),
+        'dot'
+      ) as Phaser.Physics.Arcade.Image | null
       if (!k) continue
-      k.setActive(true).setVisible(true).setTint(0x6bcb77).setScale(0.4)
+      k.setActive(true).setVisible(true).setTint(0x6bcb77)
+      k.setBlendMode(Phaser.BlendModes.ADD)
+      k.setScale(0.55)
       ;(k.body as Phaser.Physics.Arcade.Body).setCircle(8)
     }
   }
@@ -687,9 +850,7 @@ export class GameScene extends Phaser.Scene {
       c.add(
         this.add
           .text(0, -55 + i * 56, `${i + 1}. ${u.name}\n${u.desc}`, {
-            fontSize: '15px',
-            color: '#ffe066',
-            align: 'center'
+            fontSize: '15px', color: '#ffe066', align: 'center'
           })
           .setOrigin(0.5)
       )
@@ -737,7 +898,6 @@ export class GameScene extends Phaser.Scene {
         this.unlockedC = new Set<string>(m.unlockedChars || ['rookie'])
       }
     } catch { /* 离线也可玩，仅无解锁内容 */ }
-    // 默认选已解锁里最后一个（赵云最后）
     for (let i = CHARS.length - 1; i >= 0; i--) {
       if (this.unlockedC.has(CHARS[i].id)) { this.activeChar = CHARS[i]; break }
     }
@@ -745,40 +905,38 @@ export class GameScene extends Phaser.Scene {
     this.showCharSelect()
   }
 
-  // 同步更新游戏内主角立绘 + HUD AI 立绘
   private refreshPlayerLook() {
     this.playerImg.setTexture('portrait_' + this.activeChar.id)
     this.portrait.setTexture('portrait_' + this.activeChar.id)
   }
 
-  // 开局选人界面：用 AI 立绘做成卡片，未解锁角色灰显并提示
   private showCharSelect() {
     if (this.selectOverlay) return
     this.started = false
     const c = this.add.container(this.scale.width / 2, this.scale.height / 2).setScrollFactor(0).setDepth(500)
     this.selectOverlay = c
 
-    c.add(this.add.rectangle(0, 0, 780, 420, 0x0f0f1a, 0.95).setStrokeStyle(3, 0x4ecdc4))
-    c.add(this.add.text(0, -170, '选择你的武将', { fontSize: '28px', color: '#ffffff' }).setOrigin(0.5))
+    c.add(this.add.rectangle(0, 0, 800, 440, 0x0f0f1a, 0.96).setStrokeStyle(3, 0x4ecdc4))
+    c.add(this.add.text(0, -186, '选择你的武将', { fontSize: '28px', color: '#ffffff' }).setOrigin(0.5))
 
     CHARS.forEach((ch, i) => {
-      const x = -270 + i * 180
+      const x = -276 + i * 184
       const locked = !this.unlockedC.has(ch.id)
       const card = this.add.container(x, 0)
 
-      const bg = this.add.rectangle(0, 0, 130, 170, 0x222233, 1).setStrokeStyle(2, locked ? 0x555566 : 0x4ecdc4)
+      const bg = this.add.rectangle(0, 0, 136, 190, 0x222233, 1).setStrokeStyle(2, locked ? 0x555566 : 0x4ecdc4)
       card.add(bg)
 
-      const portrait = this.add.image(0, -25, 'portrait_' + ch.id).setScale(0.095)
+      const portrait = this.add.image(0, -30, 'portrait_' + ch.id).setScale(0.44)
       card.add(portrait)
 
-      const name = this.add.text(0, 55, ch.name, { fontSize: '16px', color: locked ? '#888888' : '#ffffff' }).setOrigin(0.5)
+      const name = this.add.text(0, 66, ch.name, { fontSize: '16px', color: locked ? '#888888' : '#ffffff' }).setOrigin(0.5)
       card.add(name)
 
       if (locked) {
-        card.add(this.add.rectangle(0, -25, 130, 130, 0x000000, 0.65))
-        card.add(this.add.text(0, -25, '未解锁', { fontSize: '13px', color: '#ff6b6b' }).setOrigin(0.5))
-        card.add(this.add.text(0, 25, '累计击杀解锁', { fontSize: '11px', color: '#888888' }).setOrigin(0.5))
+        card.add(this.add.rectangle(0, -30, 136, 150, 0x000000, 0.68))
+        card.add(this.add.text(0, -30, '未解锁', { fontSize: '13px', color: '#ff6b6b' }).setOrigin(0.5))
+        card.add(this.add.text(0, 22, '累计击杀解锁', { fontSize: '11px', color: '#888888' }).setOrigin(0.5))
       }
 
       if (!locked) {

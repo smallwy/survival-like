@@ -54,15 +54,15 @@ export const WEAPONS: WeaponDef[] = [
   { id: 'aura', name: '灼烧光环', kind: 'aura', damage: 7, cooldown: 480, speed: 0, count: 0, spread: 0, pierce: 0, radius: 75, range: 0, color: 0xff4757, desc: '持续范围灼烧' }
 ]
 
-// 敌人：颜色即外观，换数值即可出新怪
+// 敌人：radius = 角色真实身高的半径（立绘已归一化到 256 画布且填满，所见即所得）
 export const ENEMIES: EnemyDef[] = [
-  { id: 'minion', name: '小怪', hp: 20, speed: 70, damage: 8, color: 0xff6b6b, radius: 10 },
-  { id: 'runner', name: '快怪', hp: 14, speed: 135, damage: 6, color: 0xffd93d, radius: 8 },
-  { id: 'tank', name: '胖怪', hp: 70, speed: 45, damage: 14, color: 0x6bcb77, radius: 16 },
-  { id: 'swarm', name: '虫群', hp: 8, speed: 95, damage: 4, color: 0xff9f43, radius: 6 },
-  { id: 'shooter', name: '射手', hp: 30, speed: 50, damage: 0, color: 0xa55eea, radius: 11, shooter: true, shootCd: 1600, shootDmg: 10 },
-  { id: 'boss_warlord', name: '霸主', hp: 1200, speed: 42, damage: 18, color: 0x9b59b6, radius: 34, isBoss: true, bossName: '中期 Boss · 霸主' },
-  { id: 'boss_tyrant', name: '暴君', hp: 2600, speed: 38, damage: 24, color: 0xee5253, radius: 40, isBoss: true, bossName: '终极 Boss · 暴君' }
+  { id: 'minion', name: '小怪', hp: 20, speed: 70, damage: 8, color: 0xff6b6b, radius: 17 },
+  { id: 'runner', name: '快怪', hp: 14, speed: 135, damage: 6, color: 0xffd93d, radius: 15 },
+  { id: 'tank', name: '胖怪', hp: 70, speed: 45, damage: 14, color: 0x6bcb77, radius: 25 },
+  { id: 'swarm', name: '虫群', hp: 8, speed: 95, damage: 4, color: 0xff9f43, radius: 12 },
+  { id: 'shooter', name: '射手', hp: 30, speed: 50, damage: 0, color: 0xa55eea, radius: 19, shooter: true, shootCd: 1600, shootDmg: 10 },
+  { id: 'boss_warlord', name: '霸主', hp: 1200, speed: 42, damage: 18, color: 0x9b59b6, radius: 52, isBoss: true, bossName: '中期 Boss · 霸主' },
+  { id: 'boss_tyrant', name: '暴君', hp: 2600, speed: 38, damage: 24, color: 0xee5253, radius: 66, isBoss: true, bossName: '终极 Boss · 暴君' }
 ]
 
 // 升级池：升级时随机抽 3 个让玩家选
