@@ -97,11 +97,16 @@ def main():
 
         wy, ww = find_waist(full)
 
-        # 直接按像素切分，内容坐标保持不变（这是对齐的关键）
+        # 上半身：包含腰线以上 + 向下多带 OVERLAP 像素（防旋转露缝），
+        # 内容保持在 256 画布的**原始坐标**。
         upper = Image.new("RGBA", (TARGET, TARGET), (0, 0, 0, 0))
         upper.paste(full.crop((0, 0, TARGET, min(TARGET, wy + OVERLAP))), (0, 0))
-        lower = Image.new("RGBA", (TARGET, TARGET), (0, 0, 0, 0))
-        lower.paste(full.crop((0, wy, TARGET, TARGET)), (0, 0))
+
+        # 下半身：**平移到画布顶部对齐腰线**。
+        # 关键（第一版 bug）：若直接粘贴到 (0, wy)，内容其实已在自身画布顶部，
+        # 贴到 wy 处会整体下移，导致 waist 以下空白、下半身看起来"消失"。
+        # 正确做法是贴到 (0,0)，让内容从画布顶部开始，紧接上半身腰线。
+        lower = full.crop((0, wy, TARGET, TARGET))
 
         upper.save(os.path.join(SRC, name + "_upper.png"))
         lower.save(os.path.join(SRC, name + "_lower.png"))

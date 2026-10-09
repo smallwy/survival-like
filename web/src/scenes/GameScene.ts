@@ -96,6 +96,7 @@ export class GameScene extends Phaser.Scene {
   private moveVy = 0
   private faceRight = true
   private faceUp = false    // 是否背对镜头（向上走）
+  private aimFacing = 1     // 施法瞬间锁定的朝向（+1 面朝右 / -1 面朝左），施法期间固定，避免每帧抖动
   private walkPhase = 0     // 走路循环相位
   private castAnim = 0      // 抬手施法/开火动作进度（1 -> 0）
   private fireAngle = 0     // 最近一次施法方向
@@ -425,51 +426,66 @@ export class GameScene extends Phaser.Scene {
     // 阴影随起伏缩放，制造离地错觉
     this.shadow.setScale(1 - bob * 0.035, 1 - bob * 0.05)
 
-    // 下半身：承载起伏与倾斜（走路的主体）
-    this.lowerImg.setScale(PLAYER_SCALE * sqx, PLAYER_SCALE * sqy)
-    this.lowerImg.y = -bob
-    this.lowerImg.rotation = leanX + leanY * 0.6
-    this.lowerImg.setFlipX(flip)
-
-    // 上半身：抬起时大幅后仰(rotation)，并向施法方向前送
+    // ---------- 抬手施法 ----------
+    // 设计取舍：角色在屏幕上仅约 56px，大角度腰部旋转(±35°)在这个尺寸下
+    // 只会显得整个人歪斜诡异，反而看不出"手臂抬起"。因此这里以**小角度 + 位移**
+    // 为主：轻微后仰蓄力 + 明显的上举与前送，靠位移和拉伸传达抬手，而不是靠大幅旋转。
     if (this.castAnim > 0.01) {
-      // 进度曲线：p = 0(刚触发) -> 1(动作结束)
-      // easeOutCubic 让出手瞬间速度最快（跟真实发力一致），避免"延迟才动"的僵硬感。
-      const p = 1 - this.castAnim
-      const p2 = 1 - Math.pow(1 - p, 3)
-      // 抬升曲线：起手就有明显抬手（首帧不为 0），末段线性收回归位。
-      // 用 p 的衰减项保证单调回落，避免 sin 曲线尾部卡住导致"动作冻结"。
-      const envelope = Math.pow(1 - p, 1.4)   // 1 -> 0，单调
-      const arc = Math.sin(Math.PI * p2)      // 抡起 -> 甩出 的弧线
-      const lift = Math.min(1, envelope * (0.55 + 0.75 * arc))
+      const p = 1 - this.castAnim            // 0(刚触发) -> 1(动作结束)
+      const f = this.aimFacing              // +1 面朝右，-1 面朝左（开火瞬间锁定，避免朝向跳变）
       const dirX = Math.cos(this.fireAngle)
-      const dirY = Math.sin(this.fireAngle)
-      const faceMul = this.faceRight ? 1 : -1
-      // 抡起方向与开火方向一致：武器绕腰部大幅上抬（最大约 62°）
-      const swing = -dirX * 1.08 * lift * faceMul
-      // origin 已设为腰线比例（见 create），rotation 即绕腰旋转 -> 手臂真正抬起
-      this.upperImg.rotation = swing + leanX * 0.5 + leanY * 0.3
-      // 抬手时整体上举 + 前送
-      this.upperImg.x = dirX * 14 * lift
-      this.upperImg.y = -bob - 6 * lift
-      // 发力时纵向拉长（抡起蓄力感）
+
+      // 三段式（角度刻意压小，仅作为姿态微调）：
+      //   p 0.00~0.32  蓄力：轻微后仰 -0.16rad
+      //   p 0.32~0.64  挥出：越过中线到 +0.10rad，同时明显上举 + 前送
+      //   p 0.64~1.00  回正：角度与位移平滑归零
+      let swing: number
+      let push: number
+      if (p < 0.32) {
+        swing = -0.16 * Phaser.Math.SmoothStep(p / 0.32, 0, 1)
+        push = 0
+      } else if (p < 0.64) {
+        const e = Phaser.Math.SmoothStep((p - 0.32) / 0.32, 0, 1)
+        swing = -0.16 + 0.26 * e
+        push = 10 * e
+      } else {
+        const e = Phaser.Math.SmoothStep((p - 0.64) / 0.36, 0, 1)
+        swing = 0.10 * (1 - e)
+        push = 10 * (1 - e)
+      }
+
+      // strike = 挥出进度(0..1)，用于拉伸/上举；wind = 蓄力进度，用于轻微压缩
+      const strike = Phaser.Math.Clamp((swing + 0.16) / 0.26, 0, 1)
+      const wind = Phaser.Math.Clamp(-swing / 0.16, 0, 1)
+
+      // 上半身：围绕腰线做小角度姿态 + 明显上举与前送
+      this.upperImg.rotation = swing * f + leanX * 0.5 + leanY * 0.3
+      this.upperImg.x = push * f
+      this.upperImg.y = -bob - strike * 8          // 上举：抬手的主要视觉信号
       this.upperImg.setScale(
-        PLAYER_SCALE * sqx * (1 - lift * 0.07),
-        PLAYER_SCALE * sqy * (1 + lift * 0.2)
+        PLAYER_SCALE * sqx * (1 + strike * 0.1),
+        PLAYER_SCALE * sqy * (1 + strike * 0.13 + wind * 0.04)
       )
       this.upperImg.setFlipX(flip)
 
-      // 下半身做反向剪切：抬手时腿部下沉/后坐，形成上下身对拉的真实发力姿态
-      this.lowerImg.rotation -= dirX * 0.14 * lift * faceMul
-      this.lowerImg.y = -bob + 4 * lift
+      // 下半身：仅做轻微反向剪切与下沉，配合上半身形成发力感（幅度克制，避免怪异）
+      this.lowerImg.setScale(PLAYER_SCALE * sqx, PLAYER_SCALE * sqy)
+      this.lowerImg.y = -bob + wind * 2.5 - strike * 1.5
+      this.lowerImg.rotation = leanX + leanY * 0.6 + swing * 0.18 * f
+      this.lowerImg.setFlipX(flip)
     } else {
-      // 静止/走路时上半身跟随下半身，仅保留轻微反向惯性，避免完全僵硬同步
-      const inertia = Math.sin(this.walkPhase + Math.PI) * 0.02
+      // 静止/走路：两层完全同步（仅保留极轻微惯性），确保严丝合缝
+      const inertia = Math.sin(this.walkPhase + Math.PI) * 0.015
       this.upperImg.rotation = inertia + leanX * 0.5 + leanY * 0.3
-      this.upperImg.x *= 0.85
+      this.upperImg.x = 0
       this.upperImg.y = -bob
       this.upperImg.setScale(PLAYER_SCALE * sqx, PLAYER_SCALE * sqy)
       this.upperImg.setFlipX(flip)
+
+      this.lowerImg.setScale(PLAYER_SCALE * sqx, PLAYER_SCALE * sqy)
+      this.lowerImg.y = -bob
+      this.lowerImg.rotation = leanX + leanY * 0.6 + inertia * 0.5
+      this.lowerImg.setFlipX(flip)
     }
   }
 
@@ -510,6 +526,8 @@ export class GameScene extends Phaser.Scene {
     const py = this.player.y
     const base = target ? Phaser.Math.Angle.Between(px, py, target.x, target.y) : -Math.PI / 2
     this.fireAngle = base
+    // 瞄准即转身：开火瞬间锁定朝向目标，施法期间保持，避免"朝左却向右挥"
+    this.aimFacing = Math.cos(base) >= 0 ? 1 : -1
     this.castAnim = 1
     this.muzzleFlash(px, py, base, w.color, this.waistY)
     this.shake(60, 0.0015)
@@ -596,6 +614,7 @@ export class GameScene extends Phaser.Scene {
       this.time.delayedCall(130, () => g.destroy())
     }
     this.fireAngle = ang
+    this.aimFacing = Math.cos(ang) >= 0 ? 1 : -1
     this.castAnim = 1
     this.muzzleFlash(px, py, ang, w.color, this.waistY)
     this.shake(70, 0.002)
@@ -617,6 +636,7 @@ export class GameScene extends Phaser.Scene {
     // 光环是持续施法，用较弱的抬手动作 + 举身感
     this.castAnim = Math.max(this.castAnim, 0.55)
     this.fireAngle = -Math.PI / 2
+    this.aimFacing = 1
     const g = this.add.graphics().setDepth(40).setBlendMode(Phaser.BlendModes.ADD)
     g.fillStyle(w.color, 0.16); g.fillCircle(px, py, w.radius)
     g.lineStyle(3, w.color, 0.7); g.strokeCircle(px, py, w.radius)
