@@ -4,7 +4,8 @@ web/node_modules/
 web/dist/
 
 # 运行时数据（云存档/排行榜，本地生成，不入库）
-data/*.json
+data/
+server/data/
 
 # 编译产物
 *.exe

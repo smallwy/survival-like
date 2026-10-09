@@ -3,10 +3,17 @@ import {
   WEAPONS, ENEMIES, UPGRADES, WAVE_STAGES, BOSS_SCHEDULE, CHARS, META_NAMES,
   BALANCE, WeaponDef, EnemyDef, enemyById, weaponById
 } from '../config/gameData'
+import rookiePortrait from '../assets/portraits/rookie.png'
+import guanyuPortrait from '../assets/portraits/guanyu.png'
+import zhangfeiPortrait from '../assets/portraits/zhangfei.png'
+import zhaoyunPortrait from '../assets/portraits/zhaoyun.png'
 
-// 幸存者类核心场景：
+  // 幸存者类核心场景：
 // 移动 + 多类型自动武器 + 波次导演刷怪 + 射手远程 + Boss + 经验升级三选一 + 计时结算 + meta 解锁。
-// 全程零图片资源：所有单位用一张白色圆点纹理着色，契合"轻美术"。
+// 美术策略：
+// - 游戏内角色：Phaser Graphics 程序绘制的 chibi 小人（零资源、高性能）。
+// - 选人/HUD/结算：AI 生成的 1024x1024 chibi 立绘 PNG（轻量但更有"角色感"）。
+// - 子弹/敌人/拾取：白色圆点运行时着色。
 interface WeaponRT { def: WeaponDef; cd: number; angle: number }
 
 export class GameScene extends Phaser.Scene {
@@ -41,8 +48,11 @@ export class GameScene extends Phaser.Scene {
   private lvText!: Phaser.GameObjects.Text
   private timeText!: Phaser.GameObjects.Text
   private expBar!: Phaser.GameObjects.Graphics
+  private portrait!: Phaser.GameObjects.Image
   private paused = false
   private over = false
+  private started = false
+  private selectOverlay!: Phaser.GameObjects.Container | null
 
   // meta（跨局解锁）
   private unlockedW = new Set<string>(['pistol'])
@@ -51,6 +61,14 @@ export class GameScene extends Phaser.Scene {
   private pid = 'local'
 
   constructor() { super('game') }
+
+  preload() {
+    // 预加载 AI 生成的 chibi 立绘（Vite 会把 import 解析为打包后 URL）
+    this.load.image('portrait_rookie', rookiePortrait)
+    this.load.image('portrait_guanyu', guanyuPortrait)
+    this.load.image('portrait_zhangfei', zhangfeiPortrait)
+    this.load.image('portrait_zhaoyun', zhaoyunPortrait)
+  }
 
   create() {
     this.makeTextures()
@@ -64,8 +82,8 @@ export class GameScene extends Phaser.Scene {
 
     const cx = this.scale.width / 2
     const cy = this.scale.height / 2
-    this.player = this.physics.add.image(cx, cy, 'dot').setTint(this.activeChar.color).setScale(1.5)
-    ;(this.player.body as Phaser.Physics.Arcade.Body).setCircle(8)
+    this.player = this.physics.add.image(cx, cy, 'hero_' + this.activeChar.id)
+    ;(this.player.body as Phaser.Physics.Arcade.Body).setCircle(10, this.player.width / 2 - 10, this.player.height / 2 - 10)
 
     this.enemies = this.physics.add.group()
     this.bullets = this.physics.add.group()
@@ -96,17 +114,84 @@ export class GameScene extends Phaser.Scene {
     return v
   }
 
+  // 程序绘制所有纹理：dot 供子弹/敌人/拾取；4 张 chibi 角色立绘供玩家与 HUD。
   private makeTextures() {
+    // 通用圆点（白底，运行时着色）
     const g = this.make.graphics({ x: 0, y: 0 }, false)
     g.fillStyle(0xffffff, 1)
     g.fillCircle(8, 8, 8)
     g.generateTexture('dot', 16, 16)
     g.destroy()
+
+    // 角色立绘（分辨率统一 28x38，按角色换色 + 换配件区分）
+    this.makeHero('hero_rookie', 0x4ecdc4, {})                       // 新人：青衫，无配件
+    this.makeHero('hero_guanyu', 0xd63031, { beard: true })           // 关二哥：红袍 + 长髯
+    this.makeHero('hero_zhangfei', 0x0984e3, { big: true, fierce: true }) // 张三爷：蓝甲 + 壮 + 怒眉
+    this.makeHero('hero_zhaoyun', 0x00b894, { spear: true })          // 赵子龙：白甲 + 长枪
+  }
+
+  // 绘制一个 chibi 小人：头(肤色) + 身(角色色) + 腿 + 可选项(髯/枪/壮/怒眉)，全部程序生成、零图片。
+  private makeHero(key: string, color: number, o: { beard?: boolean; spear?: boolean; big?: boolean; fierce?: boolean }) {
+    const W = 28
+    const H = 38
+    const cx = 14
+    const outline = 0x141414
+    const g = this.make.graphics({ x: 0, y: 0 }, false)
+
+    // 腿
+    g.fillStyle(0x2f2f3a, 1)
+    g.fillRect(cx - 6, H - 11, 4, 11)
+    g.fillRect(cx + 2, H - 11, 4, 11)
+
+    // 身体（壮角色更宽）
+    const bw = o.big ? 20 : 15
+    g.fillStyle(color, 1)
+    g.fillRoundedRect(cx - bw / 2, 16, bw, 14, 4)
+    g.lineStyle(2, outline, 1)
+    g.strokeRoundedRect(cx - bw / 2, 16, bw, 14, 4)
+
+    // 手臂
+    g.fillStyle(color, 1)
+    g.fillRect(cx - bw / 2 - 3, 18, 3, 9)
+    g.fillRect(cx + bw / 2, 18, 3, 9)
+
+    // 头
+    g.fillStyle(0xffe0bd, 1)
+    g.fillCircle(cx, 10, 7)
+    g.lineStyle(2, outline, 1)
+    g.strokeCircle(cx, 10, 7)
+    // 眼睛
+    g.fillStyle(0x222222, 1)
+    g.fillCircle(cx - 2.5, 9, 1.2)
+    g.fillCircle(cx + 2.5, 9, 1.2)
+    // 怒眉（张飞）
+    if (o.fierce) {
+      g.lineStyle(1.5, 0x222222, 1)
+      g.beginPath(); g.moveTo(cx - 5, 6); g.lineTo(cx - 1, 8); g.strokePath()
+      g.beginPath(); g.moveTo(cx + 5, 6); g.lineTo(cx + 1, 8); g.strokePath()
+    }
+    // 长髯（关羽）
+    if (o.beard) {
+      g.fillStyle(0x222222, 1)
+      g.fillRoundedRect(cx - 5, 13, 10, 9, 3)
+    }
+    // 长枪（赵云）
+    if (o.spear) {
+      g.lineStyle(2, 0xc9c9c9, 1)
+      g.beginPath(); g.moveTo(cx + bw / 2 + 6, 3); g.lineTo(cx + bw / 2 + 6, 35); g.strokePath()
+      g.fillStyle(0xdddddd, 1)
+      g.fillTriangle(cx + bw / 2 + 6, 0, cx + bw / 2 + 2, 7, cx + bw / 2 + 10, 7)
+    }
+
+    g.generateTexture(key, W, H)
+    g.destroy()
   }
 
   private buildHud() {
-    this.hpText = this.add.text(12, 12, '', { fontSize: '18px', color: '#ffffff' }).setScrollFactor(0).setDepth(100)
-    this.lvText = this.add.text(12, 38, '', { fontSize: '16px', color: '#ffd93d' }).setScrollFactor(0).setDepth(100)
+    // 左上角 AI 立绘（放大展示）
+    this.portrait = this.add.image(34, 50, 'portrait_' + this.activeChar.id).setScale(0.06).setScrollFactor(0).setDepth(100)
+    this.hpText = this.add.text(78, 14, '', { fontSize: '18px', color: '#ffffff' }).setScrollFactor(0).setDepth(100)
+    this.lvText = this.add.text(78, 40, '', { fontSize: '15px', color: '#ffd93d' }).setScrollFactor(0).setDepth(100)
     this.timeText = this.add
       .text(this.scale.width - 12, 12, '', { fontSize: '18px', color: '#ffffff' })
       .setOrigin(1, 0)
@@ -123,12 +208,12 @@ export class GameScene extends Phaser.Scene {
     const s = String(Math.floor(this.elapsed % 60)).padStart(2, '0')
     this.timeText.setText(`${m}:${s}`)
     this.expBar.clear()
-    this.expBar.fillStyle(0x000000, 0.4).fillRect(12, 64, 220, 10)
-    this.expBar.fillStyle(0x4ecdc4, 1).fillRect(12, 64, 220 * Math.min(1, this.exp / this.expNeed), 10)
+    this.expBar.fillStyle(0x000000, 0.4).fillRect(78, 62, 200, 10)
+    this.expBar.fillStyle(0x4ecdc4, 1).fillRect(78, 62, 200 * Math.min(1, this.exp / this.expNeed), 10)
   }
 
   update(_t: number, delta: number) {
-    if (this.over || this.paused) return
+    if (!this.started || this.over || this.paused) return
     this.elapsed += delta / 1000
     this.handleMove()
     this.tickWeapons(delta)
@@ -535,10 +620,69 @@ export class GameScene extends Phaser.Scene {
         this.unlockedC = new Set<string>(m.unlockedChars || ['rookie'])
       }
     } catch { /* 离线也可玩，仅无解锁内容 */ }
+    // 默认选已解锁里最后一个（赵云最后）
     for (let i = CHARS.length - 1; i >= 0; i--) {
       if (this.unlockedC.has(CHARS[i].id)) { this.activeChar = CHARS[i]; break }
     }
-    this.player.setTint(this.activeChar.color)
+    this.refreshPlayerLook()
+    this.showCharSelect()
+  }
+
+  // 同步更新游戏内小人 + HUD AI 立绘
+  private refreshPlayerLook() {
+    this.player.setTexture('hero_' + this.activeChar.id)
+    this.portrait.setTexture('portrait_' + this.activeChar.id)
+  }
+
+  // 开局选人界面：用 AI 立绘做成卡片，未解锁角色灰显并提示
+  private showCharSelect() {
+    if (this.selectOverlay) return
+    this.started = false
+    const c = this.add.container(this.scale.width / 2, this.scale.height / 2).setScrollFactor(0).setDepth(500)
+    this.selectOverlay = c
+
+    c.add(this.add.rectangle(0, 0, 780, 420, 0x0f0f1a, 0.95).setStrokeStyle(3, 0x4ecdc4))
+    c.add(this.add.text(0, -170, '选择你的武将', { fontSize: '28px', color: '#ffffff' }).setOrigin(0.5))
+
+    CHARS.forEach((ch, i) => {
+      const x = -270 + i * 180
+      const locked = !this.unlockedC.has(ch.id)
+      const card = this.add.container(x, 0)
+
+      const bg = this.add.rectangle(0, 0, 130, 170, 0x222233, 1).setStrokeStyle(2, locked ? 0x555566 : 0x4ecdc4)
+      card.add(bg)
+
+      const portrait = this.add.image(0, -25, 'portrait_' + ch.id).setScale(0.095)
+      card.add(portrait)
+
+      const name = this.add.text(0, 55, ch.name, { fontSize: '16px', color: locked ? '#888888' : '#ffffff' }).setOrigin(0.5)
+      card.add(name)
+
+      if (locked) {
+        card.add(this.add.rectangle(0, -25, 130, 130, 0x000000, 0.65))
+        card.add(this.add.text(0, -25, '未解锁', { fontSize: '13px', color: '#ff6b6b' }).setOrigin(0.5))
+        card.add(this.add.text(0, 25, '累计击杀解锁', { fontSize: '11px', color: '#888888' }).setOrigin(0.5))
+      }
+
+      if (!locked) {
+        bg.setInteractive({ useHandCursor: true })
+        bg.on('pointerdown', () => this.startRun(ch))
+        bg.on('pointerover', () => bg.setFillStyle(0x333344))
+        bg.on('pointerout', () => bg.setFillStyle(0x222233))
+      }
+
+      c.add(card)
+    })
+  }
+
+  private startRun(char: typeof CHARS[0]) {
+    this.activeChar = char
+    this.refreshPlayerLook()
+    if (this.selectOverlay) {
+      this.selectOverlay.destroy()
+      this.selectOverlay = null
+    }
+    this.started = true
   }
 
   // ---------- 结算 ----------

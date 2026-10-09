@@ -1,5 +1,6 @@
 // 游戏数值与内容数据表（策划向，改这里即可调平衡，不必动逻辑代码）。
-// 美术依赖极低：所有单位用同一张白色圆点纹理着色，仅靠颜色/大小/数值区分。
+// 美术策略：子弹/敌人/拾取用白色圆点运行时着色；玩家小人由 GameScene 程序绘制 chibi 形象；
+// HUD/选人界面使用 AI 生成的角色立绘 PNG（见 web/src/assets/portraits/）。
 
 export type WeaponKind = 'gun' | 'orbit' | 'beam' | 'aura'
 

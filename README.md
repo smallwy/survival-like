@@ -25,7 +25,9 @@ survivors-game/
 │   └── src/
 │       ├── main.ts        # Phaser 启动
 │       ├── scenes/GameScene.ts  # 核心玩法
-│       └── config/gameData.ts   # 数值/内容数据表（策划改这里）
+│       ├── config/gameData.ts   # 数值/内容数据表（策划改这里）
+│       ├── types.d.ts     # 静态资源类型声明
+│       └── assets/portraits/    # AI 生成的角色立绘（PNG）
 ├── docs/                  # 策划文档 + 数据表
 │   ├── 立项策划案.md
 │   ├── 武器被动表.csv
@@ -81,8 +83,8 @@ go build -o ../bin/server ./server && ../bin/server
 | 方法 | 路径 | 说明 |
 |---|---|---|
 | GET | `/api/health` | 健康检查 |
-| POST | `/api/save?pid=<id>` | 云存档，body `{data}` |
-| GET | `/api/load?pid=<id>` | 取档（404=未存过） |
+| GET | `/api/meta?pid=<id>` | 读取 meta 进度（武器/角色解锁） |
+| POST | `/api/meta?pid=<id>` | 上报一局结果，返回 `unlockedNow`（本次解锁项） |
 | POST | `/api/leaderboard` | 提交成绩 `{playerId,name,score}` |
 | GET | `/api/leaderboard` | 取 Top100 |
 
@@ -92,9 +94,14 @@ go build -o ../bin/server ./server && ../bin/server
 - MVP 稳定后，前端接入 Steamworks SDK（或绿色版 wrapper），后端继续托管云存档与排行榜。
 - 后端已做接口隔离，迁移成本低。
 
+## 美术说明与 AI 披露
+- 游戏内角色小人：由 `GameScene.makeHero()` 程序绘制（零图片资源）。
+- 选人界面 / HUD 立绘：`web/src/assets/portraits/*.png` 为 AI 生成（chibi 卡通风格）。
+- **Steam 发布要求**：上架时需在商店页勾选「AI 生成内容」披露，因角色立绘为 AI 生成。这是平台合规项，不影响审核。
+
 ## 已知 TODO
 - [x] 更多武器 / 敌人 / Boss 与波次（gun/orbit/beam/aura + 射手 + 双 Boss + 波次导演）
 - [x] meta 解锁（后端 /api/meta 驱动武器/皮肤解锁，结算自动上报）
+- [x] 角色立绘与选人界面（AI 生成 chibi 立绘 + 程序绘制小人）
 - [ ] 音效与轻量特效（提升"爽感"）
-- [ ] 美术换皮选项（如三国皮肤包：仅换着色与文案）
 - [ ] Steam 接入与商店页 / 预告片
