@@ -35,3 +35,6 @@ Thumbs.db
 # Python 缓存
 __pycache__/
 *.pyc
+
+# 无头验证截图产物（随时可重新生成）
+tools/shots/

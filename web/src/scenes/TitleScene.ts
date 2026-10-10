@@ -394,7 +394,9 @@ export class TitleScene extends Phaser.Scene {
 
   /** 进入探索器（V4 主线玩法）。旧的 'game' 割草场景已废弃，不再路由过去。 */
   private startDive() {
-    this.scene.start('explore')
+    // V6：核心玩法改为波次制 Bullet Heaven，入口指向 DiveScene。
+    // 'explore' 是 V5 的探索器场景，已被立项书 V6 废弃。
+    this.scene.start('dive')
   }
 
   update(_time: number, delta: number) {
