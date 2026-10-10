@@ -1309,6 +1309,7 @@ export default class DiveScene extends Phaser.Scene {
       // 测试专用：立刻清场并推进（否则无头验证要真等 40-55 秒一波）
       skip: () => { this.enemies = []; this.spawnLeft = 0; this.advance() },
       pick: (i: number) => { if (this.offers[i]) this.pickUpgrade(this.offers[i]) },
+      refill: () => { this.o2 = this.o2Max },
       hit: (i: number) => {
         const rs = (this as unknown as { __uiHitRoutes: { onClick: () => void }[] }).__uiHitRoutes ?? []
         if (rs[i]) rs[i].onClick()

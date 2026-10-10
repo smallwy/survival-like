@@ -29,7 +29,7 @@ import urllib.request
 import websocket
 
 UD = "/tmp/cdp-profile-dive6"
-URL = "http://127.0.0.1:4173/"
+URL = "http://localhost:4173/"
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shots")
 PORT = 9222
 
@@ -188,6 +188,16 @@ def main():
             c.shot(f"v6_{10 + layer}_decide_l{layer}")
 
             before = p
+            if not p.get("canDive"):
+                # 氧气不够付门票：验证下潜确实被锁死（V6 硬约束），再补氧继续往下测
+                c.ev("__dive.dive()")
+                time.sleep(0.3)
+                if probe(c)["layer"] == p["layer"]:
+                    print(f"   ✓ 氧气 {p['o2']} < 门票，下潜被正确禁用 → 补氧继续")
+                else:
+                    fails.append("氧气不足时下潜未被禁用")
+                c.ev("__dive.refill()")
+                time.sleep(0.2)
             c.ev("__dive.dive()")
             time.sleep(0.6)
             after = probe(c)
