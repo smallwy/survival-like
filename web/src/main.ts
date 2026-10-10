@@ -106,7 +106,24 @@ function installDprScale(game: Phaser.Game): void {
         sm.canvas.height = physH
         sm.canvas.style.width = cssW + 'px'
         sm.canvas.style.height = cssH + 'px'
-        sm.canvasBounds.setSize(physW, physH)
+        // ---------------------------------------------------------------------
+        // canvasBounds **必须是 canvas 的 CSS 矩形**（1280×720），不是位图尺寸。
+        //
+        // 这里曾经写成 setSize(physW, physH)，后果（2026-10-10 实测，不是推测）：
+        //   ScaleManager.refresh() 里有 displayScale = baseSize / canvasBounds，
+        //   于是 displayScale = 2560 / 2560 = 1。
+        //   而 Phaser 的指针换算是 (pageX - bounds.left) * displayScale：
+        //   鼠标点在 CSS 640，被换算成游戏坐标 640 —— 但按钮在 1280，
+        //   **永远差一半**，所以 DPR>1 的机器上所有按钮点了都没反应。
+        //   （DPR=1 时 physW == cssW，这个 bug 不显现，所以一直没被发现。）
+        // ---------------------------------------------------------------------
+        sm.updateBounds()
+        if (sm.canvasBounds.width > 0 && sm.canvasBounds.height > 0) {
+          sm.displayScale.set(
+            sm.baseSize.width / sm.canvasBounds.width,
+            sm.baseSize.height / sm.canvasBounds.height
+          )
+        }
         // 通知渲染器与相机同步新的尺寸。
         // 注意事件必须发在 **scale** 上：GameScene 用的是 this.scale.on('resize')，
         // 发在 game.events 上没人听（实测 GameScene 不重排，内容只占左上角）。
