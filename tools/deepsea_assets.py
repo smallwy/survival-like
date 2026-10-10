@@ -9,7 +9,7 @@
 `deepsea_anim.py` 和 `deepsea_family_proto.py` 是**验证脚本** ——
 它们的产出是 docs/_silhouette/ 里的展示图，证明"深海剪影 + 非人形动画"可行。
 但游戏本体（`web/src/scenes/GameScene.ts`）加载的一直是
-`web/src/assets/pixel/` 里的三国玩具兵图集。
+`web/src/assets/pixel/` 里的旧版玩具兵图集。
 
 **换壳 = 让深海图进入那个目录**，并保持 manifest 契约不变，
 这样GameScene 那边一行加载代码都不用改。

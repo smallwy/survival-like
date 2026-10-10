@@ -210,10 +210,10 @@ var chapterRewards = map[string][]string{
 	"c6s3": {"guandao"},
 }
 
-// 武将 id 白名单：奖励串里除了武器就是武将，靠这个把 id 派发到正确的切片。
+// 潜行者 id 白名单：奖励串里除了武器就是潜行者，靠这个把 id 派发到正确的切片。
 var charIDs = map[string]bool{"rookie": true, "guanyu": true, "zhangfei": true, "zhaoyun": true}
 
-// grantUnlocks 按累计统计阈值 + 主线通关进度权威解锁武器 / 武将 / 计谋。
+// grantUnlocks 按累计统计阈值 + 主线通关进度权威解锁武器 / 潜行者 / 计谋。
 func grantUnlocks(m *store.Meta) {
 	// 累计门槛（老机制，保留）
 	if m.BestScore >= 150 {

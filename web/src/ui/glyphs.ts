@@ -38,7 +38,7 @@ export function drawWeaponGlyph(g: G, id: string, accent: number, k = 1): void {
   g.fillStyle(ink, 1)
 
   switch (id) {
-    // 橡皮筋枪：Y 形弹弓，一条皮筋
+    // 声呐枪：Y 形发射器，一条声波
     case 'bow':
       g.lineStyle(lw, ink, 1)
       g.lineBetween(s(0), s(11), s(-9), s(-8))
@@ -48,7 +48,7 @@ export function drawWeaponGlyph(g: G, id: string, accent: number, k = 1): void {
       g.fillStyle(ink, 1).fillCircle(s(0), s(-1), s(3))
       break
 
-    // 连发橡皮筋：同款弹弓，三条皮筋
+    // 连发声呐：同款发射器，三道声波
     case 'crossbow':
       g.lineStyle(lw, ink, 1)
       g.lineBetween(s(0), s(12), s(-10), s(-9))
@@ -95,7 +95,7 @@ export function drawWeaponGlyph(g: G, id: string, accent: number, k = 1): void {
       g.fillStyle(ink, 1).fillCircle(s(-11), s(0), s(3))
       break
 
-    // 放大镜聚光：镜圈 + 手柄 + 右侧射出的光线
+    // 探照灯束：灯圈 + 手柄 + 右侧射出的光柱
     case 'guandao':
       g.lineStyle(Math.max(1, s(2.6)), ink, 1)
       g.strokeCircle(s(-3), s(-3), s(6.5))

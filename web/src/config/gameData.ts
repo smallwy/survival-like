@@ -83,7 +83,7 @@ export interface WeaponDef {
   /** 克制说明，写在升级卡片上 —— 相克必须**可读**，否则玩家永远发现不了它。 */
   strong: string
   /** 对各类护甲的伤害倍率。未列出的护甲 = 1.0。
-   *  相克关系（一句话记法）：橡皮筋克塑料、重家伙克金属、图钉/长兵克发条。 */
+   *  相克关系（一句话记法）：声呐枪克胶质、穿甲标枪克鳞甲、探照灯束克钙壳、骨刺长枪克骨质。 */
   vs?: Partial<Record<Armor, number>>
 }
 
@@ -267,8 +267,8 @@ export interface ChapterDef {
   stages: StageDef[]
 }
 
-// ---------- 武器：8 件，全部是"客厅里找得到的东西" ----------
-// 起始只有橡皮筋枪与连发橡皮筋，其余靠 meta 解锁后才能在商店/升级里获得。
+// ---------- 武器：8 件，深海探勘装备 ----------
+// 起始只有声呐枪与连发声呐，其余靠 meta 解锁后才能在商店/升级里获得。
 // vs 表是兵种相克的全部实现 —— 想调克制强度只改这里。
 export const WEAPONS: WeaponDef[] = [
   {
@@ -445,7 +445,7 @@ export const FORMATIONS: FormationDef[] = [
   {
     id: 'arrow', name: '尖刀', behavior: 'charge',
     desc: '楔形冲锋，箭头最厚',
-    counter: '长兵 / 图钉硬顶',
+    counter: '远程穿透（磷光散射）硬顶',
     // 楔形：尖端朝玩家（dy 小），越往后越宽
     slots: [
       { dx: 0, dy: 0, role: 'front' },
@@ -458,7 +458,7 @@ export const FORMATIONS: FormationDef[] = [
   {
     id: 'fishscale', name: '叠砖', behavior: 'advance',
     desc: '多层横排，层层叠叠推线',
-    counter: '穿透（铅笔弩 / 螺丝刀）',
+    counter: '穿透（穿甲标枪 / 骨刺长枪）',
     // 横排层叠：一排前排 + 一排中军 + 一排后排，交错错位像叠砖
     slots: [
       ...grid(5, 1, 40, 0).map((s) => ({ ...s, role: 'front' as ArmyRole })),
@@ -482,7 +482,7 @@ export const FORMATIONS: FormationDef[] = [
   {
     id: 'square', name: '铁桶', behavior: 'hold',
     desc: '外圈铁皮内圈弓，久攻不下',
-    counter: '破甲（放大镜聚光）',
+    counter: '破甲（探照灯束）',
     // 3x3 方阵：四角与前排是铁皮，中心是弓 —— 保护后排
     slots: [
       { dx: -46, dy: 0, role: 'front' }, { dx: 0, dy: 0, role: 'front' }, { dx: 46, dy: 0, role: 'front' },
@@ -761,11 +761,11 @@ export const CHARS: CharDef[] = [
 
 // 解锁项的展示名（用于结算提示与备战界面）
 export const META_NAMES: Record<string, string> = {
-  bow: '橡皮筋枪', crossbow: '连发橡皮筋', caltrop: '图钉散弹', heavybow: '铅笔弩',
-  spear: '长柄螺丝刀', knives: '弹珠环绕', guandao: '放大镜聚光', snake: '泡泡枪',
+  bow: '声呐枪', crossbow: '连发声呐', caltrop: '磷光散射', heavybow: '穿甲标枪',
+  spear: '骨刺长枪', knives: '浮游光球', guandao: '探照灯束', snake: '电弧泡幕',
   rookie: '深潜者', guanyu: '拾光者', zhangfei: '铸壳者', zhaoyun: '电鳗使',
-  strat_domino: '计谋·共鸣脉冲', strat_magnetball: '计谋·诱光潮', strat_rubber: '计谋·声呐冲击',
-  strat_spinner: '计谋·环形回旋', strat_puzzlebox: '计谋·捕光陷阱', strat_overclock: '计谋·过载脉冲'
+  strat_domino: '共鸣脉冲', strat_magnetball: '诱光潮', strat_rubber: '声呐冲击',
+  strat_spinner: '环形回旋', strat_puzzlebox: '捕光陷阱', strat_overclock: '过载脉冲'
 }
 
 export const BALANCE = {

@@ -57,7 +57,7 @@ func (s *Store) LoadGame(playerID string) (*Save, error) {
 }
 
 // Meta 是跨局成长（Roguelike meta-progression）的载体：
-// 记录解锁的武器/武将/计谋、主线通关进度、累计击杀、最高分等。由后端按阈值权威解锁。
+// 记录解锁的武器/潜行者/计谋、主线通关进度、累计击杀、最高分等。由后端按阈值权威解锁。
 //
 // 为什么 UnlockedStrats / ClearedStages 必须放在服务端而不是 localStorage：
 // 主线是「通关本章 → 解锁下一章 + 本章奖励」的链式结构。这条链如果只活在浏览器内存里，

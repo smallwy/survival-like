@@ -23,7 +23,7 @@ import { UI, TXT, FONT } from '../config/theme'
 import { P, INK, FS, UI_MAX_ZOOM, card, button, tag, statBar, shell, shellTitle, label, iconSlot, pill, tapeStrip } from '../ui/kit'
 // 卡牌图标（矢量，见 ui/glyphs.ts）：武器按 id、道具按效果类别分发。
 import { drawWeaponGlyph, drawItemGlyph, itemIconTag } from '../ui/glyphs'
-// 立绘策略（去三国）：不再加载 AI 生成的人物立绘。
+// 立绘策略：不再加载 AI 生成的人物立绘，
 // HUD 头像与选人卡片一律改用**游戏内像素单位的放大帧** —— 风格统一、
 // 零额外美术资源，而且卡片上看到的和场上跑的永远是同一个形象。
 
@@ -83,7 +83,7 @@ const BASE_ASPECT = 16 / 9
 const FX_SCALE = PX_SCALE / 2
 
 /** 右上角关卡目标进度条的宽度（逻辑像素，实际再乘 hudK）。
- *  必须窄于「画布宽 - 左侧武将面板宽」，否则会压到面板上。 */
+ *  必须窄于「画布宽 - 左侧潜行者面板宽」，否则会压到面板上。 */
 const OBJ_BAR_W = 200
 
 /**
@@ -283,17 +283,17 @@ export class GameScene extends Phaser.Scene {
   private buffAtk = 1
   private buffVuln = 1
   private buffT = 0
-  /** 缓兵计：全场减速截止时间（秒） */
+  /** 减速效果截止时间（秒） */
   private slowUntil = -1
-  /** 空城计的护罩光晕：需要跟随玩家移动，所以存在场景上、由 update 每帧同步位置。 */
+  /** 护罩光晕：需要跟随玩家移动，所以存在场景上、由 update 每帧同步位置。 */
   private guardAura: Phaser.GameObjects.Image | null = null
   /**
-   * 空城计最近一次**实际授予**的无敌时长（ms），施放瞬间记录。
+   * 护罩最近一次**实际授予**的无敌时长（ms），施放瞬间记录。
    *
    * 仅供自动化验证读取，不参与游戏逻辑。
    * 为什么要单独记：断言原本是"施放后等 0.45s 再读 s.invuln，必须 > 1500"，
    * 而 invuln 是**真实时间衰减**的 —— 机器卡一下（CDP 首轮很常见）就会读到 1400 上下，
-   * 一次偶发失败会被误读成"空城计坏了"。记下授予值就没有这个时间噪声了。
+   * 一次偶发失败会被误读成"护罩坏了"。记下授予值就没有这个时间噪声了。
    */
   private lastGuardMs = 0
   /** 最近生成的阵型 id（仅供自动化测试读取，判断阵型是否真的生效） */
@@ -562,7 +562,7 @@ export class GameScene extends Phaser.Scene {
     this.lightR = LIGHT.tacticalR
     this.lightWarned = false
     this.magnet = 160
-    // 初始武器只是个占位，真正生效的起手武器由 applyCharStats() 按武将写入。
+    // 初始武器只是个占位，真正生效的起手武器由 applyCharStats() 按潜行者写入。
     // **不要写 `weaponById('pistol')!`** —— 武器库换成冷兵器后 'pistol' 已不存在，
     // `!` 断言会把这个 undefined 一路放行到 refreshHud 里 `o.def.name` 才炸，
     // 表现是选人界面整个不渲染（异常发生在 buildHud → create 的中途）。
@@ -1147,7 +1147,7 @@ export class GameScene extends Phaser.Scene {
     em.generateTexture('fx_ember', 10, 10)
     em.destroy()
 
-    // 冰晶：六角雪花（缓兵计专用）。六角是"结晶"最不容易被误读的形状。
+    // 冰晶：六角雪花（减速专用）。六角是"结晶"最不容易被误读的形状。
     const ish = this.make.graphics({ x: 0, y: 0 }, false)
     ish.lineStyle(2, 0xffffff, 1)
     for (let i = 0; i < 6; i++) {
@@ -1655,7 +1655,7 @@ export class GameScene extends Phaser.Scene {
     // 读血条时视线一直被抢）。半透明是为了看到战场，不是为了看见噪点。
     //
     // 配色走 theme 的「墨底 + 鎏金」：底是墨(ink1)，外描边用金暗色收边，
-    // 顶部一条鎏金高光带作为"这是武将牌"的身份线。
+    // 顶部一条鎏金高光带作为"这是潜行者牌"的身份线。
     // 旧版这里是科技青 0x4ecdc4，和描边、进度条、计谋框全都同一个颜色 ——
     // 什么都在强调 = 什么都不强调。
     reg(this.add.rectangle(px(8), px(8), W, H, UI.ink1, 0.92)
@@ -1731,7 +1731,7 @@ export class GameScene extends Phaser.Scene {
     // ---- 右上角（时间块下方）：本关目标 ----
     // 幸存者类的默认体验是"无目的地挨打"，主线必须把"这一关要干什么"钉在屏幕上。
     //
-    // **为什么放右上而不是顶部居中**：左上角是武将面板（宽约 380px），
+    // **为什么放右上而不是顶部居中**：左上角是潜行者面板（宽约 380px），
     // 顶部居中的目标条实测会**压在面板上**（目标文字左端 297px < 面板右边界 390px），
     // 两段文字叠在一起谁都看不清。右上角时间块正下方是唯一一块常年空着的区域，
     // 而且"关卡目标"和"本局计时"本来就该挨着读。
@@ -1769,7 +1769,7 @@ export class GameScene extends Phaser.Scene {
     // 材料是波间商店的货币，必须常驻可见 —— 否则玩家在局内根本不知道自己攒了多少
     this.statText.setText(`击杀 ${this.kills}　　材料 ${this.materials}`)
     // 武器栏只显示名字：克制关系由敌潮播报 + 伤害飘字（"克38"）承担教学，
-    // 常驻栏位放不下「短弓(克轻甲)·青龙偃月(克重甲)…」这种长串。
+    // 常驻栏位放不下「声呐枪(克胶质)·探照灯束(克钙壳)…」这种长串。
     const wnames = this.weapons.map((o) => o.def.name)
     this.weaponText.setText(wnames.length > 3
       ? `${wnames.slice(0, 3).join('·')} +${wnames.length - 3}`
@@ -1826,7 +1826,7 @@ export class GameScene extends Phaser.Scene {
     this.objBar.lineStyle(1, 0xffffff, 0.22).strokeRect(x, 0, W, H)
 
     // 把实际绘制的矩形记下来，供自动化布局自检读取。
-    // Graphics 没有 getBounds()（实测 TypeError），而"目标条有没有压在武将面板上"
+    // Graphics 没有 getBounds()（实测 TypeError），而"目标条有没有压在潜行者面板上"
     // 这个断言必须能量到真实像素，否则只能靠人眼在截图里找 —— 那就等于没验。
     this.objBar.setData('rect', {
       l: this.objBar.x - W, t: this.objBar.y, w: W, h: H
@@ -1879,7 +1879,7 @@ export class GameScene extends Phaser.Scene {
    * 这一版每个图标 = 它的玩具本体：
    *   chain   多米诺  —— 两块斜靠的骨牌
    *   pull    磁铁球  —— U 形磁铁
-   *   rebound 橡皮筋  —— 一根绷成折线的皮筋（三步折）
+   *   rebound 声呐冲击  —— 一圈扩散的声波（折线）
    *   spin    陀螺    —— 上尖下宽的陀螺 + 一圈旋转箭头
    *   stun    拼图盒  —— 一个盒子 + 顶部拼图凸起
    *   buff    电池    —— 电池外壳 + 中间的闪电
@@ -1907,7 +1907,7 @@ export class GameScene extends Phaser.Scene {
         g.fillRect(s(4), s(-11), s(7), s(4))
         break
       case 'rebound':
-        // 橡皮筋：一根拉成三步折的皮筋（"被拉出去又弹回来"）
+        // 声呐冲击：一圈扩散出去又回卷的声波（"被推出去又弹回来"）
         g.lineStyle(Math.max(3, s(3)), color, 1)
         g.beginPath()
         g.moveTo(s(-12), s(4))
@@ -1962,7 +1962,7 @@ export class GameScene extends Phaser.Scene {
     this.drivePickups()
     this.refreshHud()
     this.tickWave()
-    // 空城计的护罩要跟着玩家走（它是"我身上有一层罩子"，不是"地上有个圈"）
+    // 护罩要跟着玩家走（它是"我身上有一层罩子"，不是"地上有个圈"）
     if (this.guardAura) this.guardAura.setPosition(this.player.x, this.player.y)
 
     this.bg.tilePositionX = this.cameras.main.scrollX
@@ -1985,7 +1985,7 @@ export class GameScene extends Phaser.Scene {
    * 三个计时器合在一处：
    *  - stratCd：技能冷却（HUD 的环形指示靠它）
    *  - buffT：背水一战的持续时间（到点要把攻击/受伤倍率还原，否则会永久生效）
-   *  - slowUntil：缓兵计的减速窗口（用绝对时间戳而不是倒计时，
+   *  - slowUntil：全场减速的减速窗口（用绝对时间戳而不是倒计时，
    *    这样每次敌人被驱动时只需比较一次，不必逐只维护计时器）
    */
   private tickStratagem(delta: number) {
@@ -2157,7 +2157,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   /**
-   * 橡皮筋：身前张一张皮筋，持续 1.5 秒；撞上的敌人以 2 倍速弹回，
+   * 声呐冲击：身前打出一道声波，持续 1.5 秒；撞上的敌人以 2 倍速弹回，
    * 并把后面的同伴一起撞散。专破「尖刀」—— 楔形冲锋的箭头被顶回去。
    *
    * 特效（形态 = **一根绷紧后回弹的皮筋**）：两根立柱插在玩家两侧，
@@ -2382,7 +2382,7 @@ export class GameScene extends Phaser.Scene {
     switch (kind) {
       case 'chain': return 0xf0a03d     // 多米诺：纸箱黄
       case 'pull': return 0x9ab8d8      // 磁铁球：冷银
-      case 'rebound': return 0x7ee08a   // 橡皮筋：橡皮绿
+      case 'rebound': return 0x7ee08a   // 声呐冲击：声波绿
       case 'spin': return 0x6ec6ff      // 陀螺：转起来的青
       case 'stun': return 0xb98cff      // 拼图盒：拼图紫
       case 'buff': return 0xffd93d      // 超频电池：电金
@@ -3078,7 +3078,7 @@ export class GameScene extends Phaser.Scene {
   /**
    * 兵种相克：武器 vs 敌人护甲 的伤害倍率。
    *
-   * 这是本作对抗"三国只是换皮"的核心机制 —— 敌潮的护甲构成会随时间变化
+   * 这是本作对抗"换皮"质疑的核心机制 —— 敌潮的护甲构成会随时间变化
    * （早期轻甲 → 中期骑甲 → 后期重甲），玩家必须换武器应对，
    * 而不是像通用幸存者那样无脑堆 dmg%。表在 gameData.ts 的 WEAPONS[].vs。
    */
@@ -3403,7 +3403,7 @@ export class GameScene extends Phaser.Scene {
         if (hp <= 0) this.killEnemy(e); else e.setData('hp', hp)
         this.spark(e.x, e.y, w.color, 2)
         // 近战命中：补一道月牙斩击弧 —— 和远程的"点命中"在轮廓上分开，
-        // 也让"青龙偃月"这把重兵器的每一刀都有分量。
+        // 也让探照灯束这道强光每次命中都有分量。
         this.slashArc(e.x, e.y, ang, w.color)
       }
     }
@@ -3567,7 +3567,7 @@ export class GameScene extends Phaser.Scene {
    * 现状问题：敌人是"随机撒在屏幕外一圈"，所以任何时刻看到的都是一团没有形状的点。
    * 改法：以**阵型**为单位整组生成，一组 6~12 人，按槽位表落位。
    *
-   * 所有幸存者类都在做"密度"，没人做"**阵形**"。而阵形是三国战争最核心的
+   * 所有幸存者类都在做"密度"，没人做"**阵型**"。而阵型是战争题材里最容易被记住的
    * 视觉记忆 —— 玩家一眼能认出、一句话能说出。
    *
    * 关键设计：阵型只提供**骨架**（槽位 + role + 行为），
@@ -3614,7 +3614,7 @@ export class GameScene extends Phaser.Scene {
       pts.push({ x: sx, y: sy })
     }
 
-    // 地面阵型轮廓：从阵心向每个槽位拉一条放射线 —— 三国的"阵法"本来就是
+    // 地面阵型轮廓：从阵心向每个槽位拉一条放射线 —— 战阵本来就是
     // 一张图，把它画在地上，玩家追过去时能亲眼看见"这是一个阵"而不是一堆散兵。
     if (pts.length > 1) {
       const gg = this.add.graphics().setDepth(-5).setBlendMode(Phaser.BlendModes.ADD)
@@ -3926,7 +3926,7 @@ export class GameScene extends Phaser.Scene {
       const dist = Phaser.Math.Distance.Between(e.x, e.y, this.player.x, this.player.y)
       const body = e.body as Phaser.Physics.Arcade.Body
 
-      // 缓兵计：全场减速 75%
+      // 全场减速：减速 75%
       if (slow) sp *= 0.25
 
       // 拼图盒定身：被"装进盒子"的远程单位原地不动、不射击。
@@ -4271,7 +4271,7 @@ export class GameScene extends Phaser.Scene {
    */
   private damagePlayer(dmgRaw: number, source?: Phaser.Physics.Arcade.Image) {
     if (this.invuln > 0) return          // 无敌帧：包围圈里的多只怪只算一次伤害
-    // 电鳗使：无敌帧比其它武将长 40%，"七进七出"靠的就是这个窗口
+    // 电鳗使：无敌帧比其它潜行者长 40%，更长的无敌窗口靠的就是这个
     this.invuln = this.activeChar.passiveId === 'dash' ? 980 : 700
     // buffVuln：过载脉冲的代价（受伤 +50%）。增益必须带代价，否则计谋就只是白送。
     // 道具的固定减伤先扣，再乘代价倍率；下限 1 点，避免堆满减伤后"全程免疫"。
@@ -5048,7 +5048,7 @@ export class GameScene extends Phaser.Scene {
   //
   // 为什么拆开
   // ----------
-  // 旧版把「选章 / 选关 / 选武将 / 选计谋 / 出征」全塞进一屏 900x646 的面板，
+  // 旧版把「选章 / 选关 / 选潜行者 / 选计谋 / 出征」全塞进一屏 900x646 的面板，
   // 实测反馈就是两个字：**乱**。一屏里同时有 4 组可选卡片 + 章节箭头 + 两行提示，
   // 眼睛没有落点，"我现在到底在挑什么"这个问题没人回答得了。
   //
@@ -5501,7 +5501,7 @@ export class GameScene extends Phaser.Scene {
       this.uiAdd(box, label(this, 0, -108, cdef.name, FS.sub, ck ? INK.mute : INK.main,
         { fontStyle: 'bold' }).setOrigin(0.5))
       this.uiAdd(box, label(this, 0, -88, cdef.title, FS.caption, ck ? INK.mute : INK.green).setOrigin(0.5))
-      // 卡片主图 = 放大的像素单位帧（去三国后不再使用 AI 立绘）
+      // 卡片主图 = 放大的像素单位帧（不再使用 AI 立绘）
       this.uiAdd(box, this.add.sprite(0, -34, pxKey('hero_' + cdef.id), pxFrame('down', 'idle', 0))
         .setScale(2.6))
       this.uiAdd(box, this.add.sprite(0, 40, pxKey('hero_' + cdef.id), pxFrame('down', 'idle', 0))
@@ -5514,7 +5514,7 @@ export class GameScene extends Phaser.Scene {
       this.uiAdd(box, dv)
       const sw2 = weaponById(cdef.weapon)
       // 起始武器带图标：备战页是玩家做"选谁"决策的地方，
-      // 一眼看到武器形状比读"起始橡皮筋枪"六个字快得多。
+      // 一眼看到武器形状比读"起始声呐枪"六个字快得多。
       if (sw2) {
         const wg = this.add.graphics()
         wg.setPosition(-62, 76)
@@ -5676,10 +5676,10 @@ export class GameScene extends Phaser.Scene {
   }
 
   /**
-   * 把武将的机制差异真正落到数值上。
+   * 把潜行者的机制差异真正落到数值上。
    *
-   * 这是"三国不只是换皮"的落点。旧版 startRun() 只调 refreshPlayerLook()，
-   * 四个"武将"除贴图颜色外血量/移速/起始武器/被动**完全一致**
+   * 这是"不只是换皮"的落点。旧版 startRun() 只调 refreshPlayerLook()，
+   * 四个"潜行者"除贴图颜色外血量/移速/起始武器/被动**完全一致**
    * （见 docs/方向定位与差异化策略.md 第 1.2 节的举证）。
    */
   private applyCharStats(char: CharDef) {
@@ -5690,7 +5690,7 @@ export class GameScene extends Phaser.Scene {
     // 仁德：拾取范围 +70%。直接改造 magnet，避免再开一条拾取半径的旁路。
     this.magnet = char.passiveId === 'bounty' ? Math.round(this.magnet * 1.7) : this.magnet
     // 起始武器：四人各一把，且**机制类型互不相同**
-    // （弓 = gun / 青龙偃月 = beam / 蛇矛 = aura / 亮银枪 = gun+pierce）。
+    // （声呐枪 = gun / 探照灯束 = beam / 骨刺长枪 = gun+pierce / 浮游光球 = orbit）。
     this.weapons = []
     this.orbits.clear(true, true)
     this.addWeapon(weaponById(char.weapon) || WEAPONS[0])

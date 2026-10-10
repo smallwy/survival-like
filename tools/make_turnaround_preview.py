@@ -24,7 +24,7 @@ PAD = 12
 NAME_W = 156
 HEAD = 92
 
-ROWS = [("rookie", "新兵 · 默认"), ("guanyu", "关羽"), ("zhangfei", "张飞"), ("zhaoyun", "赵云")]
+ROWS = [("rookie", "深潜者 · 默认"), ("guanyu", "拾光者"), ("zhangfei", "铸壳者"), ("zhaoyun", "电鳗使")]
 # (文件名后缀, 列标题, 是否水平翻转后显示)
 COLS = [
     ("front", "正面 / 按下", False),

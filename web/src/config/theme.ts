@@ -50,7 +50,7 @@ export const TXT = {
 
 export const FONT = "'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif"
 
-// 这里原来还有 panel / rule / seal / text 四个绘制 helper（三国时期的"墨底鎏金"面板）。
+// 这里原来还有 panel / rule / seal / text 四个绘制 helper（早期版本的"墨底鎏金"面板）。
 // 2026-10-09 五屏改走 ui/kit.ts 的纸盒系统后它们已无消费者，一并删掉 ——
 // 留着的结果是"下次改界面时先看到旧组件、又拿它拼出第五种不一致的样式"。
 // HUD 需要的深色面板在 kit.ts 里有 darkPanel()。
