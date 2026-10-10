@@ -132,6 +132,7 @@ export interface ItemMods {
   critChance?: number  // 暴击率（0~1）
   critMul?: number     // 暴击倍率（额外倍率，如 0.5 = 150%）
   materials?: number   // 每次拾取额外材料
+  lightRBonus?: number // 光照/视野半径加成（倍率，如 0.25 = +25%，可叠加）
 }
 
 export type ItemRarity = 'common' | 'uncommon' | 'rare'
@@ -577,6 +578,7 @@ export const ITEMS: ItemDef[] = [
   { id: 'gyro', name: '陀螺仪', desc: '移速 +10%，攻速 +10%，生命 -8', rarity: 'uncommon', price: 21, mods: { speedMul: 1.1, cdMul: 0.9, maxHp: -8 } },
   { id: 'luckycoin', name: '幸运币', desc: '暴击率 +10%，暴击伤害 +50%', rarity: 'uncommon', price: 19, mods: { critChance: 0.1, critMul: 0.5 } },
   { id: 'weldred', name: '焊接面罩', desc: '伤害 +10%，减伤 +1，移速 -5%', rarity: 'uncommon', price: 22, mods: { dmgMul: 1.1, armor: 1, speedMul: 0.95 } },
+  { id: 'sonarlens', name: '声呐透镜', desc: '光照半径 +25%', rarity: 'uncommon', price: 18, mods: { lightRBonus: 0.25 } },
   // rare
   { id: 'booster', name: '增压器', desc: '伤害 +40%，攻速 -20%', rarity: 'rare', price: 32, mods: { dmgMul: 1.4, cdMul: 1.2 } },
   { id: 'titan', name: '钛合金壳', desc: '最大生命 +50，移速 -15%', rarity: 'rare', price: 30, mods: { maxHp: 50, speedMul: 0.85 } },
@@ -584,7 +586,8 @@ export const ITEMS: ItemDef[] = [
   { id: 'recycler', name: '回收机', desc: '每次拾取 +2 材料，最大生命 -15', rarity: 'rare', price: 28, mods: { materials: 2, maxHp: -15 } },
   { id: 'fangs', name: '吸血牙', desc: '每次击杀回复 2 生命', rarity: 'rare', price: 30, mods: { lifesteal: 2 } },
   { id: 'doubletape', name: '强力双面胶', desc: '攻速 +10%，移速 +8%', rarity: 'rare', price: 29, mods: { cdMul: 0.9, speedMul: 1.08 } },
-  { id: 'matchbox', name: '火柴盒', desc: '每波回复 5 生命，伤害 +10%', rarity: 'rare', price: 29, mods: { regenPerWave: 5, dmgMul: 1.1 } }
+  { id: 'matchbox', name: '火柴盒', desc: '每波回复 5 生命，伤害 +10%', rarity: 'rare', price: 29, mods: { regenPerWave: 5, dmgMul: 1.1 } },
+  { id: 'floodlight', name: '探照灯', desc: '光照半径 +60%', rarity: 'rare', price: 30, mods: { lightRBonus: 0.6 } }
 ]
 
 // ---------- 波内强度曲线 ----------

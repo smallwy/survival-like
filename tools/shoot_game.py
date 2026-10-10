@@ -72,6 +72,10 @@ def find_browser():
 
 def launch(url):
     ud = os.path.join(tempfile.gettempdir(), 'wb_cdp_prof')
+    # 上次 Chrome 若被强杀（SIGKILL）会残留 SingletonLock，新实例会因
+    # "profile appears to be in use" 直接退出（exit 21）—— 每次启动前清掉。
+    import shutil
+    shutil.rmtree(ud, ignore_errors=True)
     os.makedirs(ud, exist_ok=True)
     proc = subprocess.Popen([
         find_browser(), '--headless=new', '--disable-gpu', '--no-sandbox',

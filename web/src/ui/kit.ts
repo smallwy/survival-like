@@ -22,6 +22,7 @@
  */
 import Phaser from 'phaser'
 import { FONT } from '../config/theme'
+import { registerUiHit } from './hitRouter'
 
 // ---------------- 深色仪表板图形色（number） ----------------
 //
@@ -237,14 +238,22 @@ export function button(
   }
 
   if (!o.disabled) {
+    // 热区走 hitRouter（屏幕空间手工命中），不再 setInteractive ——
+    // Phaser 对「scrollFactor=0 + setScale 容器」的命中测试在镜头滚动后必失灵，
+    // 详见 ui/hitRouter.ts 头注。
     const hit = scene.add.rectangle(0, 0, w, h, 0xffffff, 0.001)
-    hit.setInteractive({ useHandCursor: true })
-    hit.on('pointerover', () => { c.setY(cy - 2); face.lineStyle(3, P.tape, 1).strokeRoundedRect(-w / 2, -h / 2, w, h, 8) })
-    hit.on('pointerout', () => { c.setY(cy); face.lineStyle(3, edge, 1).strokeRoundedRect(-w / 2, -h / 2, w, h, 8) })
-    hit.on('pointerdown', () => {
-      c.setY(cy + 2)
-      scene.time.delayedCall(70, () => c.setY(cy))
-      if (o.onClick) o.onClick()
+    registerUiHit(scene, {
+      obj: hit, w, h,
+      onClick: () => o.onClick?.(),
+      onHover: (v) => {
+        c.setY(cy + (v ? -2 : 0))
+        face.lineStyle(3, v ? P.tape : edge, 1).strokeRoundedRect(-w / 2, -h / 2, w, h, 8)
+      },
+      onPress: () => {
+        c.setY(cy + 2)
+        scene.time.delayedCall(70, () => c.setY(cy))
+      },
+      alive: () => !!hit.scene
     })
     c.add(hit)
   }

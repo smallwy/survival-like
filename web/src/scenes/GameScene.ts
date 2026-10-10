@@ -21,6 +21,7 @@ import { UI, TXT, FONT } from '../config/theme'
 // 战斗 HUD 仍走 theme.ts 的暗色系统 —— 场地是"深海海底"（暗），
 // 而菜单是"摆在这场地上的一副桌游"（纸盒），两套表面各司其职。
 import { P, INK, FS, UI_MAX_ZOOM, card, button, tag, statBar, shell, shellTitle, label, iconSlot, pill, tapeStrip } from '../ui/kit'
+import { registerUiHit, routeDown, routeMove } from '../ui/hitRouter'
 // 卡牌图标（矢量，见 ui/glyphs.ts）：武器按 id、道具按效果类别分发。
 import { drawWeaponGlyph, drawItemGlyph, itemIconTag } from '../ui/glyphs'
 // 立绘策略：不再加载 AI 生成的人物立绘，
@@ -363,6 +364,8 @@ export class GameScene extends Phaser.Scene {
   private light = 0
   /** 当前光照半径（px），每帧从 light 平滑插值得到 —— 直接跳变会像屏幕闪了一下 */
   private lightR = 0
+  /** 道具带来的「视野半径加成」倍率（可叠加），在 tickLight 里并入 lightR */
+  private lightRBonus = 0
   /** 黑暗遮罩：用一张 Canvas 纹理，中心透明、四周压黑，size 跟着 lightR 变 */
   private darkMask!: Phaser.GameObjects.Image
   /** 玩家头灯：ADD 混合的一圈柔光，depth 36（在黑暗遮罩 35 之上） */
@@ -560,6 +563,7 @@ export class GameScene extends Phaser.Scene {
     // 「视野收缩」必须是**他自己开火打出来的**，不是一开始就被罚。
     this.light = LIGHT.max
     this.lightR = LIGHT.tacticalR
+    this.lightRBonus = 0
     this.lightWarned = false
     this.magnet = 160
     // 初始武器只是个占位，真正生效的起手武器由 applyCharStats() 按潜行者写入。
@@ -685,7 +689,7 @@ export class GameScene extends Phaser.Scene {
     // （zoom 会把 scrollFactor=0 的整个 HUD 一起缩放并推出屏幕）。
     // "单位太小 / 场景太空"靠 PX_SCALE 解决。
     this.cameras.main.setZoom(CAM_ZOOM)
-    this.cameras.main.setBackgroundColor('#0b0910')
+    this.cameras.main.setBackgroundColor('#04070d')
 
     // 辉光必须在 HUD 建起来之前挂上（同一台相机全会吃到），
     // 粒子发射器要先有贴图，所以都放在这里 —— makeTextures 已在 create 之前跑完。
@@ -715,7 +719,16 @@ export class GameScene extends Phaser.Scene {
     // 所以按键必须好按（左手不用离开移动键），且两个键都认（不同人的习惯不同）。
     this.input.keyboard!.on('keydown-Q', () => this.castStratagem())
     this.input.keyboard!.on('keydown-E', () => this.castStratagem())
+    // UI 点击全部走屏幕空间路由器（hitRouter）—— Phaser 对
+    // 「scrollFactor=0 + setScale 容器」的命中测试在镜头滚动后必失灵，
+    // 表现为「波间补给『进入下一波』点了没反应」。详见 ui/hitRouter.ts。
+    this.input.on('pointerdown', (p: Phaser.Input.Pointer) => routeDown(this, p))
+    this.input.on('pointermove', (p: Phaser.Input.Pointer) => routeMove(this, p))
     this.scale.on('resize', this.layout, this)
+    // 立即跑一次 layout：高 DPI 修复把 gameSize 设成物理像素（1920×1080 @DPR1.5），
+    // 而相机默认按场景创建时的尺寸定视口。不主动调一次，首次进局的画面就会
+    // 只占左上角（相机视口 1280×720 < 画布 1920×1080），四周全黑。
+    this.layout()
     this.buildHud()
     this.loadMeta()
   }
@@ -869,6 +882,10 @@ export class GameScene extends Phaser.Scene {
   private layout() {
     const w = this.scale.width
     const h = this.scale.height
+    // 相机视口必须跟着 gameSize 走。高 DPI 修复后 gameSize = 物理像素
+    // （如 DPR1.5 时 1920×1080），而相机默认在场景创建时按当时的逻辑尺寸
+    // （1280×720）设好视口，不重设就会"内容只画在左上角、右侧和底部全黑"。
+    this.cameras.main.setSize(w, h)
     this.bg.setPosition(w / 2, h / 2).setSize(w, h)
     this.vig.setPosition(w / 2, h / 2).setDisplaySize(w, h)
     this.layoutViewMask()
@@ -2881,6 +2898,10 @@ export class GameScene extends Phaser.Scene {
       const t = frac / tf
       targetR = LIGHT.lampR * (0.45 + 0.55 * t * t)
     }
+    // 视野道具：把道具带来的半径加成倍率并入目标半径。
+    // 直接作用到 targetR（而非已收敛的 lightR），平滑收敛会让光圈自然「张开」，
+    // 不会像瞬移一样闪一下；可叠加，买多个透镜/探照灯视野越来越广。
+    if (this.lightRBonus) targetR *= (1 + this.lightRBonus)
     // 平滑收敛：8px/帧 @60fps ≈ 0.35s 从头灯到战术半径
     const step = 8 * delta / 16.67
     this.lightR += Phaser.Math.Clamp(targetR - this.lightR, -step, step)
@@ -4715,10 +4736,12 @@ export class GameScene extends Phaser.Scene {
       const hit = this.uiAdd(c, this.add.rectangle(cx, cy, HW * 2, HH * 2, 0xffffff, 0.001))
       const hl = this.uiAdd(c, this.add.rectangle(cx, cy, HW * 2 + 5, HH * 2 + 5, 0x000000, 0)
         .setStrokeStyle(3, P.tape, 0))
-      hit.setInteractive({ useHandCursor: true })
-      hit.on('pointerover', () => hl.setStrokeStyle(3, P.tape, 1))
-      hit.on('pointerout', () => hl.setStrokeStyle(3, P.tape, 0))
-      hit.on('pointerdown', () => this.buyOffer(i))
+      registerUiHit(this, {
+        obj: hit, w: HW * 2, h: HH * 2,
+        onClick: () => this.buyOffer(i),
+        onHover: (v) => hl.setStrokeStyle(3, P.tape, v ? 1 : 0),
+        alive: () => !!hit.scene
+      })
     }
   }
 
@@ -4856,6 +4879,7 @@ export class GameScene extends Phaser.Scene {
     if (m.critChance) this.critChance += m.critChance
     if (m.critMul) this.critMul += m.critMul
     if (m.materials) this.materialsPerPickup += m.materials
+    if (m.lightRBonus) this.lightRBonus += m.lightRBonus
     this.items.push(it)
   }
 
@@ -4957,10 +4981,12 @@ export class GameScene extends Phaser.Scene {
       const hit = this.uiAdd(c, this.add.rectangle(0, cy2, 448, 76, 0xffffff, 0.001))
       const hl = this.uiAdd(c, this.add.rectangle(0, cy2, 453, 81, 0x000000, 0)
         .setStrokeStyle(3, P.tape, 0))
-      hit.setInteractive({ useHandCursor: true })
-      hit.on('pointerover', () => hl.setStrokeStyle(3, P.tape, 1))
-      hit.on('pointerout', () => hl.setStrokeStyle(3, P.tape, 0))
-      hit.on('pointerdown', () => choose(i))
+      registerUiHit(this, {
+        obj: hit, w: 448, h: 76,
+        onClick: () => choose(i),
+        onHover: (v) => hl.setStrokeStyle(3, P.tape, v ? 1 : 0),
+        alive: () => !!hit.scene
+      })
     })
 
     const handler = (ev: KeyboardEvent) => {
@@ -5120,6 +5146,17 @@ export class GameScene extends Phaser.Scene {
     this.renderPrep()
   }
 
+  /** 返回主界面（TitleScene）。清掉备战界面的常驻监听与压暗底，避免残留。 */
+  private backToTitle() {
+    if (this.prepKeyHandler) {
+      window.removeEventListener('keydown', this.prepKeyHandler)
+      this.prepKeyHandler = null
+    }
+    if (this.prepBackdrop) { this.prepBackdrop.destroy(); this.prepBackdrop = null }
+    if (this.selectOverlay) { this.selectOverlay.destroy(); this.selectOverlay = null }
+    this.scene.start('title')
+  }
+
   /** 按当前 prepStep 重建备战界面。两屏共用一个容器、一份键盘监听。 */
   private renderPrep() {
     if (this.selectOverlay) {
@@ -5186,6 +5223,7 @@ export class GameScene extends Phaser.Scene {
       if (this.prepStep === 'hub') {
         if (ev.key === 'Enter') this.gotoStageSelect()
         else if (ev.key === 'f' || ev.key === 'F') this.deployCurrent()
+        else if (ev.key === 'Escape') this.backToTitle()
       } else if (this.prepStep === 'stage') {
         if (ev.key === 'ArrowLeft') this.switchChapter(-1)
         else if (ev.key === 'ArrowRight') this.switchChapter(1)
@@ -5353,8 +5391,14 @@ export class GameScene extends Phaser.Scene {
         INK.dim).setOrigin(0.5))
     })
 
+    // ---------- 左上：返回主界面 ----------
+    // 放在左上角、做成 ghost 小按钮：这是"退出"类操作，不该和"出征"抢视线。
+    this.uiAdd(c, button(this, -404, -286, 118, 34, '◀ 主界面', {
+      ghost: true, onClick: () => this.backToTitle()
+    }))
+
     this.uiAdd(c, label(this, 0, 292,
-      'Enter 选关　·　F 直接出征　·　点击卡片操作', FS.caption, INK.dim).setOrigin(0.5))
+      'Enter 选关　·　F 直接出征　·　Esc 返回主界面', FS.caption, INK.dim).setOrigin(0.5))
   }
 
   /** 从 Hub 直接打当前选中的关卡（跳过选关页）。 */
@@ -5385,10 +5429,12 @@ export class GameScene extends Phaser.Scene {
       }))
       const t = this.uiAdd(c, label(this, x, cy, s, FS.title, INK.main).setOrigin(0.5))
       const hit = this.uiAdd(c, this.add.rectangle(x, cy, 46, 46, 0xffffff, 0.001))
-      hit.setInteractive({ useHandCursor: true })
-      hit.on('pointerover', () => t.setColor(INK.tape))
-      hit.on('pointerout', () => t.setColor(INK.main))
-      hit.on('pointerdown', () => this.switchChapter(d))
+      registerUiHit(this, {
+        obj: hit, w: 46, h: 46,
+        onClick: () => this.switchChapter(d),
+        onHover: (v) => t.setColor(v ? INK.tape : INK.main),
+        alive: () => !!hit.scene
+      })
     }
     arrow(-394, '◀', -1)
     arrow(394, '▶', 1)
@@ -5435,12 +5481,14 @@ export class GameScene extends Phaser.Scene {
         const hit = this.uiAdd(c, this.add.rectangle(x, -30, 262, 196, 0xffffff, 0.001))
         const hl = this.uiAdd(c, this.add.rectangle(x, -30, 267, 201, 0x000000, 0)
           .setStrokeStyle(3, P.tape, 0))
-        hit.setInteractive({ useHandCursor: true })
-        hit.on('pointerover', () => hl.setStrokeStyle(3, P.tape, 1))
-        hit.on('pointerout', () => hl.setStrokeStyle(3, P.tape, 0))
-        hit.on('pointerdown', () => {
-          if (this.prepStage === s.index) this.gotoDeploy()
-          else { this.prepStage = s.index; this.renderPrep() }
+        registerUiHit(this, {
+          obj: hit, w: 262, h: 196,
+          onClick: () => {
+            if (this.prepStage === s.index) this.gotoDeploy()
+            else { this.prepStage = s.index; this.renderPrep() }
+          },
+          onHover: (v) => hl.setStrokeStyle(3, P.tape, v ? 1 : 0),
+          alive: () => !!hit.scene
         })
       }
     })
@@ -5540,10 +5588,12 @@ export class GameScene extends Phaser.Scene {
         const hit = this.uiAdd(box, this.add.rectangle(0, 0, 168, 244, 0xffffff, 0.001))
         const hl = this.uiAdd(box, this.add.rectangle(0, 0, 173, 249, 0x000000, 0)
           .setStrokeStyle(3, P.tape, 0))
-        hit.setInteractive({ useHandCursor: true })
-        hit.on('pointerover', () => hl.setStrokeStyle(3, P.tape, 1))
-        hit.on('pointerout', () => hl.setStrokeStyle(3, P.tape, 0))
-        hit.on('pointerdown', () => { this.prepChar = cdef; this.renderPrep() })
+        registerUiHit(this, {
+          obj: hit, w: 168, h: 244,
+          onClick: () => { this.prepChar = cdef; this.renderPrep() },
+          onHover: (v) => hl.setStrokeStyle(3, P.tape, v ? 1 : 0),
+          alive: () => !!hit.scene
+        })
       }
       c.add(box)
     })
@@ -5592,10 +5642,12 @@ export class GameScene extends Phaser.Scene {
         const hit = this.uiAdd(box, this.add.rectangle(0, 0, 138, 110, 0xffffff, 0.001))
         const hl = this.uiAdd(box, this.add.rectangle(0, 0, 143, 115, 0x000000, 0)
           .setStrokeStyle(3, P.tape, 0))
-        hit.setInteractive({ useHandCursor: true })
-        hit.on('pointerover', () => hl.setStrokeStyle(3, P.tape, 1))
-        hit.on('pointerout', () => hl.setStrokeStyle(3, P.tape, 0))
-        hit.on('pointerdown', () => { this.prepStrat = sg.id; this.renderPrep() })
+        registerUiHit(this, {
+          obj: hit, w: 138, h: 110,
+          onClick: () => { this.prepStrat = sg.id; this.renderPrep() },
+          onHover: (v) => hl.setStrokeStyle(3, P.tape, v ? 1 : 0),
+          alive: () => !!hit.scene
+        })
       }
       c.add(box)
     })
@@ -5833,7 +5885,7 @@ export class GameScene extends Phaser.Scene {
     const names = ids.map((id) => META_NAMES[id] || id).join('、')
     const t = this.add.text(this.scale.width / 2, 120, `★ 新解锁：${names}`, {
       fontFamily: FONT, fontSize: '20px', color: TXT.goldHi,
-      backgroundColor: '#120e17ee', padding: { x: 14, y: 8 }
+      backgroundColor: '#08111cee', padding: { x: 14, y: 8 }
     }).setOrigin(0.5).setScrollFactor(0).setDepth(400)
     this.time.delayedCall(3200, () => t.destroy())
   }
@@ -5841,7 +5893,7 @@ export class GameScene extends Phaser.Scene {
   private bossBanner(name: string) {
     const t = this.add.text(this.scale.width / 2, 90, `⚠ ${name} 出现！`, {
       fontFamily: FONT, fontSize: '24px', color: TXT.red,
-      backgroundColor: '#120e17ee', padding: { x: 16, y: 10 }
+      backgroundColor: '#08111cee', padding: { x: 16, y: 10 }
     }).setOrigin(0.5).setScrollFactor(0).setDepth(400)
     this.time.delayedCall(2600, () => t.destroy())
   }
