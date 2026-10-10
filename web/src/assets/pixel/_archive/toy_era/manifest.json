@@ -1,0 +1,309 @@
+{
+  "grid": 32,
+  "cols": 4,
+  "dirs": [
+    "down",
+    "up",
+    "side"
+  ],
+  "acts": [
+    "idle",
+    "walk",
+    "attack"
+  ],
+  "actFrames": {
+    "idle": 2,
+    "walk": 4,
+    "attack": 3
+  },
+  "units": {
+    "hero_rookie": {
+      "sheet": "hero_rookie.png",
+      "upscale": 1,
+      "zoom": 1,
+      "cell": 32,
+      "bbox": [
+        7.0,
+        0.0,
+        28.0,
+        32.0
+      ],
+      "muzzle": {
+        "side": [
+          14.0,
+          5.0
+        ]
+      }
+    },
+    "hero_guanyu": {
+      "sheet": "hero_guanyu.png",
+      "upscale": 1,
+      "zoom": 1,
+      "cell": 32,
+      "bbox": [
+        7.0,
+        0.0,
+        28.0,
+        32.0
+      ],
+      "muzzle": {
+        "side": [
+          14.0,
+          2.0
+        ]
+      }
+    },
+    "hero_zhangfei": {
+      "sheet": "hero_zhangfei.png",
+      "upscale": 1,
+      "zoom": 1,
+      "cell": 32,
+      "bbox": [
+        5.0,
+        0.0,
+        29.0,
+        32.0
+      ],
+      "muzzle": {
+        "side": [
+          15.0,
+          2.0
+        ]
+      }
+    },
+    "hero_zhaoyun": {
+      "sheet": "hero_zhaoyun.png",
+      "upscale": 1,
+      "zoom": 1,
+      "cell": 32,
+      "bbox": [
+        8.0,
+        2.0,
+        28.0,
+        32.0
+      ],
+      "muzzle": {
+        "side": [
+          14.0,
+          2.0
+        ]
+      }
+    },
+    "foe_minion": {
+      "sheet": "foe_minion.png",
+      "upscale": 1,
+      "zoom": 1,
+      "cell": 32,
+      "bbox": [
+        7.0,
+        1.0,
+        28.0,
+        32.0
+      ],
+      "muzzle": {
+        "side": [
+          13.0,
+          3.0
+        ]
+      }
+    },
+    "foe_runner": {
+      "sheet": "foe_runner.png",
+      "upscale": 1,
+      "zoom": 1,
+      "cell": 32,
+      "bbox": [
+        9.0,
+        3.0,
+        27.0,
+        32.0
+      ],
+      "muzzle": {
+        "side": [
+          12.0,
+          2.0
+        ]
+      }
+    },
+    "foe_tank": {
+      "sheet": "foe_tank.png",
+      "upscale": 1,
+      "zoom": 1,
+      "cell": 32,
+      "bbox": [
+        4.0,
+        0.0,
+        29.0,
+        32.0
+      ],
+      "muzzle": {
+        "side": [
+          14.0,
+          3.0
+        ]
+      }
+    },
+    "foe_swarm": {
+      "sheet": "foe_swarm.png",
+      "upscale": 1,
+      "zoom": 1,
+      "cell": 32,
+      "bbox": [
+        8.0,
+        10.0,
+        28.0,
+        32.0
+      ],
+      "muzzle": {
+        "side": [
+          11.0,
+          7.0
+        ]
+      }
+    },
+    "foe_shooter": {
+      "sheet": "foe_shooter.png",
+      "upscale": 1,
+      "zoom": 1,
+      "cell": 32,
+      "bbox": [
+        8.0,
+        2.0,
+        28.0,
+        32.0
+      ],
+      "muzzle": {
+        "side": [
+          14.0,
+          5.0
+        ]
+      }
+    },
+    "foe_shield": {
+      "sheet": "foe_shield.png",
+      "upscale": 1,
+      "zoom": 1,
+      "cell": 32,
+      "bbox": [
+        3.0,
+        1.0,
+        29.0,
+        32.0
+      ],
+      "muzzle": {
+        "side": [
+          14.0,
+          3.0
+        ]
+      }
+    },
+    "foe_elite": {
+      "sheet": "foe_elite.png",
+      "upscale": 1,
+      "zoom": 1,
+      "cell": 32,
+      "bbox": [
+        7.0,
+        1.0,
+        28.0,
+        32.0
+      ],
+      "muzzle": {
+        "side": [
+          13.0,
+          3.0
+        ]
+      }
+    },
+    "foe_boss_warlord": {
+      "sheet": "foe_boss_warlord.png",
+      "upscale": 2,
+      "zoom": 2,
+      "cell": 64,
+      "bbox": [
+        4.0,
+        0.0,
+        29.0,
+        32.0
+      ],
+      "muzzle": {
+        "side": [
+          14.0,
+          3.0
+        ]
+      }
+    },
+    "foe_boss_yanliang": {
+      "sheet": "foe_boss_yanliang.png",
+      "upscale": 2,
+      "zoom": 2,
+      "cell": 64,
+      "bbox": [
+        5.0,
+        0.0,
+        29.0,
+        32.0
+      ],
+      "muzzle": {
+        "side": [
+          14.0,
+          3.0
+        ]
+      }
+    },
+    "foe_boss_caocao": {
+      "sheet": "foe_boss_caocao.png",
+      "upscale": 2,
+      "zoom": 2,
+      "cell": 64,
+      "bbox": [
+        4.0,
+        0.0,
+        29.0,
+        32.0
+      ],
+      "muzzle": {
+        "side": [
+          14.0,
+          3.0
+        ]
+      }
+    },
+    "foe_boss_ganning": {
+      "sheet": "foe_boss_ganning.png",
+      "upscale": 2,
+      "zoom": 2,
+      "cell": 64,
+      "bbox": [
+        9.0,
+        3.0,
+        27.0,
+        32.0
+      ],
+      "muzzle": {
+        "side": [
+          12.0,
+          2.0
+        ]
+      }
+    },
+    "foe_boss_tyrant": {
+      "sheet": "foe_boss_tyrant.png",
+      "upscale": 2,
+      "zoom": 2,
+      "cell": 64,
+      "bbox": [
+        4.0,
+        0.0,
+        29.0,
+        32.0
+      ],
+      "muzzle": {
+        "side": [
+          14.0,
+          3.0
+        ]
+      }
+    }
+  }
+}
