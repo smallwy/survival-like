@@ -102,6 +102,15 @@ export const TXT = {
   red:    '#ff85a8',
 } as const
 
+/**
+ * 构建标记 —— 显示在标题画面右下角。
+ *
+ * 存在的唯一目的：让"我到底有没有拿到新代码"这件事**不用猜**。
+ * 之前多次出现"你改了但我这边没变化"，排查全耗在确认代码版本上。
+ * 改一次代码就 +1，用户看一眼右下角就知道 pull 生效没有。
+ */
+export const BUILD_TAG = 'v4.3'
+
 export const FONT = "'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif"
 /** 等宽 numerals —— 数值跳动时整行不会左右抖动 */
 export const MONO = "'DIN Alternate', 'Roboto Mono', ui-monospace, monospace"

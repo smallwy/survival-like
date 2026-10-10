@@ -2,6 +2,7 @@ import Phaser from 'phaser'
 import { GameScene } from './scenes/GameScene'
 import { TitleScene } from './scenes/TitleScene'
 import ExploreScene from './scenes/ExploreScene'
+import { BUILD_TAG } from './config/theme'
 
 const config: Phaser.Types.Core.GameConfig = {
   type: Phaser.AUTO,
@@ -181,3 +182,12 @@ window.addEventListener('resize', () => game.scale.refresh())
 // 只读，不参与游戏逻辑，对线上表现零影响。
 // ---------------------------------------------------------------------------
 ;(window as unknown as { __sg?: Phaser.Game }).__sg = game
+
+// 启动横幅：按 F12 就能确认跑的是哪个版本、DPR 与 gameSize 是多少。
+// 用于把"代码没更新"和"代码有 bug"这两类问题分开——这是本项目反复踩的坑。
+console.log(
+  `[深海回响] ${BUILD_TAG} 启动　` +
+  `DPR=${window.devicePixelRatio}　` +
+  `gameSize=${game.scale.width}x${game.scale.height}　` +
+  `displayScale=${game.scale.displayScale.x}`
+)

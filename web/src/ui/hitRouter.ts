@@ -84,19 +84,50 @@ function hitAt(scene: Phaser.Scene, px: number, py: number): UiHit | null {
   return null
 }
 
-/** GameScene 在 `input.on('pointerdown')` 里调用。 */
+/**
+ * 把指针换算成游戏坐标 —— **不依赖 Phaser 的 displayScale / canvasBounds**。
+ *
+ * 为什么必须自己算（2026-10-10，DPR 适配踩的坑）：
+ *   Phaser 用 (clientX - canvasBounds.left) * displayScale 换算，
+ *   而 displayScale = baseSize / canvasBounds。我们为了高清渲染把
+ *   gameSize 改成了物理像素，一旦 canvasBounds 或 displayScale 有一处不同步，
+ *   算出来的坐标就会整体差 DPR 倍 —— 按钮在 1280，点击算成 640，永远点不中。
+ *
+ *   这里改用**原生事件的 clientX/clientY 按 canvas 的 CSS 矩形归一化**，
+ *   再乘 gameSize。这条链路只依赖"canvas 在屏幕上占多大"这个事实，
+ *   与 Phaser 内部的缩放状态完全解耦，GameScene / ExploreScene 的高 DPI
+ *   改写再怎么变都不会影响命中。
+ */
+function pointerGamePos(scene: Phaser.Scene, p: Phaser.Input.Pointer): { x: number; y: number } {
+  const canvas = scene.game.canvas
+  const ev = p.event as (MouseEvent | undefined)
+  if (canvas && ev && typeof ev.clientX === 'number') {
+    const rect = canvas.getBoundingClientRect()
+    if (rect.width > 0 && rect.height > 0) {
+      return {
+        x: (ev.clientX - rect.left) / rect.width * scene.scale.width,
+        y: (ev.clientY - rect.top) / rect.height * scene.scale.height,
+      }
+    }
+  }
+  return { x: p.x, y: p.y }   // 拿不到原生事件时退回 Phaser 的换算
+}
+
+/** GameScene / TitleScene / ExploreScene 在 `input.on('pointerdown')` 里调用。 */
 export function routeDown(scene: Phaser.Scene, p: Phaser.Input.Pointer): void {
-  const h = hitAt(scene, p.x, p.y)
+  const { x, y } = pointerGamePos(scene, p)
+  const h = hitAt(scene, x, y)
   if (!h) return
   h.onPress?.()
   h.onClick()
 }
 
-/** GameScene 在 `input.on('pointermove')` 里调用：维护悬停高亮 + 手型光标。 */
+/** GameScene / TitleScene / ExploreScene 在 `input.on('pointermove')` 里调用：维护悬停高亮 + 手型光标。 */
 export function routeMove(scene: Phaser.Scene, p: Phaser.Input.Pointer): void {
   const any = scene as unknown as { [k: string]: UiHit | undefined }
   const prev = any['__uiHovered']
-  const now = hitAt(scene, p.x, p.y)
+  const { x, y } = pointerGamePos(scene, p)
+  const now = hitAt(scene, x, y)
   if (prev !== now) {
     prev?.onHover?.(false)
     now?.onHover?.(true)

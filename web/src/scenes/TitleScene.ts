@@ -1,5 +1,5 @@
 import Phaser from 'phaser'
-import { UI, TXT, FONT } from '../config/theme'
+import { UI, TXT, FONT, MONO, BUILD_TAG } from '../config/theme'
 import { registerUiHit, routeDown, routeMove } from '../ui/hitRouter'
 import {
   verticalBands, glowPool, lightCone, neonCircle, neonLine, neonPoly
@@ -279,6 +279,14 @@ export class TitleScene extends Phaser.Scene {
     this.add.text(cx, H - 28, 'Enter 开始下潜', {
       fontFamily: FONT, fontSize: '15px', color: TXT.mute
     }).setOrigin(0.5)
+
+    // 版本号与实时缩放信息 —— 用来一眼确认"新代码到底有没有跑到"。
+    // 之前多次"你改了但我这边没变化"，排查全耗在确认版本上。
+    const dpr = window.devicePixelRatio || 1
+    this.add.text(W - 12, H - 8,
+      `${BUILD_TAG}　·　DPR ${dpr}　·　${W}×${H}`, {
+        fontFamily: MONO, fontSize: '13px', color: TXT.mute
+      }).setOrigin(1, 1).setAlpha(0.75)
 
     void glow
   }
