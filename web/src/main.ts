@@ -1,6 +1,7 @@
 import Phaser from 'phaser'
 import { GameScene } from './scenes/GameScene'
 import { TitleScene } from './scenes/TitleScene'
+import ExploreScene from './scenes/ExploreScene'
 
 const config: Phaser.Types.Core.GameConfig = {
   type: Phaser.AUTO,
@@ -50,8 +51,11 @@ const config: Phaser.Types.Core.GameConfig = {
   // 关闭 Phaser 的默认抗锯齿：世界像素图必须走 NEAREST 才有硬边（pixelArt 已设）。
   antialias: false,
   // 场景顺序即启动顺序：TitleScene 在前 = 打开游戏先看到主界面（深海发光风），
-  // 点「开始潜航」或按 Enter 才 scene.start('game') 进潜航台。
-  scene: [TitleScene, GameScene]
+  // 点「开始下潜」或按 Enter 才 scene.start('explore') 进探索器。
+  //
+  // GameScene 是 V3 的割草场景，V4 已废弃玩法方向（见《项目计划书》V4 §1），
+  // 保留注册只是为了让引用不断，S3 阶段随文件一并删除；主界面不再路由过去。
+  scene: [TitleScene, ExploreScene, GameScene]
 }
 
 const game = new Phaser.Game(config)

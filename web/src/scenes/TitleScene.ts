@@ -1,6 +1,6 @@
 import Phaser from 'phaser'
 import { UI, TXT, FONT } from '../config/theme'
-import { registerUiHit } from '../ui/hitRouter'
+import { registerUiHit, routeDown, routeMove } from '../ui/hitRouter'
 import {
   verticalBands, glowPool, lightCone, neonCircle, neonLine, neonPoly
 } from '../render/neon'
@@ -46,6 +46,11 @@ export class TitleScene extends Phaser.Scene {
     this.buildMotes(W, H)
     this.buildGridAndScan(W, H)
     this.buildForegroundUI(W, H)
+
+    // 必须自己把 pointer 事件喂给 hitRouter：registerUiHit 只登记热区，
+    // 不接管输入。漏了这两行 = 所有按钮点了都没反应（2026-10-10 实测）。
+    this.input.on('pointerdown', (p: Phaser.Input.Pointer) => routeDown(this, p))
+    this.input.on('pointermove', (p: Phaser.Input.Pointer) => routeMove(this, p))
 
     this.scale.on('resize', () => this.scene.restart())
     this.input.keyboard?.on('keydown-ENTER', () => this.startDive())
@@ -379,8 +384,9 @@ export class TitleScene extends Phaser.Scene {
     ;(this as unknown as { _panel?: Phaser.GameObjects.Container })._panel = p
   }
 
+  /** 进入探索器（V4 主线玩法）。旧的 'game' 割草场景已废弃，不再路由过去。 */
   private startDive() {
-    this.scene.start('game')
+    this.scene.start('explore')
   }
 
   update(_time: number, delta: number) {
