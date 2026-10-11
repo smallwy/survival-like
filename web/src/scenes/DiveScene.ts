@@ -37,6 +37,15 @@ import Phaser from 'phaser'
 import { UI, TXT, FONT, MONO } from '../config/theme'
 import { neon, neonCircle, neonLine, glowPool } from '../render/neon'
 import { registerUiHit, routeDown, routeMove } from '../ui/hitRouter'
+// 五层环境背景（混元生成 → 去水印 → WebP q82，10.8MB → 862KB）。
+// 背景图是「世界结构」载体：以前每层只换底色，玩家感觉不到自己在不同深度。
+import BG_L1 from '../assets/env/L1_sunlit.webp'
+import BG_L2 from '../assets/env/L2_twilight.webp'
+import BG_L3 from '../assets/env/L3_midnight.webp'
+import BG_L4 from '../assets/env/L4_hydrothermal.webp'
+import BG_L5 from '../assets/env/L5_abyss.webp'
+
+const ENV_BG = [BG_L1, BG_L2, BG_L3, BG_L4, BG_L5]
 
 /** 全场唯一近白：鱼骨与受击闪白专用，在混乱中最先被看见（V4 §3.3） */
 const WHITE = 0xffffff
@@ -70,6 +79,27 @@ const PLAYER = {
 }
 
 // ---------------------------------------------------------------------------
+// 器械定义表（V6.3）
+// ---------------------------------------------------------------------------
+/**
+ * 四台器械的定位刻意互不重叠，这样 build 选择才有意义：
+ *   声呐   群体 AOE、贴脸才快   —— 扎进鱼群的主力
+ *   机关枪 高频单体、伤害稳定   —— 通用 dps
+ *   鱼雷   低频追踪、范围爆炸   —— 清成堆的敌人
+ *   电弧   瞬发连锁、多目标     —— 敌人分散时的收割
+ * 三台同开 ≈ 一整片弹幕，但玩家仍然只操作走位。
+ */
+const WEAPON_DEF: Record<WeaponId, {
+  name: string; desc: string
+  iv: number; dmg: number; range: number; color: number
+}> = {
+  sonar:   { name: '声呐共振',   desc: '环形波前 · 群体伤害', iv: 0.42, dmg: 12, range: 420, color: UI.cyanHi },
+  gun:     { name: '脉冲机关枪', desc: '高频连射 · 单体',     iv: 0.11, dmg: 7,  range: 520, color: UI.amber },
+  torpedo: { name: '追踪鱼雷',   desc: '低频追踪 · 范围爆炸', iv: 1.50, dmg: 30, range: 620, color: UI.danger },
+  arc:     { name: '链式电弧',   desc: '瞬发连锁 · 多目标',   iv: 0.90, dmg: 16, range: 460, color: UI.violet },
+}
+
+// ---------------------------------------------------------------------------
 // 五层（V6 §3.4）
 // ---------------------------------------------------------------------------
 /**
@@ -94,6 +124,9 @@ interface LayerDef {
   dropCap: number   // 每波掉落总量上限（硬约束 ②）
   toll: number      // 下潜门票（从氧气里扣；最后一层为 0）
   vis: number       // 环境可见度 0~1（V4 §2.2）
+  depthTop: number  // 层顶深度（米）—— HUD 实时深度显示 + 下潜过渡插值用
+  depthBot: number  // 层底深度（米）
+  ventPush: number  // 热泉层向上的热流推力（px/s²），0 = 无。生存压迫层用
   tint: number      // 环境主色（与 UI 色解耦，UI规格 §5.1）
   motes: number     // 漂浮颗粒数量
   hpMul: number     // 敌人血量倍率
@@ -103,11 +136,11 @@ interface LayerDef {
 }
 
 const LAYERS: LayerDef[] = [
-  { name: '阳光带',   sub: 'SUNLIT',       o2Max: 100, drain: 1.00, dropCap: 70,  toll: 15, vis: 1.00, tint: 0x2a6f8a, motes: 34,  hpMul: 1.00, cntMul: 1.00, dashMul: 0.5, driftRatio: 0.00 },
-  { name: '弱光带',   sub: 'TWILIGHT',     o2Max: 100, drain: 1.35, dropCap: 90,  toll: 20, vis: 0.80, tint: 0x1d5a5a, motes: 48,  hpMul: 1.35, cntMul: 1.25, dashMul: 1.0, driftRatio: 0.12 },
-  { name: '午夜带',   sub: 'MIDNIGHT',     o2Max: 85,  drain: 1.80, dropCap: 110, toll: 25, vis: 0.40, tint: 0x14203c, motes: 70,  hpMul: 1.80, cntMul: 1.50, dashMul: 1.1, driftRatio: 0.18 },
-  { name: '热泉带',   sub: 'HYDROTHERMAL', o2Max: 70,  drain: 2.40, dropCap: 135, toll: 30, vis: 0.25, tint: 0x3a1a10, motes: 90,  hpMul: 2.40, cntMul: 1.80, dashMul: 1.2, driftRatio: 0.15 },
-  { name: '深渊带',   sub: 'THE ABYSS',    o2Max: 60,  drain: 3.00, dropCap: 160, toll: 0,  vis: 0.10, tint: 0x0a0614, motes: 110, hpMul: 3.20, cntMul: 2.10, dashMul: 1.3, driftRatio: 0.22 },
+  { name: '阳光带',   sub: 'SUNLIT',       o2Max: 100, drain: 1.00, dropCap: 70,  toll: 15, vis: 1.00, depthTop: 0,     depthBot: 200,   ventPush: 0,   tint: 0x2a6f8a, motes: 34,  hpMul: 1.00, cntMul: 1.00, dashMul: 0.5, driftRatio: 0.00 },
+  { name: '弱光带',   sub: 'TWILIGHT',     o2Max: 100, drain: 1.35, dropCap: 90,  toll: 20, vis: 0.80, depthTop: 200,   depthBot: 1000,  ventPush: 0,   tint: 0x1d5a5a, motes: 48,  hpMul: 1.35, cntMul: 1.25, dashMul: 1.0, driftRatio: 0.12 },
+  { name: '午夜带',   sub: 'MIDNIGHT',     o2Max: 85,  drain: 1.80, dropCap: 110, toll: 25, vis: 0.40, depthTop: 1000,  depthBot: 4000,  ventPush: 0,   tint: 0x14203c, motes: 70,  hpMul: 1.80, cntMul: 1.50, dashMul: 1.1, driftRatio: 0.18 },
+  { name: '热泉带',   sub: 'HYDROTHERMAL', o2Max: 70,  drain: 2.40, dropCap: 135, toll: 30, vis: 0.25, depthTop: 4000,  depthBot: 6000,  ventPush: 190, tint: 0x3a1a10, motes: 90,  hpMul: 2.40, cntMul: 1.80, dashMul: 1.2, driftRatio: 0.15 },
+  { name: '深渊带',   sub: 'THE ABYSS',    o2Max: 60,  drain: 3.00, dropCap: 160, toll: 0,  vis: 0.10, depthTop: 6000,  depthBot: 11000, ventPush: 0,   tint: 0x0a0614, motes: 110, hpMul: 3.20, cntMul: 2.10, dashMul: 1.3, driftRatio: 0.22 },
 ]
 
 /** 每层 4 波的形状模板（V6 §3.1） */
@@ -176,6 +209,44 @@ interface Debris {
   alive: boolean
 }
 
+// ---------------------------------------------------------------------------
+// 器械（V6.3 多武器系统）
+// ---------------------------------------------------------------------------
+/**
+ * 玩家同时挂载最多 3 台器械，各自独立冷却、**同时自动开火**。
+ * 这是 Brotato 的核心手感：屏幕上的火力来自多个来源，
+ * 玩家的操作仍然只有「走位 + 空格排气」，不引入瞄准（保持轻动作）。
+ */
+type WeaponId = 'sonar' | 'gun' | 'torpedo' | 'arc'
+
+interface Weapon {
+  id: WeaponId
+  iv: number     // 射击间隔（秒）
+  timer: number  // 距下次开火的剩余秒数
+  dmg: number
+  lvl: number    // 等级：每级提升伤害与频率（1..5）
+  anchor: number // 只锚定一个敌人时的索敌锚点下标（鱼雷用）
+}
+
+/** 通用弹：机关枪（直线）与鱼雷（追踪）共用 */
+interface Bullet {
+  x: number; y: number
+  vx: number; vy: number
+  life: number; dmg: number
+  kind: 'gun' | 'torpedo'
+  hit: Set<number>
+  alive: boolean
+}
+
+/** 电弧折线：瞬发 + 存留 0.18s 的视觉残留 */
+interface Arc {
+  pts: { x: number; y: number }[]
+  life: number
+}
+
+/** 鱼雷爆炸的冲击环（纯表现） */
+interface Blast { x: number; y: number; r: number; life: number }
+
 interface Upgrade {
   id: string
   name: string
@@ -196,25 +267,28 @@ export default class DiveScene extends Phaser.Scene {
   /** 升级带来的额外上限（跨层保留） */
   private o2Bonus = 0
   private biomass = 0
-  private fireTimer = 0
+  /** 朝向（弧度）：艇身朝移动方向，静止时保持上一次 */
+  private aim = 0
   private burstTimer = 0
-  private dmg = PLAYER.dmg
-  private fireCd = PLAYER.cd
-  private pierce = PLAYER.pierce
   private speedMul = 1
   private pickupMul = 1
   private killO2 = PLAYER.killO2
-  /** 朝向（弧度）。用于绘制朝向指示线；静止时保持上一次方向 */
-  private aim = 0
   /** 受击闪白计时（氧气被撞时） */
   private hurtFlash = 0
   /** 本帧是否在移动（推进器尾焰长度用） */
   private moving = false
+  /** 本帧受到的热泉上升推力（HUD 用来提示"正在被顶"，0 = 无） */
+  private vpPush = 0
 
   // ---- 实体池 ----
   private enemies: Enemy[] = []
   private bones: Bone[] = []
   private pulses: Pulse[] = []
+  private bullets: Bullet[] = []
+  private arcs: Arc[] = []
+  private blasts: Blast[] = []
+  /** 玩家当前挂载的器械（最多 3 台，各自独立冷却、同时自动开火） */
+  private weapons: Weapon[] = []
   private debris: Debris[] = []
   private motes: Mote[] = []
   private eid = 0
@@ -228,7 +302,12 @@ export default class DiveScene extends Phaser.Scene {
   private bossDown = false
 
   // ---- 波次状态机 ----
-  private phase: 'wave' | 'shop' | 'decide' | 'result' = 'wave'
+  private phase: 'wave' | 'shop' | 'decide' | 'descending' | 'result' = 'wave'
+  /** 下潜过渡：进度秒数 / 起止深度（米）/ 时长 */
+  private descT = 0
+  private descFrom = 0
+  private descTo = 0
+  private descDur = 2.1
   private waveTimer = 0
   private spawnLeft = 0
   private spawnTimer = 0
@@ -236,6 +315,10 @@ export default class DiveScene extends Phaser.Scene {
   private win = false
 
   // ---- 渲染 / 输入 ----
+  /** 每层的环境背景图（混元生成）。depth=1，在 gBg 之下被矢量层与暗幕叠加 */
+  private bg!: Phaser.GameObjects.Image
+  /** 深度显示值（米）：随波次推进递增，下潜过渡时做插值动画 */
+  private depthM = 0
   private gBg!: Phaser.GameObjects.Graphics    // 环境（被暗幕压暗）
   private gDim!: Phaser.GameObjects.Graphics   // 暗幕（只压环境，不压实体）
   private g!: Phaser.GameObjects.Graphics      // 实体（永远全亮）
@@ -247,11 +330,22 @@ export default class DiveScene extends Phaser.Scene {
   private txtPool: Phaser.GameObjects.Text[] = []
   private t = 0
 
+  preload(): void {
+    // 五张 WebP 共 862KB，preload 里一次加载完，避免换层时闪白
+    for (let i = 0; i < ENV_BG.length; i++) {
+      this.load.image(`env${i}`, ENV_BG[i] as unknown as string)
+    }
+  }
+
   create(): void {
     const W = this.scale.width
     const H = this.scale.height
     this.px = W / 2
     this.py = H / 2
+
+    // 环境背景图：先建，depth=1，压在所有矢量环境层之下
+    this.bg = this.add.image(0, 0, `env${this.layerIdx}`).setOrigin(0, 0).setDepth(1)
+    this.layoutBg()
 
     // 深度分层：**环境 → 暗幕 → 实体 → HUD**。
     // 暗幕夹在中间是 V4 §2 的铁律——它只能压暗地形，敌人/气泡/玩家必须画在它之上，
@@ -294,6 +388,9 @@ export default class DiveScene extends Phaser.Scene {
     this.o2Bonus = 0
     this.o2Max = LAYERS[0].o2Max
     this.o2 = this.o2Max
+    this.weapons = []
+    this.bullets = []; this.arcs = []; this.blasts = []
+    this.addWeapon('sonar')          // 开局只有声呐，其余靠波次间拾取
     this.startWave()
   }
 
@@ -307,6 +404,7 @@ export default class DiveScene extends Phaser.Scene {
     this.phase = 'wave'
     this.clearHits()
     this.buildMotes()
+    this.syncEnv()      // 换层换背景 + 深度读数
 
     // L5 最后一波：深渊守望者
     if (this.layerIdx === LAYERS.length - 1 && this.waveInLayer === WAVE_SHAPE.length - 1) {
@@ -429,10 +527,20 @@ export default class DiveScene extends Phaser.Scene {
     this.t += dt
 
     if (this.hurtFlash > 0) this.hurtFlash -= dt
-    if (this.phase === 'wave') {
+    if (this.phase === 'descending') {
+      // 下潜过渡：深度滚动 + 气泡上涌（阶段结束后才开战）
+      this.descT += dt
+      const k = Math.min(1, this.descT / this.descDur)
+      const e = k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2   // easeInOutQuad
+      this.depthM = this.descFrom + (this.descTo - this.descFrom) * e
+      this.updateMotes(dt)
+      if (k >= 1) { this.phase = 'wave'; this.startWave() }
+    } else if (this.phase === 'wave') {
       this.movePlayer(dt)
       this.updateEnemies(dt)
       this.updatePulses(dt)
+      this.updateBullets(dt)
+      this.updateArcs(dt)
       this.updateBones(dt)
       this.updateDebris(dt)
       this.updateMotes(dt)
@@ -464,6 +572,7 @@ export default class DiveScene extends Phaser.Scene {
   }
 
   private movePlayer(dt: number): void {
+    const W = this.scale.width, H = this.scale.height
     let dx = 0, dy = 0
     if (this.keys.left.isDown) dx -= 1
     if (this.keys.right.isDown) dx += 1
@@ -478,8 +587,22 @@ export default class DiveScene extends Phaser.Scene {
     } else {
       this.moving = false
     }
-    const W = this.scale.width, H = this.scale.height
-    this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
+
+    // 热泉上升流（L4 ventPush）：持续的向上推力。
+    // 为什么必须是**加速度**而不是速度偏移：加速度会自然地和玩家输入对抗，
+    // 玩家想往下潜就得一直按着，静止时会明显被"顶"走——
+    // 这正是深海热泉区的生存体感：**没有稳定的地方可以停**。
+    const push = this.layer().ventPush
+    if (push > 0) {
+      // 靠近屏幕底部（热泉口方向）时推力更强，形成"越想躲越被顶"的梯度
+      const grad = 1 + (this.py / H) * 0.8
+      this.py -= push * grad * dt
+      this.vpPush = push * grad
+    } else {
+      this.vpPush = 0
+    }
+
+this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
     this.py = Phaser.Math.Clamp(this.py, 24, H - 24)
 
     // 排气爆发
@@ -684,30 +807,195 @@ export default class DiveScene extends Phaser.Scene {
     }
   }
 
-  private autoFire(dt: number): void {
-    this.fireTimer -= dt
-    if (this.fireTimer > 0) return
-    // 声呐是全向的：射程内有鱼就发一圈波，不需要瞄准（Brotato 核心：只管走位）。
-    // 但波从自己身上往外扩，所以「贴得越近、越早被打到」——
-    // 这把"扎进鱼群多捞几只"和"别被围住"绑成了同一个决策。
-    const rng = this.pulseRange()
-    let inRange = false
+  /** 索敌：射程内最近的敌人 */
+  private nearestEnemy(range: number): Enemy | null {
+    let best: Enemy | null = null, bd = range
     for (const e of this.enemies) {
-      if (Phaser.Math.Distance.Between(this.px, this.py, e.x, e.y) <= rng + e.r) { inRange = true; break }
+      if (!e.alive) continue
+      const d = Phaser.Math.Distance.Between(this.px, this.py, e.x, e.y)
+      if (d < bd) { bd = d; best = e }
     }
-    if (!inRange) return
-    this.pulses.push({
-      x: this.px, y: this.py,
-      r: PLAYER.r * 0.6, maxR: rng,      // 从艇身边缘发出，不是从圆心
-      dmg: this.dmg, width: PLAYER.pulseWidth,
-      hit: new Set<number>(), alive: true,
-    })
-    this.fireTimer = this.fireCd
+    return best
   }
 
-  /** 射程：基础 + 「声呐功率」升级（每级 +55） */
-  private pulseRange(): number {
-    return PLAYER.range + (this.pierce - 1) * 55
+  /** 按等级算出某台器械的实际数值（等级越高：更快、更痛、更远） */
+  private weaponStats(id: WeaponId, lvl: number): { iv: number; dmg: number; range: number } {
+    const d = WEAPON_DEF[id]
+    const k = lvl - 1
+    return {
+      iv: d.iv / (1 + k * 0.12),
+      dmg: d.dmg * (1 + k * 0.35),
+      range: d.range + k * 26,
+    }
+  }
+
+  /** 挂载一台器械。超过 3 台时替换 id 相同的那台（不会无限堆） */
+  private addWeapon(id: WeaponId, lvl = 1): void {
+    const st = this.weaponStats(id, lvl)
+    const exist = this.weapons.find(w => w.id === id)
+    if (exist) {
+      exist.lvl = Math.min(5, exist.lvl + 1)
+      const s2 = this.weaponStats(id, exist.lvl)
+      exist.iv = s2.iv; exist.dmg = s2.dmg
+      return
+    }
+    if (this.weapons.length >= 3) this.weapons.shift()
+    this.weapons.push({ id, iv: st.iv, timer: 0, dmg: st.dmg, lvl, anchor: 0 })
+  }
+
+  /** 全部器械升一级（「弹药改良」升级卡用） */
+  private levelAllWeapons(): void {
+    for (const w of this.weapons) {
+      w.lvl = Math.min(5, w.lvl + 1)
+      const s = this.weaponStats(w.id, w.lvl)
+      w.iv = s.iv; w.dmg = s.dmg
+    }
+  }
+
+  /**
+   * 多器械同时开火。每台各自冷却、各自索敌，玩家仍然只操作走位。
+   * 这是 Brotato 的核心手感：火力来自多个来源，操作只有一个。
+   */
+  private autoFire(dt: number): void {
+    for (const w of this.weapons) {
+      // 钳到 0：没打到目标时 timer 会一直累加负值，
+      // HUD 的冷却条按 timer/iv 算，负值会让进度条反向画满。
+      w.timer = Math.max(0, w.timer - dt)
+      if (w.timer > 0) continue
+      const def = WEAPON_DEF[w.id]
+      const rng = def.range + (w.lvl - 1) * 26
+
+      if (w.id === 'sonar') {
+        // 声呐是全向的：射程内有鱼就发一圈波，不需要瞄准。
+        // 但波从自己身上往外扩，所以「贴得越近越早被打到」——
+        // 这把「扎进鱼群多捞几只」和「别被围住」绑成了同一个决策。
+        if (!this.nearestEnemy(rng)) continue
+        this.pulses.push({
+          x: this.px, y: this.py,
+          r: PLAYER.r * 0.6, maxR: rng,
+          dmg: w.dmg, width: PLAYER.pulseWidth,
+          hit: new Set<number>(), alive: true,
+        })
+      } else if (w.id === 'gun') {
+        const e = this.nearestEnemy(rng); if (!e) continue
+        const a = Math.atan2(e.y - this.py, e.x - this.px)
+        this.bullets.push({
+          x: this.px, y: this.py,
+          vx: Math.cos(a) * 780, vy: Math.sin(a) * 780,
+          life: rng / 780, dmg: w.dmg, kind: 'gun',
+          hit: new Set<number>(), alive: true,
+        })
+      } else if (w.id === 'torpedo') {
+        const e = this.nearestEnemy(rng); if (!e) continue
+        const a = Math.atan2(e.y - this.py, e.x - this.px)
+        this.bullets.push({
+          x: this.px, y: this.py,
+          vx: Math.cos(a) * 300, vy: Math.sin(a) * 300,
+          life: 3.0, dmg: w.dmg, kind: 'torpedo',
+          hit: new Set<number>(), alive: true,
+        })
+      } else {
+        const first = this.nearestEnemy(rng); if (!first) continue
+        this.fireArc(first, w)
+      }
+      w.timer = def.iv / (1 + (w.lvl - 1) * 0.12)
+    }
+  }
+
+  /** 链式电弧：从 first 开始向后跳，跳数随等级增加 */
+  private fireArc(first: Enemy, w: Weapon): void {
+    const chain = 2 + w.lvl                       // Lv1 跳 3 个 → Lv5 跳 7 个
+    const pts = [{ x: this.px, y: this.py }]
+    const hit = new Set<Enemy>()
+    let cur: Enemy | null = first
+    while (cur && hit.size < chain) {
+      hit.add(cur)
+      pts.push({ x: cur.x, y: cur.y })
+      cur.flash = 0.08
+      this.hurt(cur, w.dmg)
+      let next: Enemy | null = null, bd = 190
+      for (const e of this.enemies) {
+        if (!e.alive || hit.has(e)) continue
+        const d = Phaser.Math.Distance.Between(cur!.x, cur!.y, e.x, e.y)
+        if (d < bd) { bd = d; next = e }
+      }
+      cur = next
+    }
+    this.arcs.push({ pts, life: 0.18 })
+  }
+
+  /** 通用弹更新：机关枪直线、鱼雷追踪 + 命中爆炸 */
+  private updateBullets(dt: number): void {
+    for (const b of this.bullets) {
+      if (!b.alive) continue
+      b.life -= dt
+      if (b.life <= 0) { b.alive = false; continue }
+
+      if (b.kind === 'torpedo') {
+        const tgt = this.nearestEnemy(WEAPON_DEF.torpedo.range)
+        if (tgt) {
+          const want = Math.atan2(tgt.y - b.y, tgt.x - b.x)
+          const cur = Math.atan2(b.vy, b.vx)
+          // 转向速率有上限，否则鱼雷会像狗一样贴着敌人抽搐
+          const diff = Phaser.Math.Clamp(
+            Phaser.Math.Angle.Wrap(want - cur), -3.6 * dt, 3.6 * dt)
+          const na = cur + diff
+          const sp = Math.hypot(b.vx, b.vy)
+          b.vx = Math.cos(na) * sp
+          b.vy = Math.sin(na) * sp
+        }
+      }
+
+      b.x += b.vx * dt
+      b.y += b.vy * dt
+      // 出屏即销毁（屏幕外生成原则的延续）
+      const W = this.scale.width, H = this.scale.height
+      if (b.x < -40 || b.x > W + 40 || b.y < -40 || b.y > H + 40) { b.alive = false; continue }
+
+      for (let i = 0; i < this.enemies.length; i++) {
+        const e = this.enemies[i]
+        if (!e.alive || b.hit.has(i)) continue
+        if (Phaser.Math.Distance.Between(b.x, b.y, e.x, e.y) < e.r + 6) {
+          b.hit.add(i)
+          e.flash = 0.08
+          this.hurt(e, b.dmg)
+          if (b.kind === 'torpedo') { this.explode(b.x, b.y, 120, b.dmg * 0.6); b.alive = false; break }
+        }
+      }
+    }
+    this.bullets = this.bullets.filter(b => b.alive)
+  }
+
+  /** 鱼雷爆炸：范围伤害随距离衰减 + 震屏 */
+  private explode(x: number, y: number, r: number, dmg: number): void {
+    this.cameras.main.shake(130, 0.006)
+    this.blasts.push({ x, y, r, life: 0.32 })
+    for (const e of this.enemies) {
+      if (!e.alive) continue
+      const d = Phaser.Math.Distance.Between(x, y, e.x, e.y)
+      if (d < r + e.r) {
+        e.flash = 0.08
+        const falloff = 1 - Phaser.Math.Clamp(d / (r + e.r), 0, 1) * 0.5
+        this.hurt(e, dmg * falloff)
+      }
+    }
+    // 爆炸也会震落肉屑，命中感更实
+    for (let i = 0; i < 10; i++) {
+      const a = Math.random() * Math.PI * 2
+      const sp = 90 + Math.random() * 180
+      this.debris.push({
+        x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+        life: 0.3 + Math.random() * 0.2, maxLife: 0.5,
+        color: UI.amber, r: 1.6 + Math.random() * 2, alive: true,
+      })
+    }
+  }
+
+  private updateArcs(dt: number): void {
+    for (const a of this.arcs) a.life -= dt
+    this.arcs = this.arcs.filter(a => a.life > 0)
+    for (const b of this.blasts) b.life -= dt
+    this.blasts = this.blasts.filter(b => b.life > 0)
   }
 
   private drainOxygen(dt: number): void {
@@ -718,114 +1006,151 @@ export default class DiveScene extends Phaser.Scene {
   // ==========================================================================
   // 环境绘制（会被暗幕压暗）
   // ==========================================================================
+  /**
+   * 下潜过渡演出。
+   *
+   * 解决的是「层与层之间只是换了个底色」——这里让玩家**看见自己在下潜**：
+   * 压力舱排气（气泡上涌）+ 深度数字滚动 + 暗角收缩 + 下一层名预告。
+   * 三者叠加才有"失重 + 压力 + 未知"的紧张感，缺一个都只是转场动画。
+   */
+  private drawDescending(g: Phaser.GameObjects.Graphics): void {
+    const W = this.scale.width, H = this.scale.height
+    const k = Math.min(1, this.descT / this.descDur)
+    const L = this.layer()
+    const cx = W / 2
+
+    // 覆盖层：0 → 0.72 → 0.28（进场压黑、出场放行）
+    const cover = k < 0.45 ? (k / 0.45) * 0.72 : 0.72 - ((k - 0.45) / 0.55) * 0.44
+    g.fillStyle(0x03060c, cover)
+    g.fillRect(0, 0, W, H)
+
+    // 气泡上涌：速度/大小各异，制造被排气推着走的失重感。
+    // 用空心圈而不是实心点——实心点在深色背景上像"一堆灰斑"，不像气泡
+    for (let i = 0; i < 70; i++) {
+      const seed = i * 97.13
+      const t2 = (this.descT * (1.1 + (seed % 1) * 0.9) + (seed % 1)) % 1
+      const x = (seed * 7.31) % W
+      const y = H + 30 - t2 * (H + 90)
+      const r = 1.4 + (seed % 5) * 0.9
+      const a = 0.42 * (1 - t2) * (1 - t2)
+      g.lineStyle(1.2, 0xdff8ff, a)
+      g.strokeCircle(x, y, r)
+      if (seed % 4 < 1) g.fillStyle(0xffffff, a * 0.5), g.fillCircle(x - r * 0.3, y - r * 0.3, r * 0.22)
+    }
+
+    // 深度数字居中滚动（52px MONO ≈ 31px/字，按位数估算居中）
+    const dstr = Math.round(this.depthM).toLocaleString()
+    const dw = dstr.length * 31
+    this.txt(dstr, cx - dw / 2 - 12, H * 0.38, '52px', TXT.cyber, MONO)
+    this.txt('m', cx + dw / 2 + 4, H * 0.38 + 34, '18px', TXT.dim, MONO)
+
+    // 下一层预告
+    const label = `下潜至 L${this.layerIdx + 1} ${L.name}`
+    const ny = H * 0.38 + 86
+    this.txt(label, cx - label.length * 8.5, ny, '17px', TXT.cyber, FONT)
+    this.txt(L.sub, cx - L.sub.length * 5.5, ny + 26, '11px', TXT.mute, MONO)
+  }
+
+  /**
+   * 环境绘制（depth=5，压在背景图 depth=1 之上，会被暗幕压暗）。
+   *
+   * V6.3 变更：静态地貌**全部交给背景图**（混元生成的五层实景），
+   * 这里只保留「会动」的东西——海雪、热流、气泡、生物冷光。
+   *
+   * 为什么这么改：以前每层画一堆 alpha 0.05~0.16 的几何剪影，
+   * 被暗幕一压几乎看不见，玩家只感觉到"屏幕变暗了"，
+   * 感觉不到自己在不同深度。这是「分层没有体感」的根因之一。
+   */
   private drawEnv(): void {
     const g = this.gBg
     g.clear()
     const W = this.scale.width, H = this.scale.height
     const L = this.layer()
 
-    // 底噪：整场环境色铺一层极淡的底，让"层"在第一眼就被感知
-    g.fillStyle(L.tint, 0.16)
+    // 极淡的一层环境色，把背景图色调往 UI 色系拉一点（不能压死画面）
+    g.fillStyle(L.tint, 0.10)
     g.fillRect(0, 0, W, H)
 
-    // 漂浮颗粒（海雪）：越深越密
+    // 海雪：越深越密。它是「我确实在水里」最直接的证据
     for (const m of this.motes) {
       g.fillStyle(0xbfd8e6, m.a * 0.5)
       g.fillCircle(m.x, m.y, m.r)
     }
 
-    // 每层签名地貌 —— 必须放**边缘**，绝不遮挡中央战斗区（V4 §4.2）
-    switch (this.layerIdx) {
-      case 0: {
-        // L1 阳光带：顶部光柱 + 底部珊瑚剪影
-        for (let i = 0; i < 4; i++) {
-          const cx = 120 + i * (W - 240) / 3
-          const wTop = 26 + i * 8
-          const a = 0.05 + 0.02 * Math.sin(this.t * 0.7 + i)
-          g.fillStyle(0x9fe8ff, a)
-          g.beginPath()
-          g.moveTo(cx - wTop, 0); g.lineTo(cx + wTop, 0)
-          g.lineTo(cx + wTop * 2.4, H * 0.55); g.lineTo(cx - wTop * 2.4, H * 0.55)
-          g.closePath(); g.fillPath()
+    // ---- 每层的动态层（静态世界交给背景图）----
+    if (this.layerIdx === 3) {
+      // L4 热泉带：上升热流。背景图是静帧，这里补上流动感。
+      // 关键：热流必须**和 movePlayer 里的 ventPush 用同一个空间梯度**（越靠下越强），
+      // 否则玩家看到热流在动、却被一股看不见的力顶走，会认为是 bug。
+      for (let i = 0; i < 3; i++) {
+        const bx = W * (0.18 + i * 0.32)
+        for (let k = 0; k < 10; k++) {
+          const tt = (this.t * 0.35 + k / 10) % 1
+          const yy = H - 130 - tt * 250
+          const ww = 10 + tt * 34
+          g.fillStyle(UI.amber, 0.055 * (1 - tt))
+          g.fillEllipse(bx + Math.sin(tt * 6 + i) * 16, yy, ww, ww * 0.6)
         }
-        g.fillStyle(L.tint, 0.5)
-        for (let i = 0; i < 9; i++) {
-          const bx = 40 + i * (W - 80) / 8
-          const bh = 24 + (i % 3) * 16
-          g.fillTriangle(bx - 16, H, bx + 16, H, bx, H - bh)
-        }
-        break
+        // 泉口：底部固定的一个暗红热源，标出"推力从哪来"
+        const px2 = bx + Math.sin(this.t * 2 + i) * 6
+        glowPool(g, px2, H - 122, 90, 44, UI.amber, 4, 0.13)
       }
-      case 1: {
-        // L2 弱光带：两侧漂浮水母群（装饰，不参与战斗）
-        for (let i = 0; i < 7; i++) {
-          const side = i % 2 === 0 ? 1 : -1
-          const bx = side > 0 ? 26 + (i % 3) * 20 : W - 26 - (i % 3) * 20
-          const by = (H * 0.2) + ((i * 137) % Math.max(1, Math.floor(H * 0.6)))
-            + Math.sin(this.t * 0.5 + i) * 18
-          g.fillStyle(UI.jade, 0.10)
-          g.fillEllipse(bx, by, 26, 20)
-          g.lineStyle(1, UI.jade, 0.16)
-          g.strokeEllipse(bx, by, 26, 20)
-        }
-        break
+      // 全屏上升条纹：把"整片水都在往上走"画出来，这是玩家被顶的视觉解释
+      for (let i = 0; i < 16; i++) {
+        const sx = (i * 97 + ((this.t * 70) % 97)) % W
+        const sy = H - ((this.t * 70 + i * 133) % (H + 160))
+        g.fillStyle(UI.amber, 0.05)
+        g.fillRect(sx, sy, 2, 26)
       }
-      case 2: {
-        // L3 午夜带：底部巨大骨架剪影（只露轮廓，制造"巨大"感）
-        g.lineStyle(2, 0x2b4a6e, 0.35)
-        g.beginPath()
-        g.moveTo(W * 0.06, H - 10)
-        g.lineTo(W * 0.30, H - 96)
-        g.lineTo(W * 0.52, H - 40)
-        g.lineTo(W * 0.74, H - 120)
-        g.lineTo(W * 0.96, H - 16)
-        g.strokePath()
-        for (let i = 0; i < 14; i++) {
-          const rx = W * 0.08 + i * (W * 0.84) / 13
-          g.lineStyle(1, 0x2b4a6e, 0.22)
-          g.strokeLineShape(new Phaser.Geom.Line(rx, H - 12, rx, H - 52 - (i % 4) * 10))
-        }
-        break
+    } else if (this.layerIdx === 4) {
+      // L5 深渊带：远处生物的冷光，缓慢明灭
+      for (let i = 0; i < 6; i++) {
+        const bx = (i * 233) % W
+        const by = (i * 151) % H
+        const a = 0.06 + 0.04 * Math.sin(this.t * 0.6 + i)
+        glowPool(g, bx, by, 120, 90, UI.violet, 4, a * 0.5)
       }
-      case 3: {
-        // L4 热泉带：底部黑烟囱 + 上升热流（橙）
-        for (let i = 0; i < 3; i++) {
-          const bx = W * (0.18 + i * 0.32)
-          g.fillStyle(0x120a08, 0.85)
-          g.fillRect(bx - 22, H - 130, 44, 130)
-          g.fillStyle(0x1e1008, 0.85)
-          g.fillRect(bx - 30, H - 26, 60, 26)
-          for (let k = 0; k < 10; k++) {
-            const tt = (this.t * 0.35 + k / 10) % 1
-            const yy = H - 130 - tt * 250
-            const ww = 10 + tt * 34
-            g.fillStyle(UI.amber, 0.055 * (1 - tt))
-            g.fillEllipse(bx + Math.sin(tt * 6 + i) * 16, yy, ww, ww * 0.6)
-          }
-        }
-        break
-      }
-      default: {
-        // L5 深渊带：几乎什么都没有，只有稀疏紫色冷光点
-        for (let i = 0; i < 6; i++) {
-          const bx = (i * 233) % W
-          const by = (i * 151) % H
-          const a = 0.06 + 0.04 * Math.sin(this.t * 0.6 + i)
-          glowPool(g, bx, by, 120, 90, UI.violet, 4, a * 0.5)
-        }
-        break
+    } else if (this.layerIdx === 0) {
+      // L1 阳光带：光柱里缓慢上升的泡泡，强化「浅层还有光」
+      for (let i = 0; i < 7; i++) {
+        const cx = 120 + (i % 4) * (W - 240) / 3
+        const tt = (this.t * 0.12 + i * 0.143) % 1
+        g.fillStyle(0xdff8ff, 0.11 * (1 - tt))
+        g.strokeCircle(cx + Math.sin(tt * 5 + i) * 12, H * 0.78 - tt * H * 0.62, 3 + tt * 7)
       }
     }
 
     // 场地边界
     neon(g, UI.cyanDim, () => { g.strokeRect(12, 12, W - 24, H - 24) }, { width: 1, alpha: 0.35, bloom: false })
 
-    // ---- 暗幕：只压暗上面这些环境；实体在它之上绘制 ----
+    // ---- 暗幕：压暗背景图 + 矢量层；实体在它之上绘制（V4 §2 铁律）----
     const dim = this.gDim
     dim.clear()
-    if (L.vis < 1) {
-      dim.fillStyle(UI.abyss, (1 - L.vis) * 0.88)
-      dim.fillRect(0, 0, W, H)
+    // 基础压暗比 V6.2 轻：背景图本身已带明暗关系，
+    // 再套旧公式 (1-vis)*0.88 会把 L3/L4 的实景压成一片死黑
+    dim.fillStyle(UI.abyss, (1 - L.vis) * 0.42)
+    dim.fillRect(0, 0, W, H)
+
+    // ---- 暗角（vignette）：「视野被深度压缩」的压迫感来源 ----
+    // 用同心环带由外向内叠加，每像素只画一次。若用渐变矩形直接填充，
+    // 中心会被反复叠加成死黑（Canvas 无径向渐变，fillGradientStyle 是 WebGL-only）。
+    const BANDS = 18
+    const band = Math.min(W, H) / BANDS
+    // 下潜过渡时暗角额外收缩一次（压力舱闭合的视觉暗示），叠加在深度曲线上
+    const descBoost = this.phase === 'descending'
+      ? Math.sin(Math.min(1, this.descT / this.descDur) * Math.PI) * 0.38
+      : 0
+    const strength = 0.16 + (1 - L.vis) * 0.72 + descBoost
+    for (let i = 0; i < BANDS; i++) {
+      const o = i * band
+      const e = o + band
+      const a = Math.pow(1 - i / BANDS, 2.4) * strength
+      if (a < 0.004) continue
+      dim.fillStyle(UI.abyss, a)
+      dim.fillRect(o, o, W - o * 2, e - o)                 // 上
+      dim.fillRect(o, H - e, W - o * 2, e - o)             // 下
+      dim.fillRect(o, e, e - o, H - e * 2)                 // 左
+      dim.fillRect(W - e, e, e - o, H - e * 2)             // 右
     }
   }
 
@@ -848,6 +1173,14 @@ export default class DiveScene extends Phaser.Scene {
       const charging = (e.kind === 'dash' && e.phase === 'charge')
         || (e.kind === 'boss' && e.phase === 'charge')
       const c = charging ? UI.danger : col   // 蓄力期转纯红（V4 §3.4）
+
+      // 暗色衬底：以前只有霓虹描边，在 L1 亮珊瑚背景上会被背景亮度吃掉。
+      // 这层让「敌人发光核心任何层可见」的铁律在**亮背景**侧也成立
+      // （V4 §2.2 原本只保证了暗背景侧）。深色背景下它几乎不可见，不影响 L2-L5。
+      if (lod < 2) {
+        g.fillStyle(UI.abyss, 0.30)
+        g.fillCircle(e.x, e.y, e.r * 1.18)
+      }
 
       if (e.kind === 'swarm') {
         // 纺锤签名：椭圆 + 三角尾。
@@ -937,6 +1270,9 @@ export default class DiveScene extends Phaser.Scene {
       g.fillCircle(e.x, e.y, 2)
     }
 
+    // 弹幕（曳光弹 / 鱼雷 / 电弧 / 爆炸环）画在敌人之上：玩家的攻击必须看得见
+    this.drawProjectiles(g)
+
     // 鱼骨（画在敌人之上：V4 §3.3 掉落物必须最先被看见）
     this.drawBones(g)
 
@@ -965,6 +1301,117 @@ export default class DiveScene extends Phaser.Scene {
       if (r2 > 3) neonCircle(g, p.x, p.y, r2, UI.cyan, { width: 1.5, alpha: a * 0.42, bloom: false })
       const r3 = p.r + 11
       if (r3 < p.maxR) neonCircle(g, p.x, p.y, r3, UI.cyan, { width: 1, alpha: a * 0.20, bloom: false })
+    }
+  }
+
+  /**
+   * 弹幕层：机关枪曳光 / 鱼雷与尾迹 / 链式电弧 / 爆炸冲击环。
+   *
+   * 三条表现铁律（V4 §3.2「玩家攻击必须比敌人更亮」）：
+   *   ① 曳光弹带**尾迹**，长度随速度，玩家能读出弹道方向而不需要瞄准辅助；
+   *   ② 鱼雷必须有尾迹 + 前部亮点，否则追踪弹看起来像随机飞行的点；
+   *   ③ 电弧是锯齿折线且**瞬亮瞬灭**（0.18s），如果做成常驻线条会变成
+   *      「一堆看不懂的网」——瞬发性才是"放电"和"连线"的区别。
+   */
+  /**
+   * 器械图形签名。四个图标必须在 11px 这种极小尺寸下还能区分，
+   * 所以用**形状差异**而不是颜色差异：环 / 三道平行线 / 鱼形 / 折线闪电。
+   * 玩家不该靠读文字才知道自己装了什么。
+   */
+  private drawWeaponIcon(g: Phaser.GameObjects.Graphics, id: WeaponId,
+                         cx: number, cy: number, s: number): void {
+    const col = WEAPON_DEF[id].color
+    if (id === 'sonar') {
+      neonCircle(g, cx, cy, s * 0.9, col, { width: 1.6, alpha: 0.95, bloom: false })
+      neonCircle(g, cx, cy, s * 0.42, col, { width: 1.4, alpha: 0.6, bloom: false })
+    } else if (id === 'gun') {
+      for (let i = -1; i <= 1; i++) {
+        neonLine(g, cx - s, cy + i * s * 0.42, cx + s, cy + i * s * 0.42, col,
+          { width: 1.6, alpha: i === 0 ? 1 : 0.6, bloom: false })
+      }
+    } else if (id === 'torpedo') {
+      // 鱼形：椭圆身 + 三角尾
+      neon(g, col, () => { g.strokeEllipse(cx + s * 0.15, cy, s * 1.35, s * 0.72) },
+        { width: 1.6, bloom: false })
+      g.beginPath()
+      g.moveTo(cx - s * 0.5, cy)
+      g.lineTo(cx - s * 1.05, cy - s * 0.55)
+      g.lineTo(cx - s * 1.05, cy + s * 0.55)
+      g.closePath(); g.strokePath()
+    } else {
+      // 折线闪电
+      neon(g, col, () => {
+        g.beginPath()
+        g.moveTo(cx + s * 0.35, cy - s)
+        g.lineTo(cx - s * 0.35, cy + s * 0.12)
+        g.lineTo(cx + s * 0.1, cy + s * 0.12)
+        g.lineTo(cx - s * 0.3, cy + s)
+        g.strokePath()
+      }, { width: 1.8, bloom: false })
+    }
+  }
+
+  private drawProjectiles(g: Phaser.GameObjects.Graphics): void {
+    // —— 爆炸冲击环：先画（在最底层），压住后面的曳光弹 ——
+    for (const b of this.blasts) {
+      const k = 1 - b.life / 0.32                 // 1 → 0
+      neonCircle(g, b.x, b.y, b.r * (0.35 + 0.75 * k), UI.amber,
+        { width: 3 * (1 - k) + 0.6, alpha: (1 - k) * 0.85, bloom: false })
+      if (k < 0.5) {
+        neonCircle(g, b.x, b.y, b.r * 0.5 * (1 - k * 2), UI.danger,
+          { width: 2, alpha: 0.5 * (1 - k * 2), bloom: false })
+      }
+    }
+
+    // —— 链式电弧：锯齿折线 + 外发光 ——
+    for (const a of this.arcs) {
+      const al = Phaser.Math.Clamp(a.life / 0.18, 0, 1)
+      for (let pass = 0; pass < 2; pass++) {
+        const wide = pass === 0
+        neon(g, wide ? UI.violet : WHITE, () => {
+          g.beginPath()
+          for (let i = 0; i < a.pts.length - 1; i++) {
+            const p0 = a.pts[i], p1 = a.pts[i + 1]
+            if (i === 0) g.moveTo(p0.x, p0.y)
+            // 每段切成 4 小节，每节加一个垂直方向的随机偏移 → 锯齿
+            const dx = p1.x - p0.x, dy = p1.y - p0.y
+            const nx = -dy, ny = dx
+            const nl = Math.max(1, Math.hypot(nx, ny))
+            for (let s = 1; s <= 4; s++) {
+              const t = s / 4
+              const off = s === 4 ? 0
+                : (Math.sin(this.t * 60 + i * 7 + s * 3.1) * 13) / nl
+              g.lineTo(p0.x + dx * t + nx * off, p0.y + dy * t + ny * off)
+            }
+          }
+          g.strokePath()
+        }, { width: wide ? 5 : 1.8, alpha: (wide ? 0.30 : 0.95) * al, bloom: false })
+      }
+    }
+
+    // —— 通用弹：机关枪曳光 / 鱼雷 ——
+    for (const b of this.bullets) {
+      const sp = Math.max(1, Math.hypot(b.vx, b.vy))
+      const ux = b.vx / sp, uy = b.vy / sp
+      if (b.kind === 'gun') {
+        // 曳光弹：沿运动反方向拉一条短亮线（长 18px）
+        const L = 18
+        neonLine(g, b.x, b.y, b.x - ux * L, b.y - uy * L, UI.amber,
+          { width: 2.4, alpha: 0.95, bloom: false })
+        g.fillStyle(WHITE, 0.95)
+        g.fillCircle(b.x, b.y, 1.8)
+      } else {
+        // 鱼雷：胶囊弹体 + 4 段逐渐变淡的尾迹 + 前部亮点
+        const tx = b.x - ux * 8, ty = b.y - uy * 8
+        for (let i = 1; i <= 4; i++) {
+          neonLine(g, b.x - ux * i * 7, b.y - uy * i * 7,
+            b.x - ux * (i * 7 + 6), b.y - uy * (i * 7 + 6),
+            UI.danger, { width: 3 - i * 0.5, alpha: 0.42 / i, bloom: false })
+        }
+        neonLine(g, tx, ty, b.x, b.y, UI.danger, { width: 3.2, alpha: 1, bloom: false })
+        g.fillStyle(WHITE, 1)
+        g.fillCircle(b.x + ux * 3, b.y + uy * 3, 2.2)
+      }
     }
   }
 
@@ -1036,9 +1483,9 @@ export default class DiveScene extends Phaser.Scene {
     const pcol = this.hurtFlash > 0 ? WHITE : UI.cyan
 
     // ---- 探照灯锥 ----
-    const beamA = 0.05 + (1 - this.layer().vis) * 0.11
+    const beamA = 0.07 + (1 - this.layer().vis) * 0.16
     const beamLen = 150, half = 0.36
-    g.fillStyle(0xcdf6ff, beamA)
+    g.fillStyle(0xdff8ff, beamA)
     g.beginPath()
     g.moveTo(X(20, 0), Y(20, 0))
     for (let i = 0; i <= 8; i++) {
@@ -1097,12 +1544,24 @@ export default class DiveScene extends Phaser.Scene {
     const cx = W / 2
     const L = this.layer()
 
-    // ① 深度指示（左侧）：玩家必须随时知道"我在第几层、还能下几层"
+    // ① 深度指示（左侧）：**实时米数** + 层名
+    //
+    // 米数是「分层体感」的核心：玩家对 "3,400 m" 有真实的压迫联想，
+    // 对 "L3 午夜带" 只是一个词。深度随本波推进连续增长（下潜感），
+    // 而不是每波跳一次。
     const dx0 = 24, dy0 = 30
-    this.txt(`L${this.layerIdx + 1} ${L.name}`, dx0, dy0, '17px', TXT.cyber, FONT)
-    this.txt(L.sub, dx0, dy0 + 24, '11px', TXT.mute, MONO)
+    const prog = 1 - this.waveTimer / Math.max(1, WAVE_SHAPE[this.waveInLayer].dur)
+    const depthNow = Phaser.Math.Clamp(
+      L.depthTop + (L.depthBot - L.depthTop) * ((this.waveInLayer + prog) / WAVE_SHAPE.length),
+      L.depthTop, L.depthBot)
+    this.depthM = depthNow
+    this.txt(Math.round(depthNow).toLocaleString(), dx0, dy0 - 8, '30px', TXT.cyber, MONO)
+    // "m" 紧跟数字：按字符数估算宽度（30px MONO ≈ 17px/字），固定偏移会随位数漂移
+    this.txt('m', dx0 + 14 + Math.round(depthNow).toLocaleString().length * 17, dy0 + 12, '12px', TXT.dim, MONO)
+    this.txt(`L${this.layerIdx + 1} ${L.name}`, dx0, dy0 + 26, '13px', TXT.cyber, FONT)
+    this.txt(L.sub, dx0, dy0 + 44, '10px', TXT.mute, MONO)
     for (let i = 0; i < LAYERS.length; i++) {
-      const yy = dy0 + 48 + i * 20
+      const yy = dy0 + 64 + i * 20
       const cur = i === this.layerIdx
       const done = i < this.layerIdx
       g.fillStyle(cur ? UI.cyan : (done ? UI.cyanDim : UI.line), cur ? 1 : 0.6)
@@ -1112,7 +1571,7 @@ export default class DiveScene extends Phaser.Scene {
         g.fillRect(dx0 + 30, yy - 4, 6, 13)
       }
     }
-    this.txt(`×${this.mult.toFixed(1)}`, dx0, dy0 + 48 + LAYERS.length * 20 + 6, '14px', TXT.amber, MONO)
+    this.txt(`×${this.mult.toFixed(1)}`, dx0, dy0 + 64 + LAYERS.length * 20 + 6, '14px', TXT.amber, MONO)
 
     // ② 氧气条（顶部居中，主 HUD）
     //
@@ -1162,18 +1621,37 @@ export default class DiveScene extends Phaser.Scene {
       this.txt(`上浮可得 ${est}`, W - 24, by + 26, '13px', TXT.amber, MONO, 'right')
     }
 
-    // ⑤ 装备槽
+    // ⑤ 武器槽（V6.3）
+    //
+    // 三个槽 = 最多挂三台器械。每槽必须同时回答三个问题：
+    //   装了什么（图形签名）· 多强（等级点）· 什么时候好（冷却进度）
+    // 冷却进度是 Brotato 手感的可读性核心：玩家要能学会"机关枪在转、等下"。
     const sy = this.scale.height - 46
     for (let i = 0; i < 3; i++) {
-      const sx = 24 + i * 52
-      g.fillStyle(i === 0 ? UI.panelHi : UI.panel, 0.8)
-      g.fillRoundedRect(sx, sy, 44, 44, 8)
-      neon(g, i === 0 ? UI.cyan : UI.line, () => { g.strokeRoundedRect(sx, sy, 44, 44, 8) },
-        { width: 1, alpha: 0.7, bloom: false })
-      if (i === 0) {
-        neonLine(g, sx + 10, sy + 22, sx + 34, sy + 22, UI.cyan, { width: 2, bloom: false })
-        neonLine(g, sx + 34, sy + 22, sx + 30, sy + 18, UI.cyan, { width: 2, bloom: false })
-        neonLine(g, sx + 34, sy + 22, sx + 30, sy + 26, UI.cyan, { width: 2, bloom: false })
+      const sx = 24 + i * 52, sw = 44
+      const w = this.weapons[i]
+      g.fillStyle(w ? UI.panelHi : UI.panel, w ? 0.9 : 0.6)
+      g.fillRoundedRect(sx, sy, sw, sw, 8)
+      neon(g, w ? WEAPON_DEF[w.id].color : UI.line,
+        () => { g.strokeRoundedRect(sx, sy, sw, sw, 8) },
+        { width: w ? 2 : 1, alpha: w ? 0.9 : 0.5, bloom: false })
+      if (!w) {
+        this.txt('空', sx + sw / 2, sy + sw / 2, '11px', TXT.mute, FONT, 'center')
+        continue
+      }
+      this.drawWeaponIcon(g, w.id, sx + sw / 2, sy + 18, 11)
+      // 等级点：最多 5 个小方块，从左到右填充
+      for (let k = 0; k < 5; k++) {
+        const px1 = sx + 8 + k * 6, py1 = sy + 34
+        g.fillStyle(k < w.lvl ? WEAPON_DEF[w.id].color : UI.line, k < w.lvl ? 1 : 0.5)
+        g.fillRect(px1, py1, 4, 4)
+      }
+      // 冷却进度：底部细条，ready 时不画（避免"永远亮着"的噪声）
+      if (w.timer > 0) {
+        const k = 1 - w.timer / Math.max(0.01, w.iv)
+        g.fillStyle(UI.abyss, 0.7); g.fillRect(sx + 3, sy + sw - 6, sw - 6, 3)
+        g.fillStyle(WEAPON_DEF[w.id].color, 0.95)
+        g.fillRect(sx + 3, sy + sw - 6, (sw - 6) * k, 3)
       }
     }
     // 技能冷却
@@ -1191,6 +1669,36 @@ export default class DiveScene extends Phaser.Scene {
         24, this.scale.height - 92, '13px', TXT.mute, FONT)
     }
 
+    // ⑥ 生存压迫指示（V6.3）
+    //
+    // 两种压迫都必须有**常驻显式指示**，玩家才能把「我为什么喘不上气」归因到正确的原因：
+    //   低氧 → 红色心跳边框（越低频越快，直接映射"心跳"这个生理联想）
+    //   热泉 → 底部上升箭头 + 提示（归因到环境，而不是"我操作有问题"）
+    const lowPct = this.o2 / this.o2Max
+    if (lowPct < 0.32 && (this.phase === 'wave' || this.phase === 'descending')) {
+      const urgency = 1 - lowPct / 0.32                // 0→1 越低越急
+      const rate = 2.2 + urgency * 3.4
+      const beat = Math.max(0, Math.sin(this.t * rate * Math.PI))
+      const a = (0.12 + 0.5 * beat) * (0.35 + urgency * 0.65)
+      const bw2 = 10 + beat * 14
+      neon(g, UI.danger, () => { g.strokeRect(bw2 / 2, bw2 / 2, W - bw2, this.scale.height - bw2) },
+        { width: 3 + beat * 3, alpha: a, bloom: beat > 0.7 })
+      this.txt('O₂ 告急', W / 2, 62, `${Math.round(16 + beat * 4)}px`,
+        TXT.amber, FONT, 'center')
+    }
+    if (this.vpPush > 0) {
+      const byy = this.scale.height - 108
+      for (let i = 0; i < 3; i++) {
+        const off = ((this.t * 1.8 + i * 0.33) % 1)
+        const ax = W / 2 + (i - 1) * 22
+        const ay = byy + 12 - off * 22
+        g.fillStyle(UI.amber, 0.28 * (1 - off))
+        g.fillTriangle(ax, ay - 7, ax - 5, ay + 3, ax + 5, ay + 3)
+      }
+this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', TXT.amber, FONT, 'center')
+    }
+
+    if (this.phase === 'descending') this.drawDescending(g)
     if (this.phase === 'shop') this.drawShop(g)
     if (this.phase === 'decide') this.drawDecide(g)
     if (this.phase === 'result') this.drawResult(g)
@@ -1257,12 +1765,32 @@ export default class DiveScene extends Phaser.Scene {
   // 商店：波间三选一
   // ==========================================================================
   private pool: Upgrade[] = [
-    { id: 'dmg', name: '锋利叉尖', desc: '伤害 +6', apply: s => { s.dmg += 6 } },
-    { id: 'rate', name: '快速装填', desc: '射速 +22%', apply: s => { s.fireCd *= 0.78 } },
-    { id: 'pierce', name: '声呐功率', desc: '脉冲射程 +55', apply: s => { s.pierce += 1 } },
+    // —— 器械卡（V6.3）——
+    // 这三张是 Brotato 手感的核心：火力来源变多，但玩家操作**不变**（仍然只走位）。
+    // 弓与枪的定位不重叠，所以拿到哪张都会明显改变手感。
+    {
+      id: 'w_gun', name: '脉冲机关枪', desc: '高频连射 · 单体',
+      apply: s => s.addWeapon('gun'),
+    },
+    {
+      id: 'w_torp', name: '追踪鱼雷', desc: '低频追踪 · 范围爆炸',
+      apply: s => s.addWeapon('torpedo'),
+    },
+    {
+      id: 'w_arc', name: '链式电弧', desc: '瞬发连锁 · 多目标',
+      apply: s => s.addWeapon('arc'),
+    },
+    {
+      id: 'w_all', name: '弹药改良', desc: '全部器械 +1 级',
+      apply: s => s.levelAllWeapons(),
+    },
+    // —— 生存 / 机动 ——
     { id: 'speed', name: '增压推进', desc: '移速 +15%', apply: s => { s.speedMul *= 1.15 } },
     { id: 'pickup', name: '吸附鳍', desc: '拾取范围 +40%', apply: s => { s.pickupMul *= 1.4 } },
-    { id: 'tank', name: '扩容气瓶', desc: '氧气上限 +20 并回满', apply: s => { s.o2Bonus += 20; s.o2Max = s.layer().o2Max + s.o2Bonus; s.o2 = s.o2Max } },
+    {
+      id: 'tank', name: '扩容气瓶', desc: '氧气上限 +20 并回满',
+      apply: s => { s.o2Bonus += 20; s.o2Max = s.layer().o2Max + s.o2Bonus; s.o2 = s.o2Max },
+    },
     { id: 'gill', name: '循环鳃', desc: '击杀额外回氧 +3', apply: s => { s.killO2 += 3 } },
   ]
 
@@ -1310,9 +1838,24 @@ export default class DiveScene extends Phaser.Scene {
       neon(g, hov ? UI.cyanHi : UI.cyan, () => { g.strokeRoundedRect(c.x, c.y, c.w, c.h, 12) },
         { width: hov ? 3 : 2, bloom: hov })
       this.txt(String(i + 1), c.x + 16, c.y + 14, '14px', TXT.mute, MONO)
+      // 器械卡画真实图标，属性卡保留抽象环
+      const wid = c.up.id.startsWith('w_') ? c.up.id.slice(2) : null
+      if (wid === 'gun' || wid === 'torpedo' || wid === 'arc' || wid === 'sonar') {
+        this.drawWeaponIcon(g, wid, c.x + c.w / 2, c.y + 44, 18)
+      } else {
+        neonCircle(g, c.x + c.w / 2, c.y + 44, 18, UI.cyan, { width: 2, bloom: false })
+      }
       this.txt(c.up.name, c.x + c.w / 2, c.y + 90, '20px', TXT.cyber, FONT, 'center')
       this.txt(c.up.desc, c.x + c.w / 2, c.y + 128, '15px', TXT.main, FONT, 'center')
-      neonCircle(g, c.x + c.w / 2, c.y + 44, 18, UI.cyan, { width: 2, bloom: false })
+      // 已持有的器械卡标出「升级 Lv N→N+1」，否则玩家不知道买到的是新武器还是强化
+      const held = wid && wid !== 'all' ? this.weapons.find(w => w.id === wid) : null
+      if (held) {
+        this.txt(`已持有 · Lv${held.lvl} → Lv${Math.min(5, held.lvl + 1)}`,
+          c.x + c.w / 2, c.y + 162, '12px', TXT.amber, FONT, 'center')
+      } else if (wid === 'all') {
+        this.txt(`${this.weapons.length} 台器械同时 +1 级`,
+          c.x + c.w / 2, c.y + 162, '12px', TXT.amber, FONT, 'center')
+      }
     }
   }
 
@@ -1346,7 +1889,22 @@ export default class DiveScene extends Phaser.Scene {
     this.o2Max = L.o2Max + this.o2Bonus
     this.o2 = Math.min(this.o2 - toll, this.o2Max)
     this.clearHits()
-    this.startWave()
+    this.enemies = []; this.bones = []; this.pulses = []; this.debris = []
+    this.bullets = []; this.arcs = []; this.blasts = []   // 旧弹不能飘进新层
+    // 背景立刻切到新层：过渡中点 cover=0.72 时几乎看不见旧景，
+    // 后半段 cover 降到 0.28 自然就露出新层，衔接不跳变。
+    // 注意不能调 syncEnv()——它会重算 depthM，把过渡的插值覆盖掉。
+    this.bg.setTexture(`env${this.layerIdx}`)
+    this.layoutBg()
+    // 先扣门票、改层参数，但**不立刻开战**——先进下潜过渡演出。
+    // 以前是瞬间黑屏切换，玩家只感觉到"换了个底色"，感觉不到自己在下潜。
+    const from = LAYERS[this.layerIdx - 1].depthBot
+    this.descFrom = from
+    // 目标不是下一层顶，而是它的 35% 处：一次滚过头，比"刚好到顶"更像还在继续下潜
+    this.descTo = L.depthTop + (L.depthBot - L.depthTop) * 0.35
+    this.descT = 0
+    this.phase = 'descending'
+    this.cameras.main.shake(260, 0.004)   // 压力舱推进的闷响
   }
 
   /** 上浮兑现：结算，带走 100% */
@@ -1491,10 +2049,9 @@ export default class DiveScene extends Phaser.Scene {
 
   private restart(): void {
     this.enemies = []; this.bones = []; this.pulses = []; this.debris = []
-    this.biomass = 0; this.dmg = PLAYER.dmg
-    this.fireCd = PLAYER.cd; this.pierce = PLAYER.pierce
+    this.biomass = 0
     this.speedMul = 1; this.pickupMul = 1; this.killO2 = PLAYER.killO2
-    this.burstTimer = 0; this.fireTimer = 0
+    this.burstTimer = 0
     this.px = this.scale.width / 2; this.py = this.scale.height / 2
     this.clearHits()
     this.startRun()
@@ -1503,6 +2060,26 @@ export default class DiveScene extends Phaser.Scene {
   private layout(): void {
     this.clearHits()   // resize 后热区坐标失效，重绘时重建
     this.buildMotes()
+    this.layoutBg()
+  }
+
+  /** 背景 cover 铺满：等比缩放直到覆盖画布，再居中裁掉溢出部分 */
+  private layoutBg(): void {
+    if (!this.bg || !this.bg.texture) return
+    const src = this.bg.texture.source[0]
+    if (!src || !src.width) return
+    const W = this.scale.width, H = this.scale.height
+    const s = Math.max(W / src.width, H / src.height)
+    this.bg.setScale(s)
+    this.bg.setPosition((W - src.width * s) / 2, (H - src.height * s) / 2)
+  }
+
+  /** 换层时同步背景贴图 + 当前深度读数 */
+  private syncEnv(): void {
+    if (this.bg) this.bg.setTexture(`env${this.layerIdx}`)
+    this.layoutBg()
+    const L = this.layer()
+    this.depthM = L.depthTop + (L.depthBot - L.depthTop) * (this.waveInLayer / WAVE_SHAPE.length)
   }
 
   // ==========================================================================
@@ -1528,6 +2105,9 @@ export default class DiveScene extends Phaser.Scene {
         boss: this.bossDown,
         bossAlive: this.enemies.some(e => e.kind === 'boss'),
         canDive: this.phase === 'decide' ? this.o2 > this.layer().toll : null,
+        depthM: Math.round(this.depthM),
+        // 测试用：直接把波次推到只剩 0.5s，用来抓下潜过渡的中间帧
+        fastForward: () => { this.waveTimer = 0.5 },
       }),
       // 无头环境下 JustDown 检测不到同帧的 keyDown+keyUp，
       // 所以直接暴露热区回调给验证脚本调用

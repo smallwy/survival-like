@@ -199,7 +199,14 @@ def main():
                 c.ev("__dive.refill()")
                 time.sleep(0.2)
             c.ev("__dive.dive()")
-            time.sleep(0.6)
+            # 下潜现在会先进 2.1s 的「下潜过渡」演出（descending），
+            # 期间 phase 不是 wave；等过渡结束才进入新层第 1 波。
+            time.sleep(0.9)
+            mid = probe(c)
+            if mid.get("phase") == "descending":
+                c.shot(f"v6_{25 + layer}_descend_l{layer + 2}")
+                print(f"   下潜过渡演出中: 深度 {mid.get('depthM', 0):.0f}m")
+            time.sleep(1.9)
             after = probe(c)
             print(f"   下潜: L{before['layer']}({before['o2Max']}) "
                   f"→ L{after['layer']}({after['o2Max']}) ×{after['mult']}  {after['layerName']}")
