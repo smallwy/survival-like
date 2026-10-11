@@ -38,3 +38,10 @@ __pycache__/
 
 # 无头验证截图产物（随时可重新生成）
 tools/shots/
+
+# AI 生图候选原图（1024 级原始产出，体积大且不入库；仓库只保留处理后的成品）
+web/src/assets/env_candidates/
+web/src/assets/fish_candidates/
+web/src/assets/sub_candidates/
+web/src/assets/wpn_candidates/
+web/src/assets/weapons_candidates/

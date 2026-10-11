@@ -37,15 +37,44 @@ import Phaser from 'phaser'
 import { UI, TXT, FONT, MONO } from '../config/theme'
 import { neon, neonCircle, neonLine, glowPool } from '../render/neon'
 import { registerUiHit, routeDown, routeMove } from '../ui/hitRouter'
-// 五层环境背景（混元生成 → 去水印 → WebP q82，10.8MB → 862KB）。
-// 背景图是「世界结构」载体：以前每层只换底色，玩家感觉不到自己在不同深度。
-import BG_L1 from '../assets/env/L1_sunlit.webp'
-import BG_L2 from '../assets/env/L2_twilight.webp'
-import BG_L3 from '../assets/env/L3_midnight.webp'
-import BG_L4 from '../assets/env/L4_hydrothermal.webp'
-import BG_L5 from '../assets/env/L5_abyss.webp'
+// 五层环境背景（混元生成 → 去水印 → WebP q82）。
+//
+// 关键设计约束：**背景图里不允许有任何生物**。
+// 之前把成群水母画进背景图，结果一屏 40 只静止水母立刻变成壁纸贴纸——
+// 真实感来自动作，静态图只有一帧，做不出"活"。
+// 所以这里分工明确：静态图只给「地貌 + 光柱 + 悬浮泥沙」，
+// 所有生物（远景剪影、伞盖脉冲、触须摆动）全部在 drawEnvDrift() 里用矢量实时驱动。
+// 另一层好处：零生物贴图，背景体积 862KB → 378KB。
+import BG_L1 from '../assets/env/L1.webp'
+import BG_L2 from '../assets/env/L2.webp'
+import BG_L3 from '../assets/env/L3.webp'
+import BG_L4 from '../assets/env/L4.webp'
+import BG_L5 from '../assets/env/L5.webp'
 
 const ENV_BG = [BG_L1, BG_L2, BG_L3, BG_L4, BG_L5]
+
+// ---------------------------------------------------------------------------
+// 具象贴图（V6.4）
+// ---------------------------------------------------------------------------
+// 为什么必须配「边缘光」：素材是深黑机体 + 内部青光，
+// 叠到同样深的深海背景上会整体消失（实测过：合成预览里只剩一个青色小点）。
+// 解法不是把贴图调亮（会丢掉"深色酷炫"），而是在运行时沿轮廓描一圈 rim light——
+// 深色贴图 + 高亮边缘 = 任何背景上都可读。这是《挺进地牢》《Darkest Dungeon》的常用手法。
+import SUB_TEX from '../assets/sub/sub_body.png'
+import W_GUN_TEX from '../assets/weapons/gun.png'
+import W_TORP_TEX from '../assets/weapons/torpedo.png'
+import W_ARC_TEX from '../assets/weapons/arc.png'
+import F_SWARM_TEX from '../assets/fish/swarm.png'
+import F_DRIFT_TEX from '../assets/fish/drift.png'
+import F_DASH_TEX from '../assets/fish/dash.png'
+
+/** 4 个侧装挂载点在机体局部坐标里的位置（单位：贴图像素，原点在贴图中心） */
+const HARDPOINTS: Array<[number, number]> = [
+  [-0.30, 0.26],   // 左后
+  [-0.30, -0.26],  // 左前
+  [0.26, 0.26],    // 右后
+  [0.26, -0.26],   // 右前
+]
 
 /** 全场唯一近白：鱼骨与受击闪白专用，在混乱中最先被看见（V4 §3.3） */
 const WHITE = 0xffffff
@@ -57,8 +86,12 @@ const BONE = 0xdcfffb
 // ---------------------------------------------------------------------------
 const O2 = {
   max: 100,           // L1 基准上限（绘制用的分母）
-  boneLife: 6.0,      // 鱼骨存活秒数（超时沉入黑暗消失）
-  boneBlink: 2.0,     // 最后 N 秒开始闪烁
+  // 鱼骨消失方式（V6.4 用户需求③）：**不是凭空消失**，而是沉到屏幕下缘后原地淡出。
+  // 原来的 6 秒硬消失会像 bug——玩家会以为是自己漏捡了。
+  boneSinkV: 26,      // 下沉终端速度（px/s）
+  boneFloor: 54,      // 沉底深度（距屏幕下缘），到这里停止下沉
+  boneFade: 1.6,      // 沉底后原地淡出时长（秒）
+  boneBlink: 0.9,     // 淡出末段的闪烁频率提示
   boneBase: 4,        // 鱼骨回氧基数，实际按鱼体大小放大（大鱼骨更值钱）
   pickupR: 26,        // 拾取半径（硬约束①：必须游过去，不做远程磁吸）
   burstCost: 20,      // 排气爆发消耗
@@ -153,6 +186,18 @@ const WAVE_SHAPE = [
 
 type Kind = 'swarm' | 'dash' | 'drift' | 'boss'
 
+/**
+ * 素材实际基准角补偿（弧度）。
+ *
+ * 实测三张鱼贴图：梭形鲨带轻微 3/4 俯角、翼型掠食鱼几乎正右、水母是俯视对称不需要补偿。
+ * 数字是目视校正的结果，改贴图就要重新量。
+ */
+const TEX_BASE_ROT: Partial<Record<Kind, number>> = {
+  swarm: -0.10,   // 素材略朝右上
+  dash: 0.02,
+  drift: 0,
+}
+
 interface Enemy {
   x: number; y: number
   vx: number; vy: number
@@ -167,6 +212,16 @@ interface Enemy {
   dirX: number; dirY: number
   alive: boolean
   flash: number      // 命中闪白计时
+  /**
+   * 贴图朝向补偿（弧度）。
+   *
+   * AI 生成的鱼贴图**实际朝向不可控**：prompt 里说"面朝右"，模型可能画成 3/4 视角偏上。
+   * 所以 spawn 时用素材实际基准角算一次补偿，绘制时把它减掉，
+   * 保证逻辑上的"朝向玩家"在视觉上真的对准。
+   */
+  texRot: number
+  /** 对应的贴图 key */
+  tex: string
 }
 
 /**
@@ -176,7 +231,8 @@ interface Enemy {
 interface Bone {
   x: number; y: number
   vx: number; vy: number
-  life: number          // 剩余存活秒数
+  /** 淡出计时（秒）。归零后原地淡出消失，**不再凭空消失** */
+  fade: number
   value: number         // 回氧量
   size: number          // 骨架长度（按鱼体大小，大鱼骨更值钱）
   rot: number           // 当前旋转角
@@ -256,6 +312,31 @@ interface Upgrade {
 
 interface Mote { x: number; y: number; r: number; vy: number; vx: number; a: number }
 
+/**
+ * 远景生物（纯装饰，永不参与碰撞）。
+ *
+ * 为什么必须用矢量实时画而不是贴图：
+ * 贴图是死的，而**真实感的来源就是动作**。两个动作做到位，剪影就能"活"：
+ *   ① 伞盖收缩（pulse）：水母靠收缩伞盖喷水推进，这是它唯一的动力来源；
+ *   ② 触须滞后摆动（sway）：触须跟着伞盖走但慢半拍，所以会有拖曳感。
+ * 这两个动作一加，剪影就不再是贴纸。
+ */
+interface DriftLife {
+  x: number; y: number
+  /** 伞盖半径基准 */
+  r: number
+  /** 游动方向（弧度） */
+  a: number
+  /** 移动速度 */
+  sp: number
+  /** 伞盖收缩相位 */
+  ph: number
+  /** 触须长度系数 */
+  tent: number
+  /** 低对比配色，保证绝不与敌人抢注意力 */
+  col: number
+}
+
 export default class DiveScene extends Phaser.Scene {
   constructor() { super('dive') }
 
@@ -291,6 +372,8 @@ export default class DiveScene extends Phaser.Scene {
   private weapons: Weapon[] = []
   private debris: Debris[] = []
   private motes: Mote[] = []
+  /** 远景生物（纯装饰，不参与碰撞）—— 见DriftLife 注释 */
+  private drift: DriftLife[] = []
   private eid = 0
 
   // ---- 进度：5 层 × 4 波 ----
@@ -319,6 +402,14 @@ export default class DiveScene extends Phaser.Scene {
   private bg!: Phaser.GameObjects.Image
   /** 深度显示值（米）：随波次推进递增，下潜过渡时做插值动画 */
   private depthM = 0
+  /** 具象潜航器机体（贴图）。depth 在实体层之上，旋转对准移动方向 */
+  private subImg!: Phaser.GameObjects.Image
+  /** 敌人贴图池（复用，避免每波创建/销毁 70+ 个 Image） */
+  private fishPool: Phaser.GameObjects.Image[] = []
+  /** 4 个独立转向的炮塔塔头（贴图），未装配的槽位不显示 */
+  private turretImgs: Phaser.GameObjects.Image[] = []
+  /** WeaponId -> 贴图 key */
+  private turretTex!: Record<string, string>
   private gBg!: Phaser.GameObjects.Graphics    // 环境（被暗幕压暗）
   private gDim!: Phaser.GameObjects.Graphics   // 暗幕（只压环境，不压实体）
   private g!: Phaser.GameObjects.Graphics      // 实体（永远全亮）
@@ -331,10 +422,37 @@ export default class DiveScene extends Phaser.Scene {
   private t = 0
 
   preload(): void {
-    // 五张 WebP 共 862KB，preload 里一次加载完，避免换层时闪白
+    // 五张 WebP 共 378KB，preload 里一次加载完，避免换层时闪白
     for (let i = 0; i < ENV_BG.length; i++) {
       this.load.image(`env${i}`, ENV_BG[i] as unknown as string)
     }
+    // 具象贴图：潜航器机体 + 4 个可转炮塔塔头
+    this.load.image('sub_body', SUB_TEX as unknown as string)
+    this.load.image('w_gun', W_GUN_TEX as unknown as string)
+    this.load.image('w_torpedo', W_TORP_TEX as unknown as string)
+    this.load.image('w_arc', W_ARC_TEX as unknown as string)
+    // 敌方具象贴图：普通鱼半透明 + 描边，Boss 贴用翼型掠食鱼放大
+    //
+    // 采样必须强制 LINEAR —— 这是踩出来的坑：
+    // 全局 `pixelArt: true`（见 main.ts）是为了让像素世界图保持硬边方块，
+    // 它把默认采样设成 NEAREST。鱼/潜航器/炮塔是**连续色调**贴图，
+    // 256px 要缩到 14~40px，NEAREST 在这种缩放比下只取到极少数源像素，
+    // 几乎必然命中高光边缘 → 每条鱼渲染成一个**白色碎片**（L4 实测，
+    // 满屏"白色小飞虫"）。LINEAR 双线性插值后，缩小到 14px 仍是可辨识的鱼形色块。
+    for (const [key, tex] of [
+      ['f_swarm', F_SWARM_TEX], ['f_drift', F_DRIFT_TEX], ['f_dash', F_DASH_TEX],
+      ['sub_body', SUB_TEX], ['w_gun', W_GUN_TEX], ['w_torpedo', W_TORP_TEX], ['w_arc', W_ARC_TEX],
+    ] as Array<[string, unknown]>) {
+      this.load.image(key, tex as string)
+    }
+    this.load.once('complete', () => {
+      for (const key of ['f_swarm', 'f_drift', 'f_dash',
+        'sub_body', 'w_gun', 'w_torpedo', 'w_arc']) {
+        if (this.textures.exists(key)) {
+          this.textures.get(key).setFilter(Phaser.Textures.FilterMode.LINEAR)
+        }
+      }
+    })
   }
 
   create(): void {
@@ -346,6 +464,20 @@ export default class DiveScene extends Phaser.Scene {
     // 环境背景图：先建，depth=1，压在所有矢量环境层之下
     this.bg = this.add.image(0, 0, `env${this.layerIdx}`).setOrigin(0, 0).setDepth(1)
     this.layoutBg()
+
+    // 具象潜航器 + 4 个炮塔。size:31 是反复试出来的：40px 时贴图细节糊成一团，
+    // 28px 以下又认不出机械感。玩家单位只占屏幕极小一块，这个尺寸够用。
+    const SUB_SIZE = 31
+    this.subImg = this.add.image(0, 0, 'sub_body').setDepth(60)
+    this.subImg.setDisplaySize(SUB_SIZE * 1.9, SUB_SIZE)
+    const TEX_OF: Record<string, string> = {
+      gun: 'w_gun', torpedo: 'w_torpedo', arc: 'w_arc',
+    }
+    for (let i = 0; i < HARDPOINTS.length; i++) {
+      const img = this.add.image(0, 0, 'w_gun').setDepth(61).setVisible(false)
+      this.turretImgs.push(img)
+    }
+    this.turretTex = TEX_OF
 
     // 深度分层：**环境 → 暗幕 → 实体 → HUD**。
     // 暗幕夹在中间是 V4 §2 的铁律——它只能压暗地形，敌人/气泡/玩家必须画在它之上，
@@ -404,6 +536,7 @@ export default class DiveScene extends Phaser.Scene {
     this.phase = 'wave'
     this.clearHits()
     this.buildMotes()
+    this.buildDrift()    // 远景生物层：每层生态不同，换层必须重建
     this.syncEnv()      // 换层换背景 + 深度读数
 
     // L5 最后一波：深渊守望者
@@ -468,6 +601,9 @@ export default class DiveScene extends Phaser.Scene {
       speed: spd,
       phase: 'chase', t: 0, dirX: 0, dirY: 0,
       alive: true, flash: 0,
+      // 贴图与朝向补偿：swarm 贴梭形鲨、drift 贴水母、dash 贴翼型掠食鱼
+      tex: kind === 'drift' ? 'f_drift' : kind === 'dash' ? 'f_dash' : 'f_swarm',
+      texRot: TEX_BASE_ROT[kind] ?? 0,
     })
     this.eid++
   }
@@ -483,6 +619,8 @@ export default class DiveScene extends Phaser.Scene {
       speed: 46,
       phase: 'chase', t: 0, dirX: 0, dirY: 0,
       alive: true, flash: 0,
+      tex: 'f_dash',       // Boss 复用翼型掠食鱼贴图，放大到44px 当专属剪影
+      texRot: TEX_BASE_ROT.dash ?? 0,
     })
   }
 
@@ -499,6 +637,77 @@ export default class DiveScene extends Phaser.Scene {
         vx: (Math.random() - 0.5) * 8,
         a: 0.12 + Math.random() * 0.3,
       })
+    }
+  }
+
+  /**
+   * 生成远景生物层。
+   *
+   * 每层的生态不同、数量也不同，但有一条铁律：
+   * **它们永远不与敌人抢注意力**——低对比 + 小尺寸 + 边缘游动。
+   * 中央 46% 宽度是战斗区，不生成任何生物（spawnDrift() 里强制）。
+   */
+  private buildDrift(): void {
+    const W = this.scale.width, H = this.scale.height
+    this.drift = []
+    const li = this.layerIdx
+    // 每层的生态配置：[数量, 配色, 尺寸基准]
+    const table: Array<[number, number, number]> = [
+      [4, UI.cyanDim, 13],      // L1：少量透明浮游生物剪影
+      [5, UI.cyanDim, 16],      // L2：漂游水母
+      [7, UI.violet, 19],       // L3：水母雨（这层的招牌生态）
+      [5, UI.amber, 15],        // L4：热液旁的漂浮管虫幼体
+      [3, UI.violet, 22],       // L5：极稀疏，深渊不该热闹
+    ]
+    const [n, col, r0] = table[li]
+    for (let i = 0; i < n; i++) this.spawnDrift(col, r0)
+  }
+
+  /** 生成一只远景生物：强制落在左右两侧的边缘带，中央战斗区不放 */
+  private spawnDrift(col: number, r0: number): void {
+    const W = this.scale.width, H = this.scale.height
+    // 边缘带 = 左右各 27% 宽度。中央 46% 是战斗区，永远留空
+    const side = Math.random() < 0.5 ? 0 : 1
+    const bandW = W * 0.27
+    const x = side === 0
+      ? Math.random() * bandW
+      : W - Math.random() * bandW
+    this.drift.push({
+      x,
+      y: Math.random() * H,
+      r: r0 * (0.65 + Math.random() * 0.7),
+      // 缓慢的随机游动方向，主要靠伞盖脉冲推进
+      a: Math.random() * Math.PI * 2,
+      sp: 5 + Math.random() * 9,
+      ph: Math.random() * Math.PI * 2,
+      tent: 0.8 + Math.random() * 0.7,
+      col,
+    })
+  }
+
+  /**
+   * 远景生物运动。核心是**伞盖收缩产生推进力**：
+   * 收缩时（pulse 上升段）向前加速，舒张时惯性滑行减速。
+   * 这样它们的运动本身就是有机的，而不是匀速平移。
+   */
+  private updateDrift(dt: number): void {
+    const W = this.scale.width, H = this.scale.height
+    for (const d of this.drift) {
+      d.ph += dt * 1.5
+      // pulse: 0→1→0 的不对称收缩周期（喷水推进是脉冲式的，不是正弦）
+      const pulse = Math.pow((Math.sin(d.ph) + 1) / 2, 3)
+      // 收缩期推进，舒张期滑行
+      const thrust = pulse * d.sp
+      d.x += Math.cos(d.a) * thrust * dt
+      d.y += Math.sin(d.a) * thrust * dt
+      // 极缓慢的自转 + 转向摆动，避免直线运动
+      d.a += Math.sin(this.t * 0.4 + d.ph) * 0.35 * dt
+      // 轻微上浮（真实水母多数被动上升）
+      d.y -= 3 * dt
+      // 出界回收
+      if (d.x < -60 || d.x > W + 60 || d.y < -80 || d.y > H + 80) {
+        this.spawnDrift(d.col, d.r)
+      }
     }
   }
 
@@ -534,6 +743,7 @@ export default class DiveScene extends Phaser.Scene {
       const e = k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2   // easeInOutQuad
       this.depthM = this.descFrom + (this.descTo - this.descFrom) * e
       this.updateMotes(dt)
+      this.updateDrift(dt)
       if (k >= 1) { this.phase = 'wave'; this.startWave() }
     } else if (this.phase === 'wave') {
       this.movePlayer(dt)
@@ -544,6 +754,7 @@ export default class DiveScene extends Phaser.Scene {
       this.updateBones(dt)
       this.updateDebris(dt)
       this.updateMotes(dt)
+      this.updateDrift(dt)
       this.autoFire(dt)
       this.drainOxygen(dt)
       this.updateWave(dt)
@@ -552,6 +763,7 @@ export default class DiveScene extends Phaser.Scene {
       this.updateBones(dt)
       this.updateDebris(dt)
       this.updateMotes(dt)
+      this.updateDrift(dt)
     }
 
     // 键盘：商店 1/2/3，层末决策 1=下潜 / 2=上浮
@@ -736,7 +948,7 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
     this.bones.push({
       x: e.x, y: e.y,
       vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 20,
-      life: O2.boneLife, value, size,
+      fade: O2.boneFade, value, size,
       rot: a, spin: (Math.random() - 0.5) * 1.6,
       alive: true,
     })
@@ -763,19 +975,32 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
    * 鱼骨：缓慢下沉 + 阻尼 + 自转，玩家游过去拾取。
    * 只有进入拾取半径才吸收——不做远程磁吸，否则走位就没意义了（硬约束①）。
    */
+  /**
+   * 鱼骨：先下沉，触底后**原地淡出**（用户需求③：沉到某个深度后原地淡出）。
+   *
+   * 为什么不是"到时间直接消失"：直接消失会像 bug，玩家会以为是自己漏捡了。
+   * 沉底 + 渐隐能让玩家看懂"它沉下去了，我够不着了"，是明确的负反馈而非错误感。
+   */
   private updateBones(dt: number): void {
     const pr = O2.pickupR * this.pickupMul
+    const H = this.scale.height
     for (const b of this.bones) {
       if (!b.alive) continue
-      b.life -= dt
-      if (b.life <= 0) { b.alive = false; continue }
-      b.vy += 34 * dt                 // 下沉：比气泡"上浮"更有重量感
-      if (b.vy > 30) b.vy = 30
+      // 下沉：比气泡"上浮"更有重量感
+      b.vy += 34 * dt
+      if (b.vy > O2.boneSinkV) b.vy = O2.boneSinkV
       b.vx *= 0.94                    // 水阻
       b.x += b.vx * dt
       b.y += b.vy * dt
       b.rot += b.spin * dt
       b.spin *= 0.985
+      // 到达沉底深度：停止下沉，转为原地淡出
+      if (b.y >= H - O2.boneFloor) {
+        b.y = H - O2.boneFloor
+        b.vy = 0; b.vx = 0
+        b.fade -= dt
+        if (b.fade <= 0) { b.alive = false; continue }
+      }
       if (Phaser.Math.Distance.Between(b.x, b.y, this.px, this.py) < pr) {
         this.o2 = Math.min(this.o2Max, this.o2 + b.value)
         b.alive = false
@@ -1120,6 +1345,33 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
       }
     }
 
+    // ---- 远景生物层（矢量实时绘制，绝不用贴图）----
+    //
+    // 画法要点，三个动作叠起来才有"活"的感觉：
+    //   ① 伞盖随 pulse 收缩（半径 ×0.78→1.0，横向略宽、纵向略扁）
+    //   ② 触须**滞后摆动**：用上一帧的伞盖相位驱动，所以触须比身体慢半拍
+    //   ③ 半透明伞盖 + 实心边缘：远景生物不该有实心填充，会和敌人抢读
+    for (const d of this.drift) {
+      const pulse = Math.pow((Math.sin(d.ph) + 1) / 2, 3)
+      const rw = d.r * (1 - pulse * 0.16)
+      const rh = d.r * (1 - pulse * 0.28)
+      const alpha = 0.13 + (1 - (1 - L.vis)) * 0.04   // 深水层稍微可见度高一点
+      // 伞盖：半透明填充 + 描边
+      g.fillStyle(d.col, alpha * 0.5)
+      g.fillEllipse(d.x, d.y, rw * 2, rh * 2)
+      neon(g, d.col, () => { g.strokeEllipse(d.x, d.y, rw * 2, rh * 2) },
+        { width: 1.2, alpha: alpha * 2.4, bloom: false })
+      // 触须：用**滞后相位**（d.ph - 0.9）驱动，视觉上比身体慢
+      const lag = Math.sin(d.ph - 0.9)
+      for (let k = -2; k <= 2; k++) {
+        const ox = k * rw * 0.42
+        const len = d.r * d.tent * (2.4 + Math.abs(lag) * 0.5)
+        neonLine(g, d.x + ox, d.y + rh * 0.6,
+          d.x + ox + lag * 6 * (1 + Math.abs(k) * 0.3), d.y + rh * 0.6 + len,
+          d.col, { width: 1, alpha: alpha * 1.3, bloom: false })
+      }
+    }
+
     // 场地边界
     neon(g, UI.cyanDim, () => { g.strokeRect(12, 12, W - 24, H - 24) }, { width: 1, alpha: 0.35, bloom: false })
 
@@ -1160,6 +1412,7 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
   private draw(): void {
     const g = this.g
     g.clear()
+    this.hideFish()   // 贴图是复用的，必须先全部隐藏再按存活状态显示
 
     // 共振肉屑（最底层，纯表现，不抢 gameplay 信息）
     this.drawDebris(g)
@@ -1177,6 +1430,75 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
       // 暗色衬底：以前只有霓虹描边，在 L1 亮珊瑚背景上会被背景亮度吃掉。
       // 这层让「敌人发光核心任何层可见」的铁律在**亮背景**侧也成立
       // （V4 §2.2 原本只保证了暗背景侧）。深色背景下它几乎不可见，不影响 L2-L5。
+      // ---- 具象鱼体（半透明贴图）+ 霓虹描边 ----
+      //
+      // 分工：贴图负责「具体形象」（形状、体积、鳞片），描边 + 2px 发光核心负责「可读性」。
+      // 半透明是刻意的——满屏 70+ 条鱼时，实心贴图互相遮挡就分不清谁在动；
+      // alpha 0.55 让重叠时还能透出后面的轮廓，而描边保证每条都有自己的边界。
+      // 蓄力（charge）时切到纯红并提到 0.85 alpha，预警必须醒目（V4 §3.4）。
+      const sprite = this.fishSprite(e, c)
+      if (sprite) {
+        // ---- 深色层的可读性兜底（L3-L5）----
+        //
+        // 鱼贴图本身是暗色（深蓝灰 + 发光内脏线），叠到同样深的 L3-L5 背景上
+        // 会「糊进背景」，远距离只剩一个亮点。
+        //
+        // 踩过的坑：**先做了一版「暗色实心椭圆衬底」，结果更糟**。
+        // 小鱼（r=6，贴图才17px）身上那个 2.5r×1.8r 的实心椭圆比鱼本身还大，
+        // 直接把鱼盖成一坨白色亮斑，满屏看起来就是「白色小飞虫」（L4 实测）。
+        //
+        // 现在只留**描边环**（不填充）：它给出清晰的定位圈 + 把鱼从背景里分离，
+        // 又不会遮挡鱼身。描边半径必须贴合鱼的实际显示尺寸（贴图留了边距，
+        // 所以 2.05r 刚好圈住轮廓），不能再放大。
+        const darkLayer = this.layer().vis < 0.5
+        if (darkLayer && lod < 2) {
+          const rw = e.r * 2.05, rh = e.r * 1.5
+          neon(g, c, () => {
+            g.strokeEllipse(e.x, e.y, rw, rh)
+          }, { width: 1.4, alpha: 0.62, bloom: false })
+        }
+        sprite.setPosition(e.x, e.y)
+        // 水母是俯视对称、靠上下浮动，不做旋转；其余鱼身朝玩家
+        const face = Math.atan2(this.py - e.y, this.px - e.x)
+        sprite.setRotation(face - e.texRot)
+        // 贴图素材已经按「缩小到 40px 仍保色」预处理过（高光压到~130、饱和度×1.45），
+        // 所以这里可以给足 alpha，不需要再人为压暗。压暗反而在深色层里丢细节。
+        sprite.setAlpha(charging ? 0.92 : 0.88)
+        // tint 在 WebGL 下是加色混合：给白色会把暗色鱼身烧成一片亮白（L4 实测）。
+        // 所以常态用 clear（不染色），只有蓄力时才叠一层红。
+        sprite.setTint(charging ? 0xff6060 : 0xffffff)
+        if (!charging) sprite.clearTint()
+        sprite.setVisible(true)
+        // 蓄力预警圈画在贴图之上，必须压得住
+        if (charging && e.kind !== 'boss') {
+          neonCircle(g, e.x, e.y, e.r * 1.6, UI.danger, { width: 2, alpha: 0.7, bloom: false })
+        }
+        // Boss 血条 + 蓄力预警圈（Boss 用矢量画，贴图只做剪影）
+        if (e.kind === 'boss') {
+          const bwid = 220, bx = e.x - bwid / 2, by = e.y - e.r - 26
+          g.fillStyle(UI.panel, 0.8); g.fillRect(bx, by, bwid, 8)
+          g.fillStyle(UI.violet, 1); g.fillRect(bx, by, bwid * Math.max(0, e.hp / e.maxHp), 8)
+          g.lineStyle(1, UI.line, 0.9); g.strokeRect(bx, by, bwid, 8)
+          if (charging) {
+            const kk = e.t / 1.2
+            neonCircle(g, e.x, e.y, 220 * (0.6 + 0.4 * kk), UI.danger,
+              { width: 3, alpha: 0.5 + 0.4 * kk, bloom: false })
+          }
+        }
+        // 发光核心（铁律：每条鱼都有，远距离也能定位）。必须画在贴图之上。
+        g.fillStyle(c, 1)
+        g.fillCircle(e.x, e.y, 2)
+        continue    // 贴图路径已画完，矢量轮廓跳过
+      }
+
+      // 小体型（走矢量路径的小鱼）不能给满强度描边。
+      // neon() 会叠三层（外发光 + 光晕 + 芯线），在 r=11 这种尺寸上三层叠加
+      // 等于一根实心亮环 —— 满屏看就是"白色小飞虫"（L4 实测）。
+      // 体型越小描边越细、bloom 关掉，靠发光核心保证可见性即可。
+      const small = e.r < 14
+      const sw = small ? 1.2 : 2
+      const sb = small ? false : lod === 0
+
       if (lod < 2) {
         g.fillStyle(UI.abyss, 0.30)
         g.fillCircle(e.x, e.y, e.r * 1.18)
@@ -1199,10 +1521,10 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
             g.lineTo(tx + nx2 * 11 + px2 * 7, ty + ny2 * 11 + py2 * 7)
             g.lineTo(tx + nx2 * 11 - px2 * 7, ty + ny2 * 11 - py2 * 7)
             g.closePath(); g.strokePath()
-          }, { width: 2, bloom: false })
+          }, { width: sw, bloom: false })
         }
         neon(g, c, () => { g.strokeEllipse(e.x, e.y, rx * 2, ry * 2) },
-          { width: 2, bloom: lod === 0 })
+          { width: sw, bloom: sb, alpha: small ? 0.7 : 1 })
       } else if (e.kind === 'drift') {
         // 钟形水母：半圆顶 + 触须
         const pulse = 1 + 0.12 * Math.sin(this.t * 2.2 + e.x * 0.01)
@@ -1211,12 +1533,12 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
           g.beginPath()
           g.arc(e.x, e.y, rr, Math.PI, 0, false)
           g.closePath(); g.strokePath()
-        }, { width: 2, bloom: lod === 0 })
+        }, { width: sw, bloom: sb, alpha: small ? 0.66 : 1 })
         if (lod < 2) {
           for (let k = -1; k <= 1; k++) {
             const ox = k * rr * 0.5
             neonLine(g, e.x + ox, e.y + 2, e.x + ox + Math.sin(this.t * 3 + k) * 6, e.y + rr * 1.5,
-              c, { width: 1, alpha: 0.6, bloom: false })
+              c, { width: 1, alpha: small ? 0.34 : 0.6, bloom: false })
           }
         }
       } else if (e.kind === 'boss') {
@@ -1351,6 +1673,43 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
     }
   }
 
+  /**
+   * 取一个敌人贴图对象（池化）。
+   *
+   * 返回 null 表示"这条敌人该走矢量路径"——三种情况：
+   *   ① 同屏敌人 >80：贴图数量太多（每条都是独立 draw call），退回纯矢量
+   *   ② 贴图未就绪（preload 未完成）：退回矢量，至少不崩
+   *   ③ **体型太小（显示尺寸 < 26px）**：这是实测踩出来的第三条。
+   *      水母贴图 60% 面积是细触须，缩到 14px 后触须和伞盖糊成一团白，
+   *      屏幕上就是一颗"白色小飞虫"。贴图的优势是细节，细节在 14px 上
+   *      反而变成噪声 —— 所以小体型一律走矢量：水母本来就是半透明飘浮的
+   *      矢量生物更合适，梭形鱼/翼型鱼这些小体型则保留矢量轮廓 + 发光核心。
+   */
+  private fishSprite(e: Enemy, col: number): Phaser.GameObjects.Image | null {
+    if (this.enemies.length > 80) return null
+    // 显示尺寸阈值：低于 26px 贴图细节会糊成一团，走矢量
+    if (e.r * 2.4 < 26 && e.kind !== 'boss') return null
+    const key = e.tex
+    let img = this.fishPool.find(im => im.getData('key') === key && !im.visible)
+    if (!img) {
+      if (!this.textures.exists(key)) return null
+      img = this.add.image(0, 0, key).setDepth(40)
+      this.fishPool.push(img)
+    }
+    // 显示尺寸：碰撞半径 ×2.4。系数从 2.9 降到 2.4 是因为深色层的定位描边环
+    // 半径是 2.05r，贴图再放大就会明显溢出描边圈，看起来像"贴图比碰撞体大"。
+    const s = e.r * 2.4
+    img.setDisplaySize(s, e.kind === 'drift' ? s * 0.8 : s)
+    img.setData('key', key)
+    img.setBlendMode(Phaser.BlendModes.NORMAL)
+    return img
+  }
+
+  /** 隐藏所有敌人贴图（每帧绘制前调用，避免上一帧残留） */
+  private hideFish(): void {
+    for (const im of this.fishPool) im.setVisible(false)
+  }
+
   private drawProjectiles(g: Phaser.GameObjects.Graphics): void {
     // —— 爆炸冲击环：先画（在最底层），压住后面的曳光弹 ——
     for (const b of this.blasts) {
@@ -1431,12 +1790,16 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
    */
   private drawBones(g: Phaser.GameObjects.Graphics): void {
     for (const b of this.bones) {
-      const blink = b.life < O2.boneBlink ? (Math.sin(this.t * 25) > 0 ? 1 : 0.35) : 1
+      // 沉底后开始淡出：用 alpha 渐隐 + 末段闪烁提示"要没了"
+      const f = Phaser.Math.Clamp(b.fade / O2.boneFade, 0, 1)
+      const blink = f < 0.4 ? (Math.sin(this.t * 25) > 0 ? 1 : 0.4) : 1
+      // 淡出期间略微变暗，制造"沉进黑暗里"的感觉而不是单纯变透明
+      const sink = 0.55 + 0.45 * f
       const ca = Math.cos(b.rot), sa = Math.sin(b.rot)
       const X = (lx: number, ly: number) => b.x + lx * ca - ly * sa
       const Y = (lx: number, ly: number) => b.y + lx * sa + ly * ca
       const L = b.size, half = L / 2
-      const a = 0.95 * blink
+      const a = 0.95 * blink * f          // f: 沉底后线性渐隐
 
       neonLine(g, X(-half, 0), Y(-half, 0), X(half, 0), Y(half, 0), BONE, { width: 1.6, alpha: a, bloom: false })
       // 肋骨 4 对：中间宽、两端窄
@@ -1475,62 +1838,87 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
    * 而且**灯越深越亮**——L1 阳光带几乎看不见灯，L5 深渊带灯是唯一照明。
    * 这一条把 V4 §2.2「分层可见度」直接落到了玩家自己身上。
    */
+  /**
+   * 具象潜航器 + 独立转向炮塔（V6.4）。
+   *
+   * 三层结构，从下到上：
+   *   ① 边缘光（rim light）：椭圆高亮描边，让深色贴图在任何背景上都能读出来
+   *   ② 机体贴图：跟随移动方向旋转
+   *   ③ 炮塔塔头：4 个挂载点，**各自独立瞄准最近的敌人**（不是跟着机体转）
+   *
+   * 为什么炮塔要限幅在±60°：转太多会甩到机体前方，视觉上像"武器被甩出去"，
+   * 而且会挡住潜航器本体。玩家感受得到"塔在瞄准"，但不会觉得失控。
+   */
   private drawSub(g: Phaser.GameObjects.Graphics): void {
     const ca = Math.cos(this.aim), sa = Math.sin(this.aim)
-    // Graphics 没有旋转变换，只能手算每个顶点
     const X = (lx: number, ly: number) => this.px + lx * ca - ly * sa
     const Y = (lx: number, ly: number) => this.py + lx * sa + ly * ca
     const pcol = this.hurtFlash > 0 ? WHITE : UI.cyan
 
-    // ---- 探照灯锥 ----
-    const beamA = 0.07 + (1 - this.layer().vis) * 0.16
-    const beamLen = 150, half = 0.36
+    // ---- ① 边缘光：深色贴图在深背景上可读的唯一保障 ----
+    // 比机体贴图略大一圈的椭圆描边，颜色用玩家专属的青蓝（永远是全场最亮的青）。
+    const rimW = 34, rimH = 19
+    neon(g, pcol, () => { g.strokeEllipse(this.px, this.py, rimW, rimH) },
+      { width: 2.4, alpha: 0.85, bloom: true })
+    neon(g, UI.cyanHi, () => { g.strokeEllipse(this.px, this.py, rimW - 5, rimH - 5) },
+      { width: 1, alpha: 0.35, bloom: false })
+
+    // ---- ② 机体贴图 ----
+    this.subImg.setPosition(this.px, this.py)
+    this.subImg.setRotation(this.aim)
+    // 受击闪白：贴图整体提亮（Phaser 的 tint 用加色，配合高 alpha 更接近"过曝"）
+    this.subImg.setTint(this.hurtFlash > 0 ? 0xffffff : 0xffffff)
+    this.subImg.setAlpha(this.hurtFlash > 0 ? 0.9 : 1)
+
+    // ---- ③ 探照灯锥（贴图自带灯，但仍画一层矢量光锥增强存在感）----
+    const beamA = 0.09 + (1 - this.layer().vis) * 0.18
+    const beamLen = 120, half = 0.34
     g.fillStyle(0xdff8ff, beamA)
     g.beginPath()
-    g.moveTo(X(20, 0), Y(20, 0))
+    g.moveTo(X(14, 0), Y(14, 0))
     for (let i = 0; i <= 8; i++) {
       const ang = -half + (i / 8) * half * 2
-      const lx = 20 + Math.cos(ang) * beamLen
+      const lx = 14 + Math.cos(ang) * beamLen
       const ly = Math.sin(ang) * beamLen
       g.lineTo(X(lx, ly), Y(lx, ly))
     }
     g.closePath(); g.fillPath()
 
-    // ---- 尾鳍 / 稳定翼 ----
-    for (const s of [-1, 1]) {
-      neon(g, pcol, () => {
-        g.beginPath()
-        g.moveTo(X(-4, s * 8), Y(-4, s * 8))
-        g.lineTo(X(-13, s * 17), Y(-13, s * 17))
-        g.lineTo(X(-11, s * 7), Y(-11, s * 7))
-        g.closePath(); g.strokePath()
-      }, { width: 2, alpha: 0.9, bloom: false })
+    // ---- ④ 炮塔塔头：独立瞄准 ----
+    // 4 个挂载点固定在机体上（跟随机体旋转），但塔头自身再转一次去瞄准目标。
+    for (let i = 0; i < HARDPOINTS.length; i++) {
+      const img = this.turretImgs[i]
+      const w = this.weapons[i]
+      if (!w) { img.setVisible(false); continue }
+      // 挂载点局部坐标（以机体长宽为单位的比例）× 机体显示尺寸
+      const [hx, hy] = HARDPOINTS[i]
+      const mountX = X(hx * 59, hy * 31)
+      const mountY = Y(hx * 59, hy * 31)
+
+      // 独立索敌：优先当前锁定目标，否则取射程内最近的
+      const def = WEAPON_DEF[w.id]
+      const rng = def.range + (w.lvl - 1) * 26
+      const tgt = this.nearestEnemy(rng)
+      let want = this.aim
+      if (tgt) want = Math.atan2(tgt.y - mountY, tgt.x - mountX)
+      // 限幅：塔相对机体朝向最多偏 ±60°，防止甩出去挡住本体
+      const rel = Phaser.Math.Angle.Wrap(want - this.aim)
+      const clamped = Phaser.Math.Clamp(rel, -1.05, 1.05)
+      img.setVisible(true)
+      img.setTexture(this.turretTex[w.id] ?? 'w_gun')
+      img.setPosition(mountX, mountY)
+      img.setRotation(this.aim + clamped)
+      img.setDisplaySize(20, 20)
+      // 开火瞬间塔头发亮，给"它在射击"的反馈
+      img.setTint(w.timer > 0 ? 0xffffff : 0xbfd0ff)
     }
 
-    // ---- 艇身：流线型七边形（艇首朝 +x）----
-    const hull: Array<[number, number]> = [[19, 0], [9, -8], [-8, -9], [-14, -5], [-14, 5], [-8, 9], [9, 8]]
-    neon(g, pcol, () => {
-      g.beginPath()
-      hull.forEach(([lx, ly], i) => { if (i === 0) g.moveTo(X(lx, ly), Y(lx, ly)); else g.lineTo(X(lx, ly), Y(lx, ly)) })
-      g.closePath(); g.strokePath()
-    }, { width: 2.2, bloom: true })
-    // 艇身内部微光：暗场里给玩家一点实体感（规则①只禁止"敌人"填实体色）
-    g.fillStyle(pcol, 0.10)
-    g.beginPath()
-    hull.forEach(([lx, ly], i) => { if (i === 0) g.moveTo(X(lx, ly), Y(lx, ly)); else g.lineTo(X(lx, ly), Y(lx, ly)) })
-    g.closePath(); g.fillPath()
-
-    // ---- 驾驶舱穹顶 ----
-    neon(g, UI.cyanHi, () => { g.strokeCircle(X(6, 0), Y(6, 0), 5) }, { width: 1.6, alpha: 0.95, bloom: false })
-    g.fillStyle(UI.cyanHi, 0.28); g.fillCircle(X(6, 0), Y(6, 0), 5)
-
-    // ---- 推进器尾焰（移动时更长）----
-    const flame = 8 + Math.sin(this.t * 24) * 2.5 + (this.moving ? 7 : 0)
-    for (const s of [-1, 1]) {
-      neonLine(g, X(-14, s * 3), Y(-14, s * 3), X(-14 - flame, s * 2), Y(-14 - flame, s * 2),
-        UI.cyanHi, { width: 2, alpha: 0.75, bloom: false })
+    // ---- ⑤ 推进器尾焰（移动时更长）----
+    if (this.moving) {
+      const flame = Math.sin(this.t * 26) * 2.4 + 5
+      neonLine(g, X(-14, 0), Y(-14, 0), X(-14 - flame, 0), Y(-14 - flame, 0),
+        UI.cyanHi, { width: 3, alpha: 0.75, bloom: true })
     }
-    g.fillStyle(UI.cyanHi, 0.9); g.fillCircle(X(-14, 0), Y(-14, 0), 2.5)
   }
 
   // ==========================================================================
@@ -2060,6 +2448,7 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
   private layout(): void {
     this.clearHits()   // resize 后热区坐标失效，重绘时重建
     this.buildMotes()
+    this.buildDrift()
     this.layoutBg()
   }
 

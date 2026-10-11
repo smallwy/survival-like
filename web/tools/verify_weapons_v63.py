@@ -19,7 +19,7 @@ import urllib.request
 import websocket
 
 UD = "/tmp/cdp-profile-v63"
-URL = "http://localhost:4173/"
+URL = "http://localhost:4178/"
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "shots")
 PORT = 9223
 os.makedirs(OUT, exist_ok=True)
@@ -160,6 +160,18 @@ y1 = c.js(f"{D}.py")
 push = c.js(f"{D}.vpPush")
 check("无输入时热泉把艇往上顶", y1 < y0 - 10, f"y {y0:.0f} → {y1:.0f}, push={push:.0f}")
 shot(c, "v63_04_vent_push_l4.png")
+
+print("\n⑥b L4 深色层鱼贴图可读性（回归：曾变白色小飞虫）")
+c.js(f"""(()=>{{const s={D};
+  s.enemies.forEach(e=>e.alive=false); s.enemies=[];
+  s.spawnLeft=0; s.spawnTimer=999;
+  for(let i=0;i<10;i++) s.spawnEnemy('drift');
+  for(let i=0;i<10;i++) s.spawnEnemy('swarm');
+}})()""")
+time.sleep(0.8)
+vis = c.js(f"JSON.stringify({D}.fishPool.map(im=>[im.texture.key,im.visible,+im.alpha.toFixed(2),im.tintTopLeft.toString(16)]))")
+print("    贴图池:", vis)
+shot(c, "v63_06_l4_fish_texture.png")
 
 print("\n⑦ 低氧告警边框")
 c.js(f"(()=>{{const s={D}; s.o2 = s.o2Max*0.15;}})()")
