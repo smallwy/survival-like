@@ -205,6 +205,176 @@ const WEAPON_DEF: Record<WeaponId, {
 }
 
 // ---------------------------------------------------------------------------
+// 属性系统（V6.8）
+// ---------------------------------------------------------------------------
+/**
+ * 之前玩家的成长数值是**散落的裸字段**（speedMul / pickupMul / o2Bonus /
+ * killO2 / twinRate 各写各的），带来三个问题：
+ *
+ *   1. 每加一个新属性就要新开一个字段 + 手改**每一处**用到它的公式，
+ *      漏改一处就是"卡买了没效果" —— 这类 bug 最难查。
+ *   2. 卡面只能写"移速 +15%"这种一次性描述，没法回答"我现在总共多少"。
+ *   3. 属性有上限时（装甲/闪避不能叠到 100%）每个字段各写各的钳位。
+ *
+ * 所以收进一个扁平 Stats 对象，约定：
+ *   - **百分比类存小数**（0.15 = +15%），渲染时 ×100
+ *   - 所有加成型卡走加法（Brotato 的做法），不再 `*= 1.15` 叠乘
+ *     —— 叠乘会让后期一张卡的价值滚雪球，前期一张卡又弱得没感觉。
+ *   - `cap` 表里声明上限，`addStat()` 统一钳位
+ */
+interface Stats {
+  /** 伤害加成（共振强度） */
+  dmg: number
+  /** 射速加成（高压供能） */
+  rate: number
+  /** 暴击率 0~1 */
+  crit: number
+  /** 暴击倍率（0.8 = 暴击造成 180%） */
+  critMul: number
+  /** 射程加成（声场延伸） */
+  range: number
+  /** 减伤 0~1（耐压壳） */
+  armor: number
+  /** 闪避 0~1（流体规避） */
+  dodge: number
+  /** 移速加成（增压推进） */
+  speed: number
+  /** 拾取范围加成（吸附鳍） */
+  pickup: number
+  /** 打捞运：鱼骨价值加成 */
+  luck: number
+  /** 每秒回氧（循环泵） */
+  regen: number
+  /** 氧气上限加成（绝对值，扩容气瓶） */
+  o2Bonus: number
+  /** 击杀回氧（绝对值，循环鳃） */
+  killO2: number
+  /** 双联座射速加成 */
+  twinRate: number
+}
+
+/**
+ * 属性上限表。
+ *
+ * 为什么 armor / dodge 必须封顶：它们是**乘算减伤**，线性叠加到 100% 就是无敌，
+ * 而且无敌状态下玩家学不到任何东西 —— 走位、氧气管理全部失去意义。
+ * 60% 是 Brotato 的量级：能明显感觉到"我变肉了"，但依然会被打死。
+ */
+const STAT_CAP: Partial<Record<keyof Stats, number>> = {
+  armor: 0.6, dodge: 0.6, crit: 0.75, twinRate: 0.6,
+}
+
+/** 开局属性。killO2 的默认 0 意味着"击杀不回氧"是初始设定，靠卡解锁 */
+const NEW_STATS = (): Stats => ({
+  dmg: 0, rate: 0, crit: 0, critMul: 0.8, range: 0,
+  armor: 0, dodge: 0, speed: 0, pickup: 0, luck: 0, regen: 0,
+  o2Bonus: 0, killO2: PLAYER.killO2, twinRate: 0,
+})
+
+/**
+ * 属性的显示元数据。
+ *
+ * 顺序 = 商店属性面板的排列顺序，刻意把"进攻三件套"排前面：
+ * 玩家第一眼看的是"我打得疼不疼"，生存类属性是在被打疼之后才开始关心的。
+ */
+const STAT_META: Array<{
+  k: keyof Stats; name: string; pct: boolean; col: number; icon: string
+}> = [
+  { k: 'dmg',     name: '共振强度', pct: true,  col: UI.danger, icon: 'dmg' },
+  { k: 'rate',    name: '供能速率', pct: true,  col: UI.amber,  icon: 'rate' },
+  { k: 'crit',    name: '弱点解析', pct: true,  col: UI.violet, icon: 'crit' },
+  { k: 'range',   name: '声场射程', pct: true,  col: UI.cyan,   icon: 'range' },
+  { k: 'armor',   name: '耐压壳',   pct: true,  col: UI.jade,   icon: 'armor' },
+  { k: 'dodge',   name: '流体规避', pct: true,  col: UI.cyanHi, icon: 'dodge' },
+  { k: 'speed',   name: '推进效率', pct: true,  col: UI.cyan,   icon: 'speed' },
+  { k: 'pickup',  name: '吸附范围', pct: true,  col: UI.jade,   icon: 'pickup' },
+  { k: 'luck',    name: '打捞运',   pct: true,  col: BONE,      icon: 'luck' },
+  { k: 'regen',   name: '循环泵',   pct: false, col: UI.cyanHi, icon: 'regen' },
+  { k: 'killO2',  name: '击杀回氧', pct: false, col: UI.cyanHi, icon: 'kill' },
+]
+
+// ---------------------------------------------------------------------------
+// 遗物（被动道具，V6.8）
+// ---------------------------------------------------------------------------
+/**
+ * 遗物和「属性卡」的区别，以及为什么必须两个都要：
+ *
+ *   属性卡是**数值**（伤害 +12%），买的过程是"我的共振强度又高了一点"，
+ *   是线性的、可预期的，负责让每一波都有东西可买。
+ *   遗物是**规则**（低氧时伤害 +50%），它会改变玩家的打法本身 ——
+ *   拿到回声心脏之后，"该不该故意留着低氧"变成了每时每刻的决策。
+ *
+ * 只有属性卡的游戏后 10 分钟会变成纯数值堆叠，只有遗物的游戏则前期没东西买。
+ * Brotato 把两者都放进同一个商店、同一个货币，这是它 build 深度的来源。
+ *
+ * 一半的遗物**带代价**：这是设计的核心。纯增益道具不需要抉择，
+ * 只要看到就买；带代价的才会让玩家在商店里停下来算"我这局吃不吃得住"。
+ */
+const RELIC_SLOTS = 4
+
+type RelicId =
+  | 'echo_heart'      // 回声心脏：低氧增伤
+  | 'osteoblast'      // 骨殖转化：击杀回氧翻倍，氧气上限 -15
+  | 'tidal_compass'   // 潮汐罗盘：拾取 + 鱼骨价值
+  | 'resonance_core'  // 共振核心：暴击溅射
+  | 'gluttony'        // 贪食腺体：鱼骨 ×2，耗氧 +0.6/s
+  | 'abyss_mark'      // 深潜印记：每层 +12% 伤害，敌人 +10% 移速
+  | 'current_fin'     // 洋流鳍：3 秒不受击 → 移速 +30%
+  | 'silent_plating'  // 静默装甲：受击后 1.5s 闪避 +40%
+
+interface RelicDef {
+  id: RelicId
+  name: string
+  /** 正面效果，一行说完，进卡面 */
+  desc: string
+  /** 代价。有代价的遗物在卡面上用告警色画，玩家不该被"惊喜"到 */
+  cost2?: string
+  price: number
+  /** 装备瞬间的副作用（改 stats / 上限） */
+  onEquip?: (s: DiveScene) => void
+}
+
+const RELIC_DEF: Record<RelicId, RelicDef> = {
+  echo_heart: {
+    id: 'echo_heart', name: '回声心脏', price: 60,
+    desc: '氧气低于 30% 时，伤害 +50%',
+    cost2: '无代价 —— 但你得敢留在那条线上',
+  },
+  osteoblast: {
+    id: 'osteoblast', name: '骨殖转化', price: 45,
+    desc: '击杀回氧 ×2',
+    cost2: '氧气上限 −15',
+    onEquip: s => s.addStat('o2Bonus', -15),
+  },
+  tidal_compass: {
+    id: 'tidal_compass', name: '潮汐罗盘', price: 40,
+    desc: '拾取范围 +80% · 鱼骨价值 +30%',
+  },
+  resonance_core: {
+    id: 'resonance_core', name: '共振核心', price: 66,
+    desc: '暴击时向最近的另一只溅射 40% 伤害',
+  },
+  gluttony: {
+    id: 'gluttony', name: '贪食腺体', price: 52,
+    desc: '鱼骨价值 +100%',
+    cost2: '每秒额外耗氧 +0.6',
+  },
+  abyss_mark: {
+    id: 'abyss_mark', name: '深潜印记', price: 58,
+    desc: '每下潜一层，伤害 +12%（跨层累积）',
+    cost2: '敌人移速 +10% —— 更深的东西也注意到了你',
+  },
+  current_fin: {
+    id: 'current_fin', name: '洋流鳍', price: 44,
+    desc: '连续 3 秒未受击时，移速 +30%',
+  },
+  silent_plating: {
+    id: 'silent_plating', name: '静默装甲', price: 48,
+    desc: '受击后 1.5 秒内，闪避 +40%',
+  },
+}
+
+// ---------------------------------------------------------------------------
 // 五层（V6 §3.4）
 // ---------------------------------------------------------------------------
 /**
@@ -435,7 +605,7 @@ interface Upgrade {
   id: string
   name: string
   desc: string
-  kind: 'weapon' | 'mount' | 'surv'
+  kind: 'weapon' | 'mount' | 'stat' | 'relic'
   /**
    * 售价（鱼骨）。
    *
@@ -448,6 +618,8 @@ interface Upgrade {
   apply: (s: DiveScene) => void
   /** 返回 true 表示这张卡当前无效，不该出现在三选一里 */
   dead?: (s: DiveScene) => boolean
+  /** 遗物卡专用：卡面对应的遗物 id（画图标、查代价文案要用） */
+  relicId?: RelicId
 }
 
 interface Mote { x: number; y: number; r: number; vy: number; vx: number; a: number }
@@ -485,15 +657,23 @@ export default class DiveScene extends Phaser.Scene {
   private py = 0
   private o2 = O2.max
   private o2Max = O2.max
-  /** 升级带来的额外上限（跨层保留） */
-  private o2Bonus = 0
   private biomass = 0
   /** 朝向（弧度）：艇身朝移动方向，静止时保持上一次 */
   private aim = 0
   private burstTimer = 0
-  private speedMul = 1
-  private pickupMul = 1
-  private killO2 = PLAYER.killO2
+  /**
+   * 玩家属性总表（V6.8）。
+   *
+   * 所有成长数值都收在这里，任何一处要读"玩家现在多强"都走 `st`，
+   * 不再有散落的裸字段。详见 `interface Stats` 的注释。
+   */
+  private st: Stats = NEW_STATS()
+  /** 已装备的遗物（被动道具，上限 RELIC_SLOTS） */
+  private relics: RelicId[] = []
+  /** 连续未受击时长（「洋流鳍」） */
+  private noHitT = 0
+  /** 受击后闪避加成剩余时长（「静默装甲」） */
+  private plateT = 0
   /** 受击闪白计时（氧气被撞时） */
   private hurtFlash = 0
   /**
@@ -545,14 +725,6 @@ export default class DiveScene extends Phaser.Scene {
    * 也会让 4 个座上直接挂满双联 —— 艇身剪影会糊成一团。
    */
   private maxWeapons = 4
-  /**
-   * 双联座的射速加成（「齐射同步」卡累加，上限 60%）。
-   *
-   * 只作用于**后管位**（barrel === 1）的武器 —— 前管是原本就有的座，
-   * 给它加成等于凭空加强已有武器，玩家感受不到"双联"这个形态的价值。
-   * 加成打在后管上，"装了双联 → 那根新管射得更快"才是可读的因果。
-   */
-  private twinRate = 0
   private debris: Debris[] = []
   private motes: Mote[] = []
   /** 远景生物（纯装饰，不参与碰撞）—— 见DriftLife 注释 */
@@ -695,14 +867,12 @@ export default class DiveScene extends Phaser.Scene {
     this.waveInLayer = 0
     this.mult = 1.0
     this.bossDown = false
-    this.o2Bonus = 0
     this.o2Max = LAYERS[0].o2Max
     this.o2 = this.o2Max
     this.o2Shown = this.o2Max     // 补间值不复位的话，新局开头数字会从上一局的残值滚上来
     // 挂载位必须复位：不复位的话重开一局直接带 6 座 + 满射速加成，
     // 「靠商店卡解锁挂载」这条成长线会在第二局凭空消失。
     this.maxWeapons = 4
-    this.twinRate = 0
     this.hurtDirT = 0
     this.weapons = []
     this.bullets = []; this.arcs = []; this.blasts = []
@@ -779,7 +949,9 @@ export default class DiveScene extends Phaser.Scene {
 
     const base = kind === 'drift' ? 55 : kind === 'dash' ? 26 : 14
     const hp = Math.round(base * hpScale)
-    const spd = kind === 'drift' ? 42 : kind === 'dash' ? 96 : 68
+    // 深潜印记的代价：敌人整体 +10% 移速。你变强了，但它们也更快追上你
+    const relicSpd = this.hasRelic('abyss_mark') ? 1.1 : 1
+    const spd = (kind === 'drift' ? 42 : kind === 'dash' ? 96 : 68) * relicSpd
 
     this.enemies.push({
       x, y, vx: 0, vy: 0,
@@ -808,7 +980,7 @@ export default class DiveScene extends Phaser.Scene {
       hp, maxHp: hp,
       r: 44, kind: 'boss',
       color: UI.violet,
-      speed: 46,
+      speed: 46 * (this.hasRelic('abyss_mark') ? 1.1 : 1),
       phase: 'chase', t: 0, dirX: 0, dirY: 0,
       alive: true, flash: 0,
       tex: 'f_dash',       // Boss 复用翼型掠食鱼贴图，放大到44px 当专属剪影
@@ -958,6 +1130,9 @@ export default class DiveScene extends Phaser.Scene {
       this.autoFire(dt)
       this.drainOxygen(dt)
       this.updateWave(dt)
+      // 遗物的"状态类"计时器：必须每帧推进，否则条件永远不成立
+      this.noHitT += dt
+      if (this.plateT > 0) this.plateT -= dt
     } else {
       // 商店 / 决策 / 结算：战斗暂停，只保留环境动画
       this.updateBones(dt)
@@ -992,11 +1167,16 @@ export default class DiveScene extends Phaser.Scene {
     if (this.keys.right.isDown) dx += 1
     if (this.keys.up.isDown) dy -= 1
     if (this.keys.down.isDown) dy += 1
+    // 移速 = 基础 × (卡加成 + 洋流鳍的条件加成)
+    // 洋流鳍奖励的是"干净地躲开"这件事本身，所以条件是**连续 3 秒未受击**，
+    // 而不是"移动时"——后者等于白送。
+    const spdMul = 1 + this.st.speed
+      + (this.hasRelic('current_fin') && this.noHitT >= 3 ? 0.3 : 0)
     if (dx || dy) {
       const l = Math.hypot(dx, dy)
       this.aim = Math.atan2(dy, dx)
-      this.px += (dx / l) * PLAYER.speed * this.speedMul * dt
-      this.py += (dy / l) * PLAYER.speed * this.speedMul * dt
+      this.px += (dx / l) * PLAYER.speed * spdMul * dt
+      this.py += (dy / l) * PLAYER.speed * spdMul * dt
       this.moving = true
     } else {
       this.moving = false
@@ -1077,8 +1257,13 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
 
       // 接触伤害：氧气就是血条（V6 §3.2）。贴着不放 = 24 氧/秒。
       if (d < e.r + PLAYER.r) {
-        this.o2 -= (e.kind === 'boss' ? 34 : 24) * dt
+        // 护甲（耐压壳）在这里生效：持续磨损按乘算减免。
+        // 闪避**不参与**持续伤害 —— 按帧掷骰会让掉氧忽快忽慢，
+        // 玩家学不到任何规律。闪避只免疫一次性打击（见 damagePlayer）。
+        this.o2 -= (e.kind === 'boss' ? 34 : 24) * dt * (1 - this.st.armor)
         this.hurtFlash = 0.25
+        this.noHitT = 0
+        this.plateT = 1.5      // 静默装甲：任何时候被碰到就进入规避窗口
         // 记下来向。注意 nx/ny 是「敌人 → 玩家」（敌人就是沿它追过来的），
         // 所以要**取反**才是伤害的来向；直接存 nx 会让暗角红在错误的那一侧。
         this.hurtDirX = -nx; this.hurtDirY = -ny; this.hurtDirT = 0.45
@@ -1089,16 +1274,36 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
     }
   }
 
+  /**
+   * 对玩家造成一次**一次性**打击（Boss 震击）。
+   *
+   * 闪避只在这里掷骰：一次性打击才有"躲开了"这个瞬间可读的事件，
+   * 配上飘字就成了正反馈。持续接触伤害走的是护甲乘算，不走这里。
+   */
+  private damagePlayer(amount: number, dirX: number, dirY: number): void {
+    const dodge = Math.min(0.9, this.st.dodge + (this.plateT > 0 ? 0.4 : 0))
+    if (Math.random() < dodge) {
+      this.spawnFloat(this.px, this.py - 34, '闪避', UI.cyanHi, 16)
+      this.plateT = 1.5
+      return
+    }
+    const d = amount * (1 - this.st.armor)
+    this.o2 -= d
+    this.hurtFlash = 0.35
+    this.noHitT = 0
+    this.plateT = 1.5
+    this.hurtDirX = dirX; this.hurtDirY = dirY; this.hurtDirT = 0.6
+    this.spawnFloat(this.px, this.py - 30, `-${Math.round(d)}`, UI.danger, 16)
+  }
+
   /** Boss 震击：红圈预警 1.2s 后爆发 */
   private bossSlam(e: Enemy): void {
     const R = 220
     if (Phaser.Math.Distance.Between(this.px, this.py, e.x, e.y) <= R) {
-      this.o2 -= 18
-      this.hurtFlash = 0.35
       // Boss 震击是全屏伤害，但仍有来向：从玩家指向 Boss
       const dx = e.x - this.px, dy = e.y - this.py
       const len = Math.max(1, Math.hypot(dx, dy))
-      this.hurtDirX = dx / len; this.hurtDirY = dy / len; this.hurtDirT = 0.6
+      this.damagePlayer(18, dx / len, dy / len)
     }
     this.cameras.main.shake(220, 0.008)
   }
@@ -1128,8 +1333,34 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
     this.pulses = this.pulses.filter(p => p.alive)
   }
 
+  /**
+   * 对一条敌人造成一次伤害。
+   *
+   * **所有伤害都必须走这个函数** —— 声呐波前、机关枪弹、鱼雷直击与爆炸、
+   * 电弧链击，一共五条路径都在这里汇合。属性加成（伤害 % / 暴击）放在这层，
+   * 新加一条伤害来源就自动吃到加成，不用在每个调用点各补一遍。
+   * 反过来，若加成写在调用点，漏一处就是"这张卡买了没效果"。
+   */
   private hurt(e: Enemy, dmg: number): void {
-    e.hp -= dmg
+    // 暴击：全局属性，所有伤害来源共享（和 Brotato 一致）
+    const crit = Math.random() < this.st.crit
+    let d = dmg * this.dmgMulNow()
+    if (crit) d *= 1 + this.st.critMul
+    e.hp -= d
+    if (crit) {
+      e.flash = 0.14
+      this.spawnFloat(e.x, e.y - e.r - 14, `暴击 ${Math.round(d)}`, UI.violet, 17)
+      // 共振核心：暴击溅射到最近的另一只 —— 让高暴击 build 有清群能力
+      if (this.hasRelic('resonance_core')) {
+        let best: Enemy | null = null, bd = 220
+        for (const o of this.enemies) {
+          if (!o.alive || o === e) continue
+          const dd = Phaser.Math.Distance.Between(e.x, e.y, o.x, o.y)
+          if (dd < bd) { bd = dd; best = o }
+        }
+        if (best) { best.hp -= d * 0.4; best.flash = 0.1 }
+      }
+    }
     if (e.hp <= 0 && e.alive) {
       e.alive = false
       this.biomass += e.kind === 'boss' ? 20 : 1
@@ -1139,9 +1370,10 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
       // 击杀回氧飘字。注意：鱼骨是**另外一笔**收益（捡到才给），
       // 这里是击杀瞬间给的，两笔来源不同，飘字位置也错开（击杀在鱼身上、
       // 拾取在鱼骨上），玩家能分清"打死的"和"捡到的"
-      if (this.killO2 > 0) {
+      const kO2 = this.st.killO2 * (this.hasRelic('osteoblast') ? 2 : 1)
+      if (kO2 > 0) {
         const before = this.o2
-        this.o2 = Math.min(this.o2Max, this.o2 + this.killO2)
+        this.o2 = Math.min(this.o2Max, this.o2 + kO2)
         if (this.o2 - before > 0.5) {
           this.spawnFloat(e.x, e.y - e.r - 6, `+${Math.round(this.o2 - before)}`,
             UI.cyanHi, 15)
@@ -1205,7 +1437,8 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
    * 沉底 + 渐隐能让玩家看懂"它沉下去了，我够不着了"，是明确的负反馈而非错误感。
    */
   private updateBones(dt: number): void {
-    const pr = O2.pickupR * this.pickupMul
+    // 拾取半径 = 基础 × (吸附鳍 + 潮汐罗盘)
+    const pr = O2.pickupR * (1 + this.st.pickup + (this.hasRelic('tidal_compass') ? 0.8 : 0))
     const H = this.scale.height
     for (const b of this.bones) {
       if (!b.alive) continue
@@ -1232,7 +1465,12 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
         // 鱼骨**同时是货币**：捡到既有氧也有钱。
         // 这两件事必须一起给 —— 只给钱的话氧气系统（血条+计时器）会失去
         // 唯一的正向补充来源，只给氧的话"捡鱼骨"又和商店无关，循环还是断的。
-        this.bank += b.value
+        //
+        // 钱按**加成后的**价值算（打捞运 / 潮汐罗盘 / 贪食腺体），
+        // 回氧仍按基础值 —— 否则运气属性会顺带变成生存属性，
+        // 一张"打捞运"卡同时解决经济和血线，就没有取舍了。
+        const coin = Math.round(b.value * this.boneValueMul())
+        this.bank += coin
         // 回氧飘字。氧满时（gained ≈ 0）不飘 ——
         // 飘一个 "+0" 是在嘲笑玩家，那是最糟糕的反馈
         if (gained > 0.5) {
@@ -1241,7 +1479,7 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
           this.spawnFloat(b.x, b.y - 8, '氧气已满', UI.cyanDim, 14)
         }
         // 钱另飘一行（错开延迟，两行不打架）：让"这是在攒钱"变成可见的
-        this.spawnFloat(b.x, b.y - 26, `+${b.value} 骨`, BONE, 14)
+        this.spawnFloat(b.x, b.y - 26, `+${coin} 骨`, BONE, 14)
         // 拾取时鱼骨位置炸一小簇青色粒子，让"吸进来了"有实感
         for (let i = 0; i < 3; i++) {
           const a = Math.random() * Math.PI * 2
@@ -1365,9 +1603,11 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
       w.timer = Math.max(0, w.timer - dt)
       if (w.timer > 0) continue
       const def = WEAPON_DEF[w.id]
-      const rng = def.range + (w.lvl - 1) * 26
-      // 双联座的射速加成只作用于后管位（见 twinRate 注释）
-      const twinBoost = (plan[wi]?.barrel === 1) ? (1 + this.twinRate) : 1
+      // 射程 = (基础 + 等级) × 声场延伸。放在索敌处算而不是写进武器数值，
+      // 这样属性卡买到手立刻生效，不用回头重算每台武器的缓存值。
+      const rng = (def.range + (w.lvl - 1) * 26) * (1 + this.st.range)
+      // 双联座的射速加成只作用于后管位（见 Stats.twinRate 注释）
+      const twinBoost = (plan[wi]?.barrel === 1) ? (1 + this.st.twinRate) : 1
 
       if (w.id === 'sonar') {
         // 声呐是全向的：射程内有鱼就发一圈波，不需要瞄准。
@@ -1408,7 +1648,9 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
         const first = this.nearestEnemy(rng); if (!first) continue
         this.fireArc(first, w)
       }
-      w.timer = def.iv / ((1 + (w.lvl - 1) * 0.12) * twinBoost)
+      // 射速：高压供能（st.rate）在这里生效。改的是**下一次冷却的长度**
+      // 而不是已有 timer，所以属性变化立刻反映在下一发上。
+      w.timer = def.iv / ((1 + (w.lvl - 1) * 0.12) * twinBoost * (1 + this.st.rate))
     }
   }
 
@@ -1659,7 +1901,14 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
   }
 
   private drainOxygen(dt: number): void {
-    this.o2 -= this.layer().drain * dt
+    // 净耗氧 = 层数基础 − 循环泵回氧 + 贪食腺体的代谢代价
+    let net = this.layer().drain
+    if (this.hasRelic('gluttony')) net += 0.6
+    net -= this.st.regen
+    this.o2 -= net * dt
+    // 循环泵在耗氧为负时应该是"回氧"，但仍然要封顶在上限内，
+    // 否则会出现"氧气 100/100 但还在涨"的读数。
+    if (this.o2 > this.o2Max) this.o2 = this.o2Max
     if (this.o2 <= 0) { this.o2 = 0; this.showResult(false) }
   }
 
@@ -1808,7 +2057,8 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
     }
 
     // 场地边界
-    neon(g, UI.cyanDim, () => { g.strokeRect(12, 12, W - 24, H - 24) }, { width: 1, alpha: 0.35, bloom: false })
+    // 全屏边框：极淡的"仪表盘边缘"暗示，alpha 从 0.35 压到 0.15，否则太抢眼
+    neon(g, UI.cyanDim, () => { g.strokeRect(12, 12, W - 24, H - 24) }, { width: 1, alpha: 0.15, bloom: false })
 
     // ---- 暗幕：压暗背景图 + 矢量层；实体在它之上绘制（V4 §2 铁律）----
     const dim = this.gDim
@@ -2287,7 +2537,8 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
       const X = (lx: number, ly: number) => b.x + lx * ca - ly * sa
       const Y = (lx: number, ly: number) => b.y + lx * sa + ly * ca
       const L = b.size, half = L / 2
-      const a = 0.95 * blink * f          // f: 沉底后线性渐隐
+      const a = 0.42 * blink * f          // f: 沉底后线性渐隐 —— 骨头是「待拾取物」不是主角，
+                                          // 亮度必须低于敌人与子弹，否则满场白骨抢走全部注意力
 
       neonLine(g, X(-half, 0), Y(-half, 0), X(half, 0), Y(half, 0), BONE, { width: 1.6, alpha: a, bloom: false })
       // 肋骨 4 对：中间宽、两端窄
@@ -2400,7 +2651,8 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
 
       // 独立索敌：优先当前锁定目标，否则取射程内最近的
       const def = WEAPON_DEF[w.id]
-      const rng = def.range + (w.lvl - 1) * 26
+      // 必须和 autoFire 用同一个射程，否则塔会指向一个实际打不到的目标
+      const rng = (def.range + (w.lvl - 1) * 26) * (1 + this.st.range)
       const tgt = this.nearestEnemy(rng)
       let want = this.aim
       if (tgt) want = Math.atan2(tgt.y - mountY, tgt.x - mountX)
@@ -2415,15 +2667,10 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
       this.drawTurret(gt, mountX, mountY, ang, TURRET_L * k, TURRET_W * k, w)
     }
 
-    // ---- 空挂架：没装武器的座也要画 ----
-    // 这是"前瞻性"的可见部分：玩家能看见艇上还有几个空位，
-    // 商店里那张「双联挂载」卡才会被理解成"填满这个洞"而不是抽象数字。
-    const used = new Set(plan.map(p => p.seat))
-    for (let s = 0; s < HARDPOINTS.length; s++) {
-      if (used.has(s)) continue
-      const [mx, my] = MP(s, 0)
-      this.drawEmptyMount(gt, mx, my, this.aim, TURRET_L * 0.78, TURRET_W * 0.78)
-    }
+    // ---- 空挂架：已移到商店「挂载示意图」中展示 ----
+    // 战斗中不在艇身画空座虚框：开局 3 个悬浮圆角框随艇身旋转，
+    // 玩家完全看不懂（实测被当成"bug 框框"）。玩家真正需要理解"还有空位"
+    // 的时机是在商店看扩容卡，那里有专用的座/管位示意图，比战斗里悬浮框清晰。
 
     // ---- 双联连接梁：两根管之间一道短横梁 ----
     // 没有这道梁，双联看起来就是"两个挨着的独立塔"而不是"并联的一座"
@@ -2692,11 +2939,15 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
       this.txt(`${Math.round(k * 100)}%`, dx2 + dw + 8, dy2 - 2, '12px', TXT.dim, MONO)
     }
 
-    // ④ 生物质（含倍率后的预估值，让"再赌一层"的收益可见）
-    const est = Math.floor(this.biomass * this.mult)
-    this.txt(`生物质 ${this.biomass}`, W - 24, by + 2, '18px', TXT.jade, MONO, 'right')
-    if (this.mult > 1) {
-      this.txt(`上浮可得 ${est}`, W - 24, by + 26, '13px', TXT.amber, MONO, 'right')
+    // ④ 生物质：只在层末决策（decide）/ 下潜时显示。
+    // 战斗中显示它是噪音——玩家此刻关心的是波次和鱼骨，不是"上浮能换多少"。
+    // 而且它和下方常驻的鱼骨 bank 视觉重复（都在右上），两笔数字挤一起看不懂。
+    if (this.phase !== 'wave') {
+      const est = Math.floor(this.biomass * this.mult)
+      this.txt(`生物质 ${this.biomass}`, W - 24, by + 2, '18px', TXT.jade, MONO, 'right')
+      if (this.mult > 1) {
+        this.txt(`上浮可得 ${est}`, W - 24, by + 26, '13px', TXT.amber, MONO, 'right')
+      }
     }
     // 鱼骨（商店货币）必须**常驻** HUD，不能只在商店里出现。
     // 玩家要在战斗中就看见数字在涨，才会把"捡鱼骨"和"待会儿能买什么"连起来 ——
@@ -2769,6 +3020,32 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
     // 挂载计数：解锁卡买了之后这里会跳，是"塔在成长"的即时反馈
     this.txt(`挂载 ${this.weapons.length}/${this.maxWeapons}`,
       24, sy - 16, '12px', this.weapons.length < this.maxWeapons ? TXT.dim : TXT.cyan, MONO)
+
+    // —— 遗物槽（右下角）——
+    // 遗物必须**战斗中也能看见**：它们的效果大多是条件触发的
+    // （低氧增伤、连续不受击加速），玩家得知道"我现在有条件可触发"，
+    // 否则这些规则等于不存在 —— 他永远不知道自己为什么突然变快了。
+    {
+      const rs = 30, rgap = 36
+      const rx0 = this.scale.width - 24 - RELIC_SLOTS * rgap + (rgap - rs)
+      for (let i = 0; i < RELIC_SLOTS; i++) {
+        const rx = rx0 + i * rgap
+        const id = this.relics[i]
+        if (!id) {
+          g.lineStyle(1, UI.line, 0.4)
+          g.strokeRoundedRect(rx, sy + 7, rs, rs, 7)
+          continue
+        }
+        g.fillStyle(UI.panelHi, 0.8); g.fillRoundedRect(rx, sy + 7, rs, rs, 7)
+        // 生效中的遗物加一圈呼吸光：条件触发类的遗物需要"它现在有用"的提示
+        const live = this.relicActive(id)
+        neon(g, live ? UI.cyanHi : BONE,
+          () => { g.strokeRoundedRect(rx, sy + 7, rs, rs, 7) },
+          { width: live ? 2 : 1.2, alpha: live ? 0.95 : 0.6, bloom: live })
+        this.drawRelicIcon(g, id, rx + rs / 2, sy + 22, 11)
+      }
+      this.txt('遗物', this.scale.width - 24, sy - 16, '12px', TXT.dim, MONO, 'right')
+    }
     // 技能冷却
     const ready = this.burstTimer <= 0
     const k = ready ? 1 : 1 - this.burstTimer / O2.burstCd
@@ -2778,8 +3055,8 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
     this.txt(ready ? '空格' : `${Math.ceil(this.burstTimer)}`, cx, sy + 22, '13px',
       ready ? TXT.cyber : TXT.mute, MONO, 'center')
 
-    // 操作提示
-    if (this.phase === 'wave') {
+    // 操作提示：只在开局引导，打久了就不该再占屏幕
+    if (this.phase === 'wave' && this.layerIdx === 0 && this.waveInLayer <= 1) {
       this.txt('WASD 移动 · 武器自动开火 · 空格 排气爆发(-20 O₂)',
         24, this.scale.height - 92, '13px', TXT.mute, FONT)
     }
@@ -2930,6 +3207,80 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
   }
 
   // ==========================================================================
+  // 属性与遗物（V6.8）
+  // ==========================================================================
+
+  /**
+   * 加一点属性（唯一入口）。
+   *
+   * 所有加成型卡都必须走这里，好处是**上限只在这个函数里钳一次**。
+   * 之前每张卡自己写 `Math.min(0.6, x + 0.25)`，漏一张就出 bug。
+   */
+  addStat(k: keyof Stats, v: number): void {
+    const cap = STAT_CAP[k]
+    this.st[k] = cap === undefined ? this.st[k] + v : Math.min(cap, this.st[k] + v)
+  }
+
+  /** 本局是否已装备某个遗物 */
+  private hasRelic(id: RelicId): boolean { return this.relics.includes(id) }
+
+  /**
+   * 遗物的"代价"在这里生效（拿到时立即结算一次）。
+   *
+   * 为什么代价要写进 apply 而不是写成负的 stats：Brotato 的道具设计精髓就是
+   * **有取舍**。纯增益的道具不需要抉择，只是"拿到就变强"；带代价的道具才会
+   * 让玩家在商店里停下来想"我这局的 build 吃不吃得住这个副作用"。
+   */
+  private equipRelic(id: RelicId): void {
+    if (this.relics.includes(id) || this.relics.length >= RELIC_SLOTS) return
+    this.relics.push(id)
+    const r = RELIC_DEF[id]
+    if (r.onEquip) r.onEquip(this)
+    // 装备瞬间必须重算一次上限：有遗物会改 o2Bonus（如「骨殖转化」-15）
+    this.o2Max = this.layer().o2Max + this.st.o2Bonus
+    if (this.o2 > this.o2Max) this.o2 = this.o2Max
+  }
+
+  /**
+   * 这个遗物的条件**此刻**是否满足。
+   *
+   * 只用于 HUD 的呼吸光提示。条件触发类遗物的最大问题是"玩家不知道它生效了"，
+   * 光效一亮，因果关系立刻建立："哦，我现在没挨打所以更快了"。
+   * 常驻生效的遗物（贪食腺体这类）返回 false —— 一直亮着的光等于没有光。
+   */
+  private relicActive(id: RelicId): boolean {
+    switch (id) {
+      case 'echo_heart': return this.o2 / this.o2Max < 0.3
+      case 'current_fin': return this.noHitT >= 3
+      case 'silent_plating': return this.plateT > 0
+      case 'abyss_mark': return this.layerIdx > 0
+      default: return false
+    }
+  }
+
+  /** 鱼骨换钱的倍率（打捞运 + 潮汐罗盘 + 贪食腺体）。只影响钱，不影响回氧 */
+  private boneValueMul(): number {
+    return 1 + this.st.luck
+      + (this.hasRelic('tidal_compass') ? 0.3 : 0)
+      + (this.hasRelic('gluttony') ? 1 : 0)
+  }
+
+  /**
+   * 动态伤害加成。
+   *
+   * 和 `st.dmg`（静态卡加成）分开，因为这一部分是**逐帧变化的**——
+   * 「回声心脏」在低氧时才给伤害，必须每次开火时现算，不能存进 stats。
+   */
+  private dmgMulNow(): number {
+    let m = 1 + this.st.dmg
+    // 回声心脏：低氧时增伤。氧气既是血又是输出 —— 这是"敢不敢贴着死亡线打"的赌注
+    if (this.hasRelic('echo_heart') && this.o2 / this.o2Max < 0.3) m *= 1.5
+    // 深潜印记：每下潜一层 +12%，跨层累积（越深越强，鼓励赌下潜）
+    if (this.hasRelic('abyss_mark')) m *= 1 + 0.12 * this.layerIdx
+    return m
+  }
+
+  // ==========================================================================
   // 商店：波间三选一
   // ==========================================================================
   private pool: Upgrade[] = [
@@ -2982,32 +3333,102 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
     {
       id: 't_twin', name: '齐射同步', desc: '双联座射速 +25%', kind: 'mount',
       cost: 45,
-      apply: s => { s.twinRate = Math.min(0.6, s.twinRate + 0.25) },
+      apply: s => s.addStat('twinRate', 0.25),
       // 没双联就没意义
       dead: s => s.maxWeapons < 5,
     },
 
-    // —— 生存 / 机动 ——
+    // —— 属性卡（V6.8）——
+    //
+    // 这一组和「遗物」的分工：属性卡是**可预期的线性成长**（伤害 +12%），
+    // 买它的过程是"我的共振强度又高了一点"。它保证每一波都有东西可买 ——
+    // 如果商店只有遗物，前期没攒够钱时就会出现"什么都买不起"的空波次。
+    //
+    // 定价逻辑：伤害/射速这类直接提升 dps 的定 30 上下（一波收入的 3/4），
+    // 生存类（护甲/闪避）定 26~28（便宜一点，因为它们的收益是"不死"
+    // 而不是"打得快"，玩家的感知更弱，得靠低价推着买）。
     {
-      id: 'speed', name: '增压推进', desc: '移速 +15%', kind: 'surv',
+      id: 'speed', name: '增压推进', desc: '移速 +15%', kind: 'stat',
       cost: 24,
-      apply: s => { s.speedMul *= 1.15 },
+      apply: s => s.addStat('speed', 0.15),
     },
     {
-      id: 'pickup', name: '吸附鳍', desc: '拾取范围 +40%', kind: 'surv',
+      id: 'pickup', name: '吸附鳍', desc: '拾取范围 +40%', kind: 'stat',
       cost: 22,
-      apply: s => { s.pickupMul *= 1.4 },
+      apply: s => s.addStat('pickup', 0.4),
     },
     {
-      id: 'tank', name: '扩容气瓶', desc: '氧气上限 +20 并回满', kind: 'surv',
+      id: 'tank', name: '扩容气瓶', desc: '氧气上限 +20 并回满', kind: 'stat',
       cost: 36,
-      apply: s => { s.o2Bonus += 20; s.o2Max = s.layer().o2Max + s.o2Bonus; s.o2 = s.o2Max },
+      apply: s => { s.addStat('o2Bonus', 20); s.o2Max = s.layer().o2Max + s.st.o2Bonus; s.o2 = s.o2Max },
     },
     {
-      id: 'gill', name: '循环鳃', desc: '击杀额外回氧 +3', kind: 'surv',
+      id: 'gill', name: '循环鳃', desc: '击杀额外回氧 +3', kind: 'stat',
       cost: 28,
-      apply: s => { s.killO2 += 3 },
+      apply: s => s.addStat('killO2', 3),
     },
+    {
+      id: 's_dmg', name: '共振放大', desc: '伤害 +12%', kind: 'stat',
+      cost: 32,
+      apply: s => s.addStat('dmg', 0.12),
+    },
+    {
+      id: 's_rate', name: '高压供能', desc: '射速 +10%', kind: 'stat',
+      cost: 30,
+      apply: s => s.addStat('rate', 0.10),
+    },
+    {
+      id: 's_crit', name: '弱点解析', desc: '暴击率 +8%', kind: 'stat',
+      cost: 28,
+      apply: s => s.addStat('crit', 0.08),
+      dead: s => s.st.crit >= 0.75,
+    },
+    {
+      id: 's_range', name: '声场延伸', desc: '射程 +15%', kind: 'stat',
+      cost: 26,
+      apply: s => s.addStat('range', 0.15),
+    },
+    {
+      id: 's_armor', name: '耐压装甲', desc: '受到的伤害 −8%', kind: 'stat',
+      cost: 30,
+      apply: s => s.addStat('armor', 0.08),
+      dead: s => s.st.armor >= 0.6,
+    },
+    {
+      id: 's_dodge', name: '流体规避', desc: '一次性打击闪避 +6%', kind: 'stat',
+      cost: 28,
+      apply: s => s.addStat('dodge', 0.06),
+      dead: s => s.st.dodge >= 0.6,
+    },
+    {
+      id: 's_regen', name: '循环泵', desc: '每秒回氧 +0.4', kind: 'stat',
+      cost: 34,
+      apply: s => s.addStat('regen', 0.4),
+    },
+    {
+      id: 's_luck', name: '打捞直觉', desc: '鱼骨换钱 +15%', kind: 'stat',
+      cost: 24,
+      apply: s => s.addStat('luck', 0.15),
+    },
+
+    // —— 遗物（被动道具，V6.8）——
+    //
+    // 卡池里最贵的一类，也是唯一**会改变打法**的一类。
+    // 两个出现条件：① 槽位没满 ② 打过 2 波以上。
+    // ② 是刻意的：开局就刷出遗物的话，玩家还没建立"武器 + 属性"的基础认知，
+    // 面对一个带代价的道具无从判断值不值，只会随机乱买。
+    ...(Object.keys(RELIC_DEF) as RelicId[]).map(id => {
+      const r = RELIC_DEF[id]
+      return {
+        id: `r_${id}`, name: r.name, desc: r.desc, kind: 'relic' as const,
+        cost: r.price,
+        relicId: id,
+        apply: (s: DiveScene) => s.equipRelic(id),
+        dead: (s: DiveScene) => s.relics.length >= RELIC_SLOTS
+          || s.relics.includes(id)
+          || s.layerIdx * 4 + s.waveInLayer < 2,
+      }
+    }),
   ]
 
   private offers: Upgrade[] = []
@@ -3129,6 +3550,13 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
     this.txt('鱼骨', bankX - 42, y0 - 34, '13px', TXT.dim, FONT)
     this.txt('点击卡片购买 · 右键锁 · 1/2/3 快捷购买', W / 2, y0 - 8, '12px', TXT.mute, FONT, 'center')
 
+    // —— 两侧常驻面板：左边属性、右边遗物 ——
+    // Brotato 的商店把属性表放在卡片旁边而不是藏进二级页面，原因是：
+    // 玩家的购买决策**依赖**当前属性（我暴击已经 60% 了，再买 +8% 意义不大）。
+    // 属性看不见，商店就只能靠瞎买，build 也就无从谈起。
+    this.drawStatPanel(g, 24, y0 - 40)
+    this.drawRelicSlots(g, W - 24 - 250, y0 - 40)
+
     if (this.shopCards.length === 0) {
       for (let i = 0; i < 3; i++) {
         const up = this.offers[i] ?? this.pool[0]
@@ -3173,17 +3601,21 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
       neon(g, edgeCol, () => { g.strokeRoundedRect(c.x, c.y, c.w, c.h, 12) },
         { width: hov && afford ? 3 : 2, bloom: hov && afford })
 
-      // —— 顶部类型色条：三类卡一眼分开，不用读文字 ——
-      // 青=器械 / 琥珀=挂载扩容 / 紫=生存
-      const bandCol = up.kind === 'weapon' ? UI.cyan : up.kind === 'mount' ? UI.amber : UI.violet
+      // —— 顶部类型色条：四类卡一眼分开，不用读文字 ——
+      // 青=器械 / 琥珀=挂载扩容 / 紫=属性 / 骨白=遗物
+      const bandCol = up.kind === 'weapon' ? UI.cyan
+        : up.kind === 'mount' ? UI.amber
+        : up.kind === 'relic' ? BONE : UI.violet
       g.fillStyle(bandCol, hov ? 1 : 0.8)
       g.fillRoundedRect(c.x + 10, c.y + 10, c.w - 20, 3, 2)
 
       this.txt(String(i + 1), c.x + 16, c.y + 24, '14px', TXT.mute, MONO)
       // 类型标签（右上角）
-      const kindLabel = up.kind === 'weapon' ? '器械' : up.kind === 'mount' ? '挂载' : '生存'
-      this.txt(kindLabel, c.x + c.w - 16, c.y + 24, '12px',
-        up.kind === 'mount' ? TXT.amber : TXT.mute, FONT, 'right')
+      const kindLabel = up.kind === 'weapon' ? '器械'
+        : up.kind === 'mount' ? '挂载' : up.kind === 'relic' ? '遗物' : '属性'
+      const kindCol = up.kind === 'mount' ? TXT.amber
+        : up.kind === 'relic' ? TXT.bone : TXT.mute
+      this.txt(kindLabel, c.x + c.w - 16, c.y + 24, '12px', kindCol, FONT, 'right')
 
       // —— 中部图示：按类型画不同的东西 ——
       const wid = up.id.startsWith('w_') ? up.id.slice(2) : null
@@ -3204,8 +3636,13 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
       } else if (up.kind === 'mount') {
         // 挂载扩容：**画座/管位示意图** —— 让玩家看见"艇上多了哪个位置"
         this.drawMountDiagram(g, cx, c.y + 62, up.id)
+      } else if (up.kind === 'relic') {
+        // 遗物：画一帧专属符号（每个遗物形状不同，不靠颜色区分）
+        this.drawRelicIcon(g, up.relicId ?? 'echo_heart', cx, c.y + 62, 22)
       } else {
-        neonCircle(g, cx, c.y + 62, 20, UI.violet, { width: 2, bloom: false })
+        // 属性卡：画一个**进度条**，条里填的是"这个属性现在到哪了"
+        // 比抽象圆环有用：玩家能看见"共振强度已经 +24%，再加 12% 就到 36%"
+        this.drawStatGauge(g, cx, c.y + 62, up.id)
       }
 
       this.txt(up.name, cx, c.y + 122, '20px', TXT.cyber, FONT, 'center')
@@ -3234,10 +3671,22 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
         foot = `${this.weapons.length} 台器械同时 +1 级`
       } else if (up.kind === 'mount') {
         foot = up.id === 't_twin'
-          ? `双联座射速 +25%（当前 +${Math.round(this.twinRate * 100)}%）`
+          ? `双联座射速 +25%（当前 +${Math.round(this.st.twinRate * 100)}%）`
           : `挂载位 ${this.maxWeapons} → ${up.id === 't_slot5' ? 5 : 6}`
+      } else if (up.kind === 'relic') {
+        // 遗物：写清占哪个槽 + 代价。**代价必须用告警色单独一行** ——
+        // 把代价藏在描述里等于骗玩家，他会在第三波才发现自己氧气少了 15。
+        foot = this.relics.length < RELIC_SLOTS
+          ? `占用遗物槽 ${this.relics.length + 1} / ${RELIC_SLOTS}`
+          : '遗物槽已满'
       }
       if (foot) this.txt(foot, cx, c.y + 196, '12px', footCol, FONT, 'center')
+
+      // 遗物的代价单独一行，告警色，画在状态行下方
+      if (up.kind === 'relic' && up.relicId) {
+        const c2 = RELIC_DEF[up.relicId].cost2
+        if (c2) this.txt(c2, cx, c.y + 214, '11px', TXT.warn, FONT, 'center')
+      }
 
       // —— 底部价格行：鱼骨图标 + 价格 + 锁定按钮 ——
       const pyRow = c.y + c.h - 30
@@ -3376,6 +3825,239 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
     void plan
   }
 
+  /**
+   * 属性面板（商店左侧）。
+   *
+   * 每行：色块 + 名称 + 数值。数值为 0 的行用 mute 色压暗 ——
+   * 这样一眼能看出"我这一局往哪几个方向点了"，而不是一整列数字。
+   * 触顶的属性（护甲/闪避）在数值后补一个 MAX 标记，
+   * 否则玩家会一直买，然后困惑为什么没变化。
+   */
+  private drawStatPanel(g: Phaser.GameObjects.Graphics, x: number, y: number): void {
+    const w = 250, rowH = 30
+    const h = 44 + STAT_META.length * rowH
+    g.fillStyle(UI.panel, 0.6); g.fillRoundedRect(x, y, w, h, 10)
+    neon(g, UI.cyanDim, () => { g.strokeRoundedRect(x, y, w, h, 10) },
+      { width: 1, alpha: 0.5, bloom: false })
+    this.txt('潜航器状态', x + 14, y + 12, '14px', TXT.cyber, FONT)
+
+    for (let i = 0; i < STAT_META.length; i++) {
+      const m = STAT_META[i]
+      const v = this.st[m.k]
+      const ry = y + 40 + i * rowH
+      const on = v > 0.0001
+      // 色块：既是装饰也是色标，和卡面顶部的类型色条同一套语言
+      g.fillStyle(m.col, on ? 0.95 : 0.3)
+      g.fillRect(x + 14, ry + 4, 4, 12)
+      this.txt(m.name, x + 26, ry + 2, '13px', on ? TXT.main : TXT.mute, FONT)
+
+      const cap = STAT_CAP[m.k]
+      const maxed = cap !== undefined && v >= cap - 0.0001
+      const vTxt = m.pct ? `${Math.round(v * 100)}%` : (m.k === 'regen' ? v.toFixed(1) : `${Math.round(v)}`)
+      this.txt(maxed ? `${vTxt} MAX` : vTxt, x + w - 14, ry + 2, '14px',
+        maxed ? TXT.amber : (on ? TXT.cyber : TXT.mute), MONO, 'right')
+    }
+  }
+
+  /**
+   * 遗物槽（商店右侧）。
+   *
+   * 已装的画图标 + 名称 + 代价（代价用告警色小字），空槽画虚框 + 序号。
+   * 代价**必须在槽里也写一遍**：玩家在第 8 波看到氧气上限变低时，
+   * 需要一个地方回查"这是哪个遗物带来的"，否则他会认为是 bug。
+   */
+  private drawRelicSlots(g: Phaser.GameObjects.Graphics, x: number, y: number): void {
+    const w = 250
+    const cellH = 74
+    const h = 44 + RELIC_SLOTS * cellH
+    g.fillStyle(UI.panel, 0.6); g.fillRoundedRect(x, y, w, h, 10)
+    neon(g, BONE, () => { g.strokeRoundedRect(x, y, w, h, 10) },
+      { width: 1, alpha: 0.5, bloom: false })
+    this.txt(`遗物 ${this.relics.length} / ${RELIC_SLOTS}`, x + 14, y + 12, '14px', TXT.bone, FONT)
+
+    for (let i = 0; i < RELIC_SLOTS; i++) {
+      const ry = y + 38 + i * cellH
+      const bx = x + 12, bw = w - 24, bh = cellH - 8
+      const id = this.relics[i]
+      if (!id) {
+        g.lineStyle(1, UI.line, 0.5)
+        g.strokeRoundedRect(bx, ry, bw, bh, 8)
+        this.txt(`空槽 ${i + 1}`, bx + bw / 2, ry + bh / 2 - 8, '12px', TXT.mute, FONT, 'center')
+        continue
+      }
+      const r = RELIC_DEF[id]
+      g.fillStyle(UI.panelHi, 0.75); g.fillRoundedRect(bx, ry, bw, bh, 8)
+      neon(g, BONE, () => { g.strokeRoundedRect(bx, ry, bw, bh, 8) },
+        { width: 1.2, alpha: 0.75, bloom: false })
+      this.drawRelicIcon(g, id, bx + 26, ry + bh / 2, 14)
+      this.txt(r.name, bx + 50, ry + 8, '14px', TXT.bone, FONT)
+      // 描述可能较长，用小字挤进两行宽度的空间（槽宽 226，14px 约 16 字/行）
+      this.txt(r.desc, bx + 50, ry + 27, '10px', TXT.dim, FONT)
+      if (r.cost2) this.txt(r.cost2, bx + 50, ry + 44, '10px', TXT.warn, FONT)
+    }
+  }
+
+  /**
+   * 遗物图标。八个遗物各自一个**形状签名**，刻意不靠颜色区分 ——
+   *
+   * 商店里三张卡并排，颜色在小尺寸下会互相污染（尤其都带 bloom 时），
+   * 形状不会。玩家第二次看到"带裂纹的心形"就会认出回声心脏，
+   * 这才叫"认得出来"，颜色只能做到"看起来不一样"。
+   */
+  private drawRelicIcon(g: Phaser.GameObjects.Graphics, id: RelicId,
+                        cx: number, cy: number, r: number): void {
+    const col = BONE
+    const lw = 2
+    g.lineStyle(lw, col, 0.95)
+    switch (id) {
+      case 'echo_heart': {
+        // 心形 + 一道裂纹：低氧才发动的东西，画成"破了的心"
+        g.beginPath()
+        g.moveTo(cx, cy + r * 0.75)
+        g.lineTo(cx - r, cy - r * 0.15)
+        g.arc(cx - r * 0.5, cy - r * 0.45, r * 0.5, Math.PI * 0.85, Math.PI * 1.9)
+        g.arc(cx + r * 0.5, cy - r * 0.45, r * 0.5, Math.PI * 1.1, Math.PI * 0.15)
+        g.closePath(); g.strokePath()
+        g.lineStyle(1.4, UI.danger, 0.9)
+        g.beginPath()
+        g.moveTo(cx - 2, cy - r * 0.5); g.lineTo(cx + 3, cy + r * 0.1)
+        g.lineTo(cx - 3, cy + r * 0.35)
+        g.strokePath()
+        break
+      }
+      case 'osteoblast': {
+        // 骨头：两端各两个圆，中间一根
+        g.beginPath(); g.moveTo(cx - r * 0.45, cy - r * 0.3); g.lineTo(cx + r * 0.45, cy + r * 0.3)
+        g.strokePath()
+        for (const [sx, sy] of [[-1, -1], [-1, 1], [1, -1], [1, 1]] as const) {
+          g.fillStyle(col, 0.9)
+          g.fillCircle(cx + sx * r * 0.5, cy + sy * r * 0.38, r * 0.24)
+        }
+        break
+      }
+      case 'tidal_compass': {
+        // 罗盘：外圈 + 四向指针（菱形）
+        g.strokeCircle(cx, cy, r * 0.8)
+        g.beginPath()
+        g.moveTo(cx, cy - r * 0.7); g.lineTo(cx + r * 0.35, cy)
+        g.lineTo(cx, cy + r * 0.7); g.lineTo(cx - r * 0.35, cy)
+        g.closePath(); g.strokePath()
+        break
+      }
+      case 'resonance_core': {
+        // 同心弧 ×3 + 中心点：向外扩的共振
+        for (let i = 1; i <= 3; i++) {
+          g.lineStyle(lw - i * 0.35, col, 1 - i * 0.2)
+          g.beginPath(); g.arc(cx, cy, r * 0.3 * i, -0.9, 0.9); g.strokePath()
+          g.beginPath(); g.arc(cx, cy, r * 0.3 * i, Math.PI - 0.9, Math.PI + 0.9); g.strokePath()
+        }
+        g.fillStyle(col, 1); g.fillCircle(cx, cy, 3)
+        break
+      }
+      case 'gluttony': {
+        // 张开的大口：一个扇形 + 三颗尖牙（贪婪）
+        g.beginPath(); g.arc(cx, cy, r * 0.8, Math.PI * 0.15, Math.PI * 0.85); g.strokePath()
+        g.beginPath(); g.arc(cx, cy, r * 0.8, Math.PI * 1.15, Math.PI * 1.85); g.strokePath()
+        g.fillStyle(col, 0.85)
+        for (let i = -1; i <= 1; i++) {
+          g.fillTriangle(cx + i * r * 0.4 - 4, cy - r * 0.1,
+                         cx + i * r * 0.4 + 4, cy - r * 0.1,
+                         cx + i * r * 0.4, cy + r * 0.35)
+        }
+        break
+      }
+      case 'abyss_mark': {
+        // 向下的三层箭头：越深越强
+        for (let i = 0; i < 3; i++) {
+          const yy = cy - r * 0.5 + i * r * 0.5
+          g.lineStyle(lw, col, 0.5 + i * 0.25)
+          g.beginPath()
+          g.moveTo(cx - r * 0.5, yy); g.lineTo(cx, yy + r * 0.3); g.lineTo(cx + r * 0.5, yy)
+          g.strokePath()
+        }
+        break
+      }
+      case 'current_fin': {
+        // 鳍：三条流线 + 一片三角
+        g.fillStyle(col, 0.85)
+        g.fillTriangle(cx - r * 0.6, cy + r * 0.5, cx + r * 0.5, cy + r * 0.1, cx - r * 0.2, cy - r * 0.6)
+        g.lineStyle(1.3, UI.cyan, 0.8)
+        for (let i = 0; i < 3; i++) {
+          const yy = cy - r * 0.3 + i * r * 0.35
+          g.beginPath(); g.moveTo(cx + r * 0.25, yy); g.lineTo(cx + r * 0.9, yy - 4); g.strokePath()
+        }
+        break
+      }
+      case 'silent_plating': {
+        // 盾牌 + 内部竖线（装甲板）
+        g.beginPath()
+        g.moveTo(cx, cy - r * 0.8); g.lineTo(cx + r * 0.65, cy - r * 0.4)
+        g.lineTo(cx + r * 0.5, cy + r * 0.5); g.lineTo(cx, cy + r * 0.8)
+        g.lineTo(cx - r * 0.5, cy + r * 0.5); g.lineTo(cx - r * 0.65, cy - r * 0.4)
+        g.closePath(); g.strokePath()
+        g.lineStyle(1.2, col, 0.6)
+        for (let i = -1; i <= 1; i++) {
+          g.beginPath(); g.moveTo(cx + i * r * 0.28, cy - r * 0.45)
+          g.lineTo(cx + i * r * 0.28, cy + r * 0.45); g.strokePath()
+        }
+        break
+      }
+    }
+  }
+
+  /**
+   * 属性卡的"当前进度条"。
+   *
+   * 为什么画进度而不是抽象图标：属性卡的价值取决于**我已经堆了多少**。
+   * 同样的"暴击 +8%"，在 0% 和 60% 时是完全不同的两个决策（后者快触顶了）。
+   * 条里同时画出"现在"和"买了之后"，玩家不用心算。
+   */
+  private drawStatGauge(g: Phaser.GameObjects.Graphics, cx: number, cy: number,
+                        cardId: string): void {
+    // 卡 id → 属性键 + 这一张给多少
+    const MAP: Record<string, { k: keyof Stats; add: number }> = {
+      speed:   { k: 'speed',   add: 0.15 },
+      pickup:  { k: 'pickup',  add: 0.4 },
+      tank:    { k: 'o2Bonus', add: 20 },
+      gill:    { k: 'killO2',  add: 3 },
+      s_dmg:   { k: 'dmg',     add: 0.12 },
+      s_rate:  { k: 'rate',    add: 0.10 },
+      s_crit:  { k: 'crit',    add: 0.08 },
+      s_range: { k: 'range',   add: 0.15 },
+      s_armor: { k: 'armor',   add: 0.08 },
+      s_dodge: { k: 'dodge',   add: 0.06 },
+      s_regen: { k: 'regen',   add: 0.4 },
+      s_luck:  { k: 'luck',    add: 0.15 },
+    }
+    const m = MAP[cardId]
+    if (!m) { neonCircle(g, cx, cy, 20, UI.violet, { width: 2, bloom: false }); return }
+    // 满值：有上限的用上限，没有的给一个"看起来合理的"参考刻度
+    const full = STAT_CAP[m.k] ?? (m.k === 'o2Bonus' ? 100 : m.k === 'killO2' ? 12 : 1.0)
+    const cur = Phaser.Math.Clamp(this.st[m.k] / full, 0, 1)
+    const next = Phaser.Math.Clamp((this.st[m.k] + m.add) / full, 0, 1)
+    const w = 116, h = 12
+    const x0 = cx - w / 2, y0 = cy - h / 2
+
+    g.fillStyle(UI.panel, 0.85); g.fillRoundedRect(x0, y0, w, h, 5)
+    // "买了会到哪"先画一层浅色，再在上面盖"现在已经到哪" ——
+    // 两层叠着看，增量就是中间那段差值，一眼可见
+    g.fillStyle(UI.violet, 0.35); g.fillRoundedRect(x0, y0, Math.max(2, w * next), h, 5)
+    g.fillStyle(UI.violet, 0.95); g.fillRoundedRect(x0, y0, Math.max(2, w * cur), h, 5)
+    neon(g, UI.violet, () => { g.strokeRoundedRect(x0, y0, w, h, 5) },
+      { width: 1.2, alpha: 0.8, bloom: false })
+
+    // 增量段标一个箭头，避免玩家看不出"浅色那段是我要买的"
+    if (next > cur + 0.01) {
+      const mx = x0 + w * (cur + next) / 2
+      g.fillStyle(UI.cyanHi, 0.9)
+      g.fillTriangle(mx - 3, y0 - 4, mx + 3, y0 - 4, mx, y0 + 1)
+    }
+    const shown = m.k === 'o2Bonus' || m.k === 'killO2' || m.k === 'regen'
+      ? `${this.st[m.k].toFixed(m.k === 'regen' ? 1 : 0)} → ${(this.st[m.k] + m.add).toFixed(m.k === 'regen' ? 1 : 0)}`
+      : `${Math.round(this.st[m.k] * 100)}% → ${Math.round(Math.min(full, this.st[m.k] + m.add) * 100)}%`
+    this.txt(shown, cx, cy + 14, '12px', TXT.cyber, MONO, 'center')
+  }
+
   // （V6.7：pickUpgrade 已拆成 buyCard / reroll / toggleLock / leaveShop，
   //  商店从"免费三选一"改成鱼骨经济后可以买多张。）
 
@@ -3397,7 +4079,7 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
     this.waveInLayer = 0
     this.mult += 0.5
     const L = this.layer()
-    this.o2Max = L.o2Max + this.o2Bonus
+    this.o2Max = L.o2Max + this.st.o2Bonus
     this.o2 = Math.min(this.o2 - toll, this.o2Max)
     this.clearHits()
     this.enemies = []; this.bones = []; this.pulses = []; this.debris = []
@@ -3565,7 +4247,9 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
     this.sparks = []; this.floats = []
     this.biomass = 0
     this.bank = 0            // 鱼骨货币也要清零，否则重开一局带着上局的存款
-    this.speedMul = 1; this.pickupMul = 1; this.killO2 = PLAYER.killO2
+    this.st = NEW_STATS()
+    this.relics = []         // 遗物同理：带着上局的遗物重开会让难度曲线失真
+    this.noHitT = 0; this.plateT = 0
     this.burstTimer = 0
     this.px = this.scale.width / 2; this.py = this.scale.height / 2
     this.clearHits()
@@ -3640,6 +4324,16 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
       leaveShop: () => this.leaveShop(),
       bank: () => this.bank,
       setBank: (v: number) => { this.bank = v },
+      // V6.8：属性与遗物
+      stats: () => ({ ...this.st }),
+      addStat: (k: keyof Stats, v: number) => this.addStat(k, v),
+      relics: () => this.relics.slice(),
+      equipRelic: (id: RelicId) => this.equipRelic(id),
+      dmgMul: () => this.dmgMulNow(),
+      boneMul: () => this.boneValueMul(),
+      noHit: () => this.noHitT,
+      setNoHit: (v: number) => { this.noHitT = v },
+      hurtPlayer: (amount: number) => this.damagePlayer(amount, 0, 1),
       refill: () => { this.o2 = this.o2Max },
       hit: (i: number) => {
         const rs = (this as unknown as { __uiHitRoutes: { onClick: () => void }[] }).__uiHitRoutes ?? []
