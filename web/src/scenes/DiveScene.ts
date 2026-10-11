@@ -1157,7 +1157,17 @@ export default class DiveScene extends Phaser.Scene {
 
     this.drawEnv()
     this.draw()
-    this.drawHud()
+    // 弹窗相位（shop/decide/result）**不画战斗 HUD** —— 否则氧气条、波次点、
+    // 武器条、排气提示全叠在弹窗上，这正是之前"弹窗界面很乱"的主因。
+    // 弹窗各自画需要的上下文（鱼骨余额 / 下潜赌注 / 层数），不再复用战斗 HUD。
+    if (this.phase === 'wave' || this.phase === 'descending') this.drawHud()
+    else { this.gHud.clear(); this.hideTexts() }   // 弹窗相位：HUD 图形在独立 Graphics 上、
+                             // 数字文字在 txtPool 对象池上，两者都只在 drawHud 内清/隐藏；
+                             // 不调它（被门控）就残留最后一帧战斗 HUD，叠在弹窗上
+    // 弹窗分派（原在 drawHud 末尾，drawHud 相位门控后必须独立出来）
+    if (this.phase === 'shop') this.drawShop(this.g)
+    if (this.phase === 'decide') this.drawDecide(this.g)
+    if (this.phase === 'result') this.drawResult(this.g)
   }
 
   private movePlayer(dt: number): void {
@@ -1289,6 +1299,9 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
     }
     const d = amount * (1 - this.st.armor)
     this.o2 -= d
+    // 氧气归零 = 溺水 = 失败结算（与 drainOxygen 一致，否则 boss 震击打死玩家
+    // 却卡在战斗帧不进结算屏，实测 o2 被打到 -2710 仍停在 decide 相位）。
+    if (this.o2 <= 0) { this.o2 = 0; this.showResult(false); return }
     this.hurtFlash = 0.35
     this.noHitT = 0
     this.plateT = 1.5
@@ -3136,9 +3149,9 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
     }
 
     if (this.phase === 'descending') this.drawDescending(g)
-    if (this.phase === 'shop') this.drawShop(g)
-    if (this.phase === 'decide') this.drawDecide(g)
-    if (this.phase === 'result') this.drawResult(g)
+    // shop/decide/result 的弹窗分派已移到 update() —— drawHud 被相位门控后，
+    // 放在这里的分派在弹窗相位永远执行不到（踩过的坑：弹窗直接消失，
+    // 且 HUD 的独立 Graphics 不再 clear，画面残留最后一帧战斗 HUD）。
   }
 
   // ---- 文字对象池：避免每帧 new Text 造成 GC 抖动 ----
@@ -3532,7 +3545,7 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
 
   private drawShop(g: Phaser.GameObjects.Graphics): void {
     const W = this.scale.width, H = this.scale.height
-    g.fillStyle(UI.abyss, 0.72); g.fillRect(0, 0, W, H)
+    this.drawSeaBackdrop(g, W, H, 0.70)
 
     const cw = 220, ch = 268, gap = 24
     const total = cw * 3 + gap * 2
@@ -4110,13 +4123,12 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
 
   private drawDecide(g: Phaser.GameObjects.Graphics): void {
     const W = this.scale.width, H = this.scale.height
-    g.fillStyle(UI.abyss, 0.80); g.fillRect(0, 0, W, H)
+    this.drawSeaBackdrop(g, W, H, 0.80)
 
     const pw = Math.min(720, W - 60)
     const ph = Math.min(420, H - 60)
     const x = (W - pw) / 2, y = (H - ph) / 2
-    g.fillStyle(UI.panel, 0.96); g.fillRoundedRect(x, y, pw, ph, 14)
-    neon(g, UI.cyanDim, () => { g.strokeRoundedRect(x, y, pw, ph, 14) }, { width: 1, alpha: 0.9, bloom: false })
+    this.glassPanel(g, x, y, pw, ph, UI.cyanDim)
 
     const toll = this.layer().toll
     const next = LAYERS[Math.min(this.layerIdx + 1, LAYERS.length - 1)]
@@ -4201,11 +4213,10 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
 
   private drawResult(g: Phaser.GameObjects.Graphics): void {
     const W = this.scale.width, H = this.scale.height
-    g.fillStyle(UI.abyss, 0.85); g.fillRect(0, 0, W, H)
+    this.drawSeaBackdrop(g, W, H, 0.85)
     const pw = Math.min(500, W - 60), ph = 300
     const x = (W - pw) / 2, y = H / 2 - ph / 2
-    g.fillStyle(UI.panel, 0.96); g.fillRoundedRect(x, y, pw, ph, 14)
-    neon(g, this.win ? UI.cyan : UI.danger, () => { g.strokeRoundedRect(x, y, pw, ph, 14) }, { width: 2, bloom: false })
+    this.glassPanel(g, x, y, pw, ph, this.win ? UI.cyan : UI.danger)
 
     // 死亡 = 溺水 = 全损（V6 §3.1）：一分钱都带不走，这是赌的代价
     const finalBio = this.win ? Math.floor(this.biomass * this.mult) : 0
@@ -4239,6 +4250,56 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
       g.fillStyle(UI.panelHi, 0.9); g.fillRoundedRect(b.x, b.y, b.w, b.h, 10)
       neon(g, UI.cyan, () => { g.strokeRoundedRect(b.x, b.y, b.w, b.h, 10) }, { width: 1, alpha: 0.8, bloom: false })
       this.txt(b.label, b.x + b.w / 2, b.y + b.h / 2, '17px', TXT.cyber, FONT, 'center')
+    }
+  }
+
+  // ==========================================================================
+  // 弹窗氛围 / 玻璃面板（V6.8b：深海玻璃拟态）
+  // ==========================================================================
+  /**
+   * 弹窗背景：替代原来纯色压暗蒙版，改成「深海渐变 + 漂浮光点 + 中心柔光晕」，
+   * 让波间商店 / 补给站 / 结算有"潜入深海舱"的氛围，而不是一块死黑。
+   * baseA 控制底色压暗：商店更透（看得见身后战斗残影），结算更暗（死亡是严肃时刻）。
+   */
+  private drawSeaBackdrop(g: Phaser.GameObjects.Graphics, W: number, H: number, baseA: number): void {
+    g.fillStyle(UI.abyss, baseA); g.fillRect(0, 0, W, H)
+    // 顶部渗下的青光（分带模拟渐变；Canvas 无径向渐变，fillGradientStyle 是 WebGL-only）
+    for (let i = 0; i < 7; i++) {
+      g.fillStyle(UI.cyan, 0.035 * (1 - i / 7)); g.fillRect(0, i * 13, W, 13)
+    }
+    // 底部渗上的紫光（深渊）
+    for (let i = 0; i < 7; i++) {
+      g.fillStyle(UI.violet, 0.04 * (1 - i / 7)); g.fillRect(0, H - (i + 1) * 13, W, 13)
+    }
+    // 中心柔光晕（呼吸）
+    const glow = 0.05 + 0.02 * Math.sin(this.t * 1.1)
+    for (let r = 7; r >= 1; r--) {
+      g.fillStyle(UI.cyan, glow * (r / 7)); g.fillEllipse(W / 2, H / 2, r * 150, r * 100)
+    }
+    // 漂浮光点：固定种子，缓慢上浮 + 呼吸，营造"水中微粒"感
+    for (let i = 0; i < 16; i++) {
+      const sx = (i * 103.7 + 11) % W
+      const span = (this.t * (10 + (i % 6) * 3)) % H
+      const yy = (H - span + (i * 61.3) % H) % H
+      const a = 0.09 + 0.07 * (0.5 + 0.5 * Math.sin(this.t * 1.4 + i * 1.7))
+      g.fillStyle(i % 4 === 0 ? UI.jade : UI.cyan, a)
+      g.fillCircle(sx, yy, 1.2 + (i % 3) * 0.5)
+    }
+  }
+
+  /**
+   * 玻璃拟态面板：半透明深色主体 + 顶部高光 + 内描边 + 霓虹外描边 + 四角铆钉。
+   * 三个弹窗的中央容器统一走这里，视觉语言一致。
+   */
+  private glassPanel(g: Phaser.GameObjects.Graphics, x: number, y: number, w: number, h: number,
+                     edge: number, bloom = false): void {
+    g.fillStyle(UI.panel, 0.95); g.fillRoundedRect(x, y, w, h, 14)
+    g.fillStyle(0xffffff, 0.05); g.fillRoundedRect(x + 3, y + 3, w - 6, 11, 6)   // 顶部高光
+    g.lineStyle(1, UI.cyanDim, 0.22); g.strokeRoundedRect(x + 2.5, y + 2.5, w - 5, h - 5, 12)  // 内描边
+    neon(g, edge, () => { g.strokeRoundedRect(x, y, w, h, 14) }, { width: 2, bloom })
+    // 四角铆钉
+    for (const [dx, dy] of [[x + 11, y + 11], [x + w - 11, y + 11], [x + 11, y + h - 11], [x + w - 11, y + h - 11]]) {
+      g.fillStyle(edge, 0.7); g.fillCircle(dx, dy, 2.4)
     }
   }
 
