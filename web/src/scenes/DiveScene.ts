@@ -38,18 +38,20 @@ import { UI, TXT, FONT, MONO } from '../config/theme'
 import { neon, neonCircle, neonLine, glowPool } from '../render/neon'
 import { registerUiHit, routeDown, routeMove } from '../ui/hitRouter'
 
-/** 氧气泡专用：全场唯一纯白，在混乱中最先被看见（V4 §3.3） */
+/** 全场唯一近白：鱼骨与受击闪白专用，在混乱中最先被看见（V4 §3.3） */
 const WHITE = 0xffffff
+/** 鱼骨色：冷白微青。比 WHITE 略偏青，让骨架在暖色/紫色生物里也能跳出来 */
+const BONE = 0xdcfffb
 
 // ---------------------------------------------------------------------------
 // 氧气基础数值（V6 §4.2）
 // ---------------------------------------------------------------------------
 const O2 = {
   max: 100,           // L1 基准上限（绘制用的分母）
-  bubbleValue: 5,     // 单个气泡回氧
-  bubbleLife: 6.0,    // 气泡存活秒数
-  bubbleBlink: 2.0,   // 最后 N 秒开始闪烁
-  pickupR: 26,        // 拾取半径
+  boneLife: 6.0,      // 鱼骨存活秒数（超时沉入黑暗消失）
+  boneBlink: 2.0,     // 最后 N 秒开始闪烁
+  boneBase: 4,        // 鱼骨回氧基数，实际按鱼体大小放大（大鱼骨更值钱）
+  pickupR: 26,        // 拾取半径（硬约束①：必须游过去，不做远程磁吸）
   burstCost: 20,      // 排气爆发消耗
   burstCd: 12,        // 排气爆发冷却
   burstR: 250,        // 排气爆发半径
@@ -59,10 +61,11 @@ const PLAYER = {
   speed: 220,
   r: 16,
   dmg: 12,
-  cd: 0.42,           // 射击间隔（秒）
-  range: 420,
-  bulletSpeed: 620,
-  pierce: 1,
+  cd: 0.42,           // 声呐脉冲发射间隔（秒）
+  range: 420,         // 脉冲最大半径（射程）
+  pulseSpeed: 620,    // 波前扩散速度 px/s
+  pulseWidth: 26,     // 波前判定厚度（越厚越容易扫中）
+  pierce: 1,          // 「声呐功率」：每级给脉冲 +55 射程
   killO2: 0,          // 击杀额外回氧（被动「循环鳃」加这个）
 }
 
@@ -133,13 +136,43 @@ interface Enemy {
   flash: number      // 命中闪白计时
 }
 
-interface Bubble { x: number; y: number; life: number; value: number; alive: boolean }
-
-interface Bullet {
+/**
+ * 鱼骨：鱼被声呐共振后软组织震散，只剩发光骨架。
+ * 缓缓下沉 + 缓慢旋转，玩家必须游过去拾取（硬约束①：不做远程磁吸）。
+ */
+interface Bone {
   x: number; y: number
   vx: number; vy: number
-  life: number; dmg: number; pierce: number
-  hit: Set<number>
+  life: number          // 剩余存活秒数
+  value: number         // 回氧量
+  size: number          // 骨架长度（按鱼体大小，大鱼骨更值钱）
+  rot: number           // 当前旋转角
+  spin: number          // 旋转速度 rad/s
+  alive: boolean
+}
+
+/**
+ * 声呐脉冲：从潜航器发出的一圈向外扩散的波前。
+ * 关键手感——波是从「你」身上往外扩的，所以必须贴近鱼群才扫得到，
+ * 这就把「多捞几只」和「别被围住」绑成了同一个决策。
+ */
+interface Pulse {
+  x: number; y: number   // 发射点（发射瞬间位置，之后不跟随玩家）
+  r: number              // 当前波前半径
+  maxR: number           // 最大半径（= 射程）
+  dmg: number
+  width: number          // 波前判定厚度
+  hit: Set<number>       // 已命中（同一条鱼只判定一次）
+  alive: boolean
+}
+
+/** 肉屑：共振时震散的软组织碎片，纯表现层，不参与任何判定 */
+interface Debris {
+  x: number; y: number
+  vx: number; vy: number
+  life: number; maxLife: number
+  color: number
+  r: number
   alive: boolean
 }
 
@@ -175,11 +208,14 @@ export default class DiveScene extends Phaser.Scene {
   private aim = 0
   /** 受击闪白计时（氧气被撞时） */
   private hurtFlash = 0
+  /** 本帧是否在移动（推进器尾焰长度用） */
+  private moving = false
 
   // ---- 实体池 ----
   private enemies: Enemy[] = []
-  private bubbles: Bubble[] = []
-  private bullets: Bullet[] = []
+  private bones: Bone[] = []
+  private pulses: Pulse[] = []
+  private debris: Debris[] = []
   private motes: Mote[] = []
   private eid = 0
 
@@ -396,15 +432,17 @@ export default class DiveScene extends Phaser.Scene {
     if (this.phase === 'wave') {
       this.movePlayer(dt)
       this.updateEnemies(dt)
-      this.updateBullets(dt)
-      this.updateBubbles(dt)
+      this.updatePulses(dt)
+      this.updateBones(dt)
+      this.updateDebris(dt)
       this.updateMotes(dt)
       this.autoFire(dt)
       this.drainOxygen(dt)
       this.updateWave(dt)
     } else {
       // 商店 / 决策 / 结算：战斗暂停，只保留环境动画
-      this.updateBubbles(dt)
+      this.updateBones(dt)
+      this.updateDebris(dt)
       this.updateMotes(dt)
     }
 
@@ -436,6 +474,9 @@ export default class DiveScene extends Phaser.Scene {
       this.aim = Math.atan2(dy, dx)
       this.px += (dx / l) * PLAYER.speed * this.speedMul * dt
       this.py += (dy / l) * PLAYER.speed * this.speedMul * dt
+      this.moving = true
+    } else {
+      this.moving = false
     }
     const W = this.scale.width, H = this.scale.height
     this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
@@ -518,25 +559,29 @@ export default class DiveScene extends Phaser.Scene {
     this.cameras.main.shake(220, 0.008)
   }
 
-  private updateBullets(dt: number): void {
-    for (const b of this.bullets) {
-      if (!b.alive) continue
-      b.x += b.vx * dt
-      b.y += b.vy * dt
-      b.life -= dt
-      if (b.life <= 0) { b.alive = false; continue }
+  /**
+   * 声呐脉冲：波前向外扩散，扫到谁伤谁。
+   * 注意波是「环形」不是「射线」——射程内但波前还没扩过去的鱼不会受伤，
+   * 所以离你越近的鱼越快被打到。这是"贴脸打鱼"手感的机制来源。
+   */
+  private updatePulses(dt: number): void {
+    for (const p of this.pulses) {
+      if (!p.alive) continue
+      p.r += PLAYER.pulseSpeed * dt
+      if (p.r > p.maxR) { p.alive = false; continue }
       for (let i = 0; i < this.enemies.length; i++) {
         const e = this.enemies[i]
-        if (!e.alive || b.hit.has(i)) continue
-        if (Phaser.Math.Distance.Between(b.x, b.y, e.x, e.y) < e.r + 6) {
-          b.hit.add(i)
+        if (!e.alive || p.hit.has(i)) continue
+        const d = Phaser.Math.Distance.Between(p.x, p.y, e.x, e.y)
+        // 波前是一条有厚度的环带：鱼心到发射点距离落在环带内即命中
+        if (Math.abs(d - p.r) < p.width * 0.5 + e.r) {
+          p.hit.add(i)
           e.flash = 0.08            // 命中闪白（替代伤害数字，V4 §3.1 规则 ④）
-          this.hurt(e, b.dmg)
-          if (b.hit.size >= b.pierce) { b.alive = false; break }
+          this.hurt(e, p.dmg)
         }
       }
     }
-    this.bullets = this.bullets.filter(b => b.alive)
+    this.pulses = this.pulses.filter(p => p.alive)
   }
 
   private hurt(e: Enemy, dmg: number): void {
@@ -545,30 +590,87 @@ export default class DiveScene extends Phaser.Scene {
       e.alive = false
       this.biomass += e.kind === 'boss' ? 20 : 1
       if (e.kind === 'boss') this.bossDown = true
-      // 硬约束 ②：每波掉落总量有上限（按层配置）
-      const cap = this.layer().dropCap
-      if (this.droppedThisWave < cap) {
-        this.bubbles.push({ x: e.x, y: e.y, life: O2.bubbleLife, value: O2.bubbleValue, alive: true })
-        this.droppedThisWave += O2.bubbleValue
-      }
+      this.spawnDebris(e)          // 软组织被共振震散
+      this.dropBone(e)             // 只剩发光骨架
       if (this.killO2 > 0) this.o2 = Math.min(this.o2Max, this.o2 + this.killO2)
     }
   }
 
-  private updateBubbles(dt: number): void {
+  /**
+   * 掉鱼骨。
+   * 硬约束 ②：每波掉落总量有上限（按层配置）——否则"击杀补氧"会退化成
+   * 打得多就无限续命，氧气条失去意义。Boss 骨架不受上限限制（它是里程碑）。
+   */
+  private dropBone(e: Enemy): void {
+    const isBoss = e.kind === 'boss'
+    // 大鱼留大骨架、回氧更多：让"挑大鱼打"成为真实选择，而不只是打最近的
+    const size = isBoss ? 44 : Phaser.Math.Clamp(e.r * 1.7, 14, 30)
+    const value = isBoss ? 24 : Math.max(3, Math.round(O2.boneBase * (size / 18)))
+    if (!isBoss && this.droppedThisWave >= this.layer().dropCap) return
+    this.droppedThisWave += value
+    const a = Math.random() * Math.PI * 2
+    const sp = 30 + Math.random() * 45
+    this.bones.push({
+      x: e.x, y: e.y,
+      vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 20,
+      life: O2.boneLife, value, size,
+      rot: a, spin: (Math.random() - 0.5) * 1.6,
+      alive: true,
+    })
+  }
+
+  /** 共振把软组织震散：一小撮肉屑向外飞散后淡出（纯表现，不参与判定） */
+  private spawnDebris(e: Enemy): void {
+    const n = e.kind === 'boss' ? 16 : 6
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2
+      const sp = 60 + Math.random() * 130
+      this.debris.push({
+        x: e.x + Math.cos(a) * e.r * 0.5,
+        y: e.y + Math.sin(a) * e.r * 0.5,
+        vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+        life: 0.42 + Math.random() * 0.3, maxLife: 0.72,
+        color: e.color, r: 1.6 + Math.random() * 2.2,
+        alive: true,
+      })
+    }
+  }
+
+  /**
+   * 鱼骨：缓慢下沉 + 阻尼 + 自转，玩家游过去拾取。
+   * 只有进入拾取半径才吸收——不做远程磁吸，否则走位就没意义了（硬约束①）。
+   */
+  private updateBones(dt: number): void {
     const pr = O2.pickupR * this.pickupMul
-    for (const b of this.bubbles) {
+    for (const b of this.bones) {
       if (!b.alive) continue
       b.life -= dt
-      b.y -= 12 * dt   // 缓慢上升（V4 §3.3：最亮 + 在动 = 最先被看见）
       if (b.life <= 0) { b.alive = false; continue }
+      b.vy += 34 * dt                 // 下沉：比气泡"上浮"更有重量感
+      if (b.vy > 30) b.vy = 30
+      b.vx *= 0.94                    // 水阻
+      b.x += b.vx * dt
+      b.y += b.vy * dt
+      b.rot += b.spin * dt
+      b.spin *= 0.985
       if (Phaser.Math.Distance.Between(b.x, b.y, this.px, this.py) < pr) {
         this.o2 = Math.min(this.o2Max, this.o2 + b.value)
         b.alive = false
       }
     }
-    this.bubbles = this.bubbles.filter(b => b.alive)
+    this.bones = this.bones.filter(b => b.alive)
     this.enemies = this.enemies.filter(e => e.alive)
+  }
+
+  private updateDebris(dt: number): void {
+    for (const d of this.debris) {
+      if (!d.alive) continue
+      d.life -= dt
+      if (d.life <= 0) { d.alive = false; continue }
+      d.x += d.vx * dt; d.y += d.vy * dt
+      d.vx *= 0.90; d.vy *= 0.90
+    }
+    this.debris = this.debris.filter(d => d.alive)
   }
 
   private updateMotes(dt: number): void {
@@ -585,24 +687,27 @@ export default class DiveScene extends Phaser.Scene {
   private autoFire(dt: number): void {
     this.fireTimer -= dt
     if (this.fireTimer > 0) return
-    // 自动锁定最近敌人（Brotato 核心：武器自动开火，玩家只管走位）
-    let best = -1, bd = PLAYER.range
-    for (let i = 0; i < this.enemies.length; i++) {
-      const e = this.enemies[i]
-      const d = Phaser.Math.Distance.Between(this.px, this.py, e.x, e.y)
-      if (d < bd) { bd = d; best = i }
+    // 声呐是全向的：射程内有鱼就发一圈波，不需要瞄准（Brotato 核心：只管走位）。
+    // 但波从自己身上往外扩，所以「贴得越近、越早被打到」——
+    // 这把"扎进鱼群多捞几只"和"别被围住"绑成了同一个决策。
+    const rng = this.pulseRange()
+    let inRange = false
+    for (const e of this.enemies) {
+      if (Phaser.Math.Distance.Between(this.px, this.py, e.x, e.y) <= rng + e.r) { inRange = true; break }
     }
-    if (best < 0) return
-    const e = this.enemies[best]
-    const a = Math.atan2(e.y - this.py, e.x - this.px)
-    this.bullets.push({
+    if (!inRange) return
+    this.pulses.push({
       x: this.px, y: this.py,
-      vx: Math.cos(a) * PLAYER.bulletSpeed,
-      vy: Math.sin(a) * PLAYER.bulletSpeed,
-      life: 1.1, dmg: this.dmg, pierce: this.pierce,
+      r: PLAYER.r * 0.6, maxR: rng,      // 从艇身边缘发出，不是从圆心
+      dmg: this.dmg, width: PLAYER.pulseWidth,
       hit: new Set<number>(), alive: true,
     })
     this.fireTimer = this.fireCd
+  }
+
+  /** 射程：基础 + 「声呐功率」升级（每级 +55） */
+  private pulseRange(): number {
+    return PLAYER.range + (this.pierce - 1) * 55
   }
 
   private drainOxygen(dt: number): void {
@@ -731,14 +836,10 @@ export default class DiveScene extends Phaser.Scene {
     const g = this.g
     g.clear()
 
-    // 氧气泡（画在敌人之上，V4 §3.3）
-    for (const b of this.bubbles) {
-      const blink = b.life < O2.bubbleBlink
-        ? (Math.sin(this.t * 25) > 0 ? 1 : 0.35)
-        : 1
-      neon(g, WHITE, () => { g.fillCircle(b.x, b.y, 5) }, { fill: true, fillAlpha: 0.95 * blink, bloom: false })
-      neon(g, WHITE, () => { g.strokeCircle(b.x, b.y, 8) }, { width: 1, alpha: 0.5 * blink, bloom: false })
-    }
+    // 共振肉屑（最底层，纯表现，不抢 gameplay 信息）
+    this.drawDebris(g)
+    // 声呐波前：画在敌人之下，避免一圈圈环把鱼群剪影盖住
+    this.drawPulses(g)
 
     // 敌人：只画轮廓 + 发光核心，不填实体色（V4 §3.1 规则 ①）
     const lod = this.enemies.length > 80 ? 2 : this.enemies.length > 40 ? 1 : 0
@@ -836,26 +937,153 @@ export default class DiveScene extends Phaser.Scene {
       g.fillCircle(e.x, e.y, 2)
     }
 
-    // 子弹
-    for (const b of this.bullets) {
-      neonLine(g, b.x, b.y, b.x - b.vx * 0.02, b.y - b.vy * 0.02, UI.cyanHi, { width: 2, bloom: false })
-    }
+    // 鱼骨（画在敌人之上：V4 §3.3 掉落物必须最先被看见）
+    this.drawBones(g)
 
-    // 玩家：永远最亮的青蓝（V4 §3.1 规则 ③）。
-    // 受击时短暂转白——这是"氧气被撞了"的唯一反馈，必须有。
-    const pcol = this.hurtFlash > 0 ? WHITE : UI.cyan
-    neonCircle(g, this.px, this.py, PLAYER.r, pcol, { width: 2 })
-    neon(g, UI.cyan, () => { g.fillCircle(this.px, this.py, 5) }, { fill: true, fillAlpha: 1, bloom: false })
-    // 朝向指示：跟随移动方向，不是固定朝右
-    neonLine(g, this.px, this.py,
-      this.px + Math.cos(this.aim) * 24, this.py + Math.sin(this.aim) * 24,
-      UI.cyan, { width: 2, alpha: 0.65, bloom: false })
+    // 玩家潜航器（V4 §3.1 规则 ③：永远最亮的青蓝）
+    this.drawSub(g)
 
     // 排气爆发环
     if (this.burstTimer > O2.burstCd - 0.4) {
       const k = 1 - (this.burstTimer - (O2.burstCd - 0.4)) / 0.4
       neonCircle(g, this.px, this.py, O2.burstR * k, WHITE, { width: 3, alpha: 1 - k, bloom: false })
     }
+  }
+
+  // ==========================================================================
+  // 表现层：声呐波前 / 肉屑 / 鱼骨 / 潜航器
+  // ==========================================================================
+
+  /** 声呐波前：主环 + 内侧余波 + 外侧预兆，越扩越淡 */
+  private drawPulses(g: Phaser.GameObjects.Graphics): void {
+    for (const p of this.pulses) {
+      const k = p.r / p.maxR                 // 0→1
+      const a = (1 - k) * 0.9
+      if (a <= 0.02) continue
+      neonCircle(g, p.x, p.y, p.r, UI.cyanHi, { width: 2.4, alpha: a, bloom: false })
+      const r2 = p.r - 13
+      if (r2 > 3) neonCircle(g, p.x, p.y, r2, UI.cyan, { width: 1.5, alpha: a * 0.42, bloom: false })
+      const r3 = p.r + 11
+      if (r3 < p.maxR) neonCircle(g, p.x, p.y, r3, UI.cyan, { width: 1, alpha: a * 0.20, bloom: false })
+    }
+  }
+
+  /** 共振震散的软组织碎片：向外飞散并淡出（纯表现） */
+  private drawDebris(g: Phaser.GameObjects.Graphics): void {
+    for (const d of this.debris) {
+      const a = Math.max(0, d.life / d.maxLife)
+      g.fillStyle(d.color, a * 0.7)
+      g.fillCircle(d.x, d.y, d.r)
+    }
+  }
+
+  /**
+   * 鱼骨：击杀后留下的发光骨架——脊椎 + 肋骨 + 头骨 + 尾鳍骨，自转下沉。
+   * 用全场唯一的近白色 BONE，满屏混乱时最先被看见（V4 §3.3）。
+   * 大鱼留大骨架，所以"挑大鱼打"在视觉上直接可读，不用看数值。
+   */
+  private drawBones(g: Phaser.GameObjects.Graphics): void {
+    for (const b of this.bones) {
+      const blink = b.life < O2.boneBlink ? (Math.sin(this.t * 25) > 0 ? 1 : 0.35) : 1
+      const ca = Math.cos(b.rot), sa = Math.sin(b.rot)
+      const X = (lx: number, ly: number) => b.x + lx * ca - ly * sa
+      const Y = (lx: number, ly: number) => b.y + lx * sa + ly * ca
+      const L = b.size, half = L / 2
+      const a = 0.95 * blink
+
+      neonLine(g, X(-half, 0), Y(-half, 0), X(half, 0), Y(half, 0), BONE, { width: 1.6, alpha: a, bloom: false })
+      // 肋骨 4 对：中间宽、两端窄
+      for (let i = 0; i < 4; i++) {
+        const lx = -half + (i + 1) * L / 5
+        const h = L * 0.20 * Math.sin(((i + 1) / 5) * Math.PI)
+        neonLine(g, X(lx, -h), Y(lx, -h), X(lx, h), Y(lx, h), BONE, { width: 1.2, alpha: a * 0.8, bloom: false })
+      }
+      // 头骨（前端小三角）
+      neon(g, BONE, () => {
+        g.beginPath()
+        g.moveTo(X(half + 3, 0), Y(half + 3, 0))
+        g.lineTo(X(half - 2, -3.2), Y(half - 2, -3.2))
+        g.lineTo(X(half - 2, 3.2), Y(half - 2, 3.2))
+        g.closePath(); g.strokePath()
+      }, { width: 1.4, alpha: a, bloom: false })
+      // 尾鳍骨（后端分叉）
+      neon(g, BONE, () => {
+        g.beginPath()
+        g.moveTo(X(-half, 0), Y(-half, 0))
+        g.lineTo(X(-half - 5, -4.5), Y(-half - 5, -4.5))
+        g.moveTo(X(-half, 0), Y(-half, 0))
+        g.lineTo(X(-half - 5, 4.5), Y(-half - 5, 4.5))
+        g.strokePath()
+      }, { width: 1.2, alpha: a * 0.85, bloom: false })
+      // 核心亮点：任何距离都看得见（V4 §2.2 铁律）
+      g.fillStyle(BONE, a)
+      g.fillCircle(b.x, b.y, 1.8)
+    }
+  }
+
+  /**
+   * 玩家潜航器。
+   * 之前是"一个圆点 + 一条朝向线"，剪影零辨识度。改成小型单人潜航器：
+   * 艇身朝移动方向，艇首的**探照灯锥天然指示朝向**（不用再画指示线），
+   * 而且**灯越深越亮**——L1 阳光带几乎看不见灯，L5 深渊带灯是唯一照明。
+   * 这一条把 V4 §2.2「分层可见度」直接落到了玩家自己身上。
+   */
+  private drawSub(g: Phaser.GameObjects.Graphics): void {
+    const ca = Math.cos(this.aim), sa = Math.sin(this.aim)
+    // Graphics 没有旋转变换，只能手算每个顶点
+    const X = (lx: number, ly: number) => this.px + lx * ca - ly * sa
+    const Y = (lx: number, ly: number) => this.py + lx * sa + ly * ca
+    const pcol = this.hurtFlash > 0 ? WHITE : UI.cyan
+
+    // ---- 探照灯锥 ----
+    const beamA = 0.05 + (1 - this.layer().vis) * 0.11
+    const beamLen = 150, half = 0.36
+    g.fillStyle(0xcdf6ff, beamA)
+    g.beginPath()
+    g.moveTo(X(20, 0), Y(20, 0))
+    for (let i = 0; i <= 8; i++) {
+      const ang = -half + (i / 8) * half * 2
+      const lx = 20 + Math.cos(ang) * beamLen
+      const ly = Math.sin(ang) * beamLen
+      g.lineTo(X(lx, ly), Y(lx, ly))
+    }
+    g.closePath(); g.fillPath()
+
+    // ---- 尾鳍 / 稳定翼 ----
+    for (const s of [-1, 1]) {
+      neon(g, pcol, () => {
+        g.beginPath()
+        g.moveTo(X(-4, s * 8), Y(-4, s * 8))
+        g.lineTo(X(-13, s * 17), Y(-13, s * 17))
+        g.lineTo(X(-11, s * 7), Y(-11, s * 7))
+        g.closePath(); g.strokePath()
+      }, { width: 2, alpha: 0.9, bloom: false })
+    }
+
+    // ---- 艇身：流线型七边形（艇首朝 +x）----
+    const hull: Array<[number, number]> = [[19, 0], [9, -8], [-8, -9], [-14, -5], [-14, 5], [-8, 9], [9, 8]]
+    neon(g, pcol, () => {
+      g.beginPath()
+      hull.forEach(([lx, ly], i) => { if (i === 0) g.moveTo(X(lx, ly), Y(lx, ly)); else g.lineTo(X(lx, ly), Y(lx, ly)) })
+      g.closePath(); g.strokePath()
+    }, { width: 2.2, bloom: true })
+    // 艇身内部微光：暗场里给玩家一点实体感（规则①只禁止"敌人"填实体色）
+    g.fillStyle(pcol, 0.10)
+    g.beginPath()
+    hull.forEach(([lx, ly], i) => { if (i === 0) g.moveTo(X(lx, ly), Y(lx, ly)); else g.lineTo(X(lx, ly), Y(lx, ly)) })
+    g.closePath(); g.fillPath()
+
+    // ---- 驾驶舱穹顶 ----
+    neon(g, UI.cyanHi, () => { g.strokeCircle(X(6, 0), Y(6, 0), 5) }, { width: 1.6, alpha: 0.95, bloom: false })
+    g.fillStyle(UI.cyanHi, 0.28); g.fillCircle(X(6, 0), Y(6, 0), 5)
+
+    // ---- 推进器尾焰（移动时更长）----
+    const flame = 8 + Math.sin(this.t * 24) * 2.5 + (this.moving ? 7 : 0)
+    for (const s of [-1, 1]) {
+      neonLine(g, X(-14, s * 3), Y(-14, s * 3), X(-14 - flame, s * 2), Y(-14 - flame, s * 2),
+        UI.cyanHi, { width: 2, alpha: 0.75, bloom: false })
+    }
+    g.fillStyle(UI.cyanHi, 0.9); g.fillCircle(X(-14, 0), Y(-14, 0), 2.5)
   }
 
   // ==========================================================================
@@ -1031,7 +1259,7 @@ export default class DiveScene extends Phaser.Scene {
   private pool: Upgrade[] = [
     { id: 'dmg', name: '锋利叉尖', desc: '伤害 +6', apply: s => { s.dmg += 6 } },
     { id: 'rate', name: '快速装填', desc: '射速 +22%', apply: s => { s.fireCd *= 0.78 } },
-    { id: 'pierce', name: '穿透叉', desc: '穿透 +1', apply: s => { s.pierce += 1 } },
+    { id: 'pierce', name: '声呐功率', desc: '脉冲射程 +55', apply: s => { s.pierce += 1 } },
     { id: 'speed', name: '增压推进', desc: '移速 +15%', apply: s => { s.speedMul *= 1.15 } },
     { id: 'pickup', name: '吸附鳍', desc: '拾取范围 +40%', apply: s => { s.pickupMul *= 1.4 } },
     { id: 'tank', name: '扩容气瓶', desc: '氧气上限 +20 并回满', apply: s => { s.o2Bonus += 20; s.o2Max = s.layer().o2Max + s.o2Bonus; s.o2 = s.o2Max } },
@@ -1262,7 +1490,7 @@ export default class DiveScene extends Phaser.Scene {
   }
 
   private restart(): void {
-    this.enemies = []; this.bubbles = []; this.bullets = []
+    this.enemies = []; this.bones = []; this.pulses = []; this.debris = []
     this.biomass = 0; this.dmg = PLAYER.dmg
     this.fireCd = PLAYER.cd; this.pierce = PLAYER.pierce
     this.speedMul = 1; this.pickupMul = 1; this.killO2 = PLAYER.killO2
@@ -1295,7 +1523,7 @@ export default class DiveScene extends Phaser.Scene {
         o2Max: this.o2Max,
         mult: this.mult,
         enemies: this.enemies.length,
-        bubbles: this.bubbles.length,
+        bones: this.bones.length,
         biomass: this.biomass,
         boss: this.bossDown,
         bossAlive: this.enemies.some(e => e.kind === 'boss'),
