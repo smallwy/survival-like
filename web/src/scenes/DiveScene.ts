@@ -77,14 +77,47 @@ import F_DASH_TEX from '../assets/fish/dash.png'
  * 视觉上才是一体的。
  */
 const HARDPOINTS: Array<[number, number]> = [
-  [-0.21, 0.17],   // 左后
-  [-0.21, -0.17],  // 左前
-  [0.21, 0.17],    // 右后
-  [0.21, -0.17],   // 右前
+  [-0.26, 0.46],   // 后 · 一舷
+  [-0.26, -0.46],  // 后 · 另一舷
+  [0.26, 0.46],    // 前 · 一舷
+  [0.26, -0.46],   // 前 · 另一舷
 ]
 
-/** 塔头显示尺寸（px）。从 20 放大到 30 —— 20px 在 59px 的艇身上是"小零件"比例 */
-const TURRET_SIZE = 30
+/**
+ * 发射塔尺寸（px）—— **长边沿艇身长度、短边沿艇身宽度**。
+ *
+ * V6.6 之前塔是 30×30 的正方形，而艇身只有 59×31：塔的直径几乎等于艇身宽度，
+ * 4 个塔挤在 24.8×10.5 的矩形里必然叠成一团 —— 这就是"叠在一起很难看"的根因。
+ *
+ * 两件事一起改才能自洽：
+ *   ① 艇身放大到 98.8×52（SUB_SIZE 31 → 52），给塔腾出安装空间
+ *   ② 塔改成**长条挂架**而不是正方形：长 38 沿艇身长度、宽 26 沿艇身宽度
+ *
+ * 间距要按**最坏情况**算：塔会随索敌相对艇身旋转最多 ±60°，旋转后矩形在
+ * 宽度方向的半投影变成 19·sin60 + 13·cos60 ≈ 22.95，也就是异舷两塔需要
+ * 45.9px 才不碰。所以 ly 取 ±0.46（间距 0.92×52 = 47.8px）而不是 ±0.38
+ * —— 后者只有 39.5px，塔一转就叠上了。塔中心 ±23.9 仍在艇身半宽 26 之内，
+ * 不会变成"浮在艇外的独立零件"。
+ *
+ * 同舷前后间距 0.52×99 = 51.5px，最坏半投影 19·cos60 + 13·sin60 ≈ 20.8，
+ * 需要 41.5px，富余充足。
+ */
+const TURRET_L = 38      // 沿艇身长度
+const TURRET_W = 26      // 沿艇身宽度
+/** 发射器（插在挂架上的那件武器）基准尺寸，约为挂架的 0.63 */
+const EMITTER_SIZE = 24
+
+/**
+ * 潜艇显示尺寸（px）。
+ *
+ * V6.6 从 59×31 放大到 99×52。挂载点计算（`hx * SUB_LEN, hy * SUB_WID`）
+ * 直接用这两个数，所以必须是顶层常量而不是 create() 里的局部变量。
+ */
+const SUB_LEN = 99
+const SUB_WID = 52
+
+/** 挂载位硬上限（4 座 × 双联 = 8 个管位，当前武器上限是 6 台） */
+const MAX_MOUNTS = 8
 
 /**
  * 4 个物理座 × 每座 2 个管位 = 最多 8 个管位，但**武器上限是 6 台**（用户定的规格）。
@@ -100,7 +133,7 @@ const TURRET_SIZE = 30
  * 偏移量刻意小于塔头半径的一半 —— 双联要看起来是"并联的两根管"，
  * 分开太多就变回两个独立的小零件，这正是上一轮被吐槽的问题。
  */
-const TWIN_OFFSET = [-0.07, 0.07]
+const TWIN_OFFSET = [-0.10, 0.10]
 
 /** 全场唯一近白：鱼骨与受击闪白专用，在混乱中最先被看见（V4 §3.3） */
 const WHITE = 0xffffff
@@ -127,7 +160,10 @@ const O2 = {
 
 const PLAYER = {
   speed: 220,
-  r: 16,
+  // V6.6：机体显示尺寸从 59×31 放大到 99×52，碰撞半径同步 16 → 20。
+  // 刻意**不到**视觉半宽（26）：判定比视觉略宽容，玩家不会觉得"明明躲开了却挨打"。
+  // 敌人也从 11~20 放大到 14~25，两边同时放大，接触频率大致持平。
+  r: 20,
   dmg: 12,
   cd: 0.42,           // 声呐脉冲发射间隔（秒）
   range: 420,         // 脉冲最大半径（射程）
@@ -534,13 +570,14 @@ export default class DiveScene extends Phaser.Scene {
   private subImg!: Phaser.GameObjects.Image
   /** 敌人贴图池（复用，避免每波创建/销毁 70+ 个 Image） */
   private fishPool: Phaser.GameObjects.Image[] = []
-  /** 4 个独立转向的炮塔塔头（贴图），未装配的槽位不显示 */
-  private turretImgs: Phaser.GameObjects.Image[] = []
-  /** WeaponId -> 贴图 key */
-  private turretTex!: Record<string, string>
+  // （V6.6：塔头贴图池 turretImgs / turretTex 已删除。
+  //  塔改成「通用挂架 + 可插拔发射器」的矢量绘制，画在 gTurret(depth 62) 上，
+  //  不再需要每种武器一张塔贴图 —— 新增武器也不用再生图。）
   private gBg!: Phaser.GameObjects.Graphics    // 环境（被暗幕压暗）
   private gDim!: Phaser.GameObjects.Graphics   // 暗幕（只压环境，不压实体）
   private g!: Phaser.GameObjects.Graphics      // 实体（永远全亮）
+  /** 发射塔层：在机体贴图(60)之上、HUD(100)之下 */
+  private gTurret!: Phaser.GameObjects.Graphics
   private gHud!: Phaser.GameObjects.Graphics
   private keys!: Record<string, Phaser.Input.Keyboard.Key>
   private shopCards: { x: number; y: number; w: number; h: number; up: Upgrade; rect: Phaser.GameObjects.Rectangle }[] = []
@@ -595,26 +632,18 @@ export default class DiveScene extends Phaser.Scene {
 
     // 具象潜航器 + 4 个炮塔。size:31 是反复试出来的：40px 时贴图细节糊成一团，
     // 28px 以下又认不出机械感。玩家单位只占屏幕极小一块，这个尺寸够用。
-    const SUB_SIZE = 31
+    // 机体从 59×31 放大到 99×52：塔要装得下、装得像"艇上的炮"，艇身必须先够大。
     this.subImg = this.add.image(0, 0, 'sub_body').setDepth(60)
-    this.subImg.setDisplaySize(SUB_SIZE * 1.9, SUB_SIZE)
-    const TEX_OF: Record<string, string> = {
-      gun: 'w_gun', torpedo: 'w_torpedo', arc: 'w_arc',
-    }
-    // 塔头对象池按**最大容量** 6 台建（不是 4 个座）——
-    // 第 5、6 台走双联，用的是另外两个 Image 而不是挤压前 4 个。
-    for (let i = 0; i < 6; i++) {
-      const img = this.add.image(0, 0, 'w_gun').setDepth(61).setVisible(false)
-      this.turretImgs.push(img)
-    }
-    this.turretTex = TEX_OF
-
+    this.subImg.setDisplaySize(SUB_LEN, SUB_WID)
     // 深度分层：**环境 → 暗幕 → 实体 → HUD**。
     // 暗幕夹在中间是 V4 §2 的铁律——它只能压暗地形，敌人/气泡/玩家必须画在它之上，
     // 否则深渊层（可见度 10%）会把 gameplay 信息一起吃掉。
     this.gBg = this.add.graphics().setScrollFactor(0).setDepth(5)
     this.gDim = this.add.graphics().setScrollFactor(0).setDepth(7)
     this.g = this.add.graphics().setDepth(10)
+    // 发射塔专用层：**必须在机体贴图(60)之上**，否则塔会被艇身盖住。
+    // 塔改成矢量绘制后就没法再借用 Image 的 depth 61，得自己开一层。
+    this.gTurret = this.add.graphics().setDepth(62)
     this.gHud = this.add.graphics().setScrollFactor(0).setDepth(100)
 
     const kb = this.input.keyboard!
@@ -736,7 +765,10 @@ export default class DiveScene extends Phaser.Scene {
     this.enemies.push({
       x, y, vx: 0, vy: 0,
       hp, maxHp: hp,
-      r: kind === 'drift' ? 20 : kind === 'dash' ? 15 : 11,
+      // V6.6 放大体型：机体从 59px 放大到 99px 后，22~40px 的敌人显得格外小，
+      // 既看不清种类也看不清有没有被打中。半径整体放大约 30%
+      // （显示尺寸 = r×2.4，所以 swarm 22px → 34px、drift 40px → 60px）。
+      r: kind === 'drift' ? 25 : kind === 'dash' ? 19 : 14,
       kind,
       color: kind === 'drift' ? UI.amber : kind === 'dash' ? UI.magenta : UI.jade,
       speed: spd,
@@ -2286,7 +2318,9 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
 
     // ---- ① 边缘光：深色贴图在深背景上可读的唯一保障 ----
     // 比机体贴图略大一圈的椭圆描边，颜色用玩家专属的青蓝（永远是全场最亮的青）。
-    const rimW = 34, rimH = 19
+    // 边缘光椭圆跟着机体一起放大：原来 34×19 是配 59×31 的艇身，
+    // 艇身放大到 99×52 后 rim 必须同比放大，否则光晕缩在机体中间像颗蛋。
+    const rimW = 57, rimH = 32
     neon(g, pcol, () => { g.strokeEllipse(this.px, this.py, rimW, rimH) },
       { width: 2.4, alpha: 0.85, bloom: true })
     neon(g, UI.cyanHi, () => { g.strokeEllipse(this.px, this.py, rimW - 5, rimH - 5) },
@@ -2313,26 +2347,29 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
     }
     g.closePath(); g.fillPath()
 
-    // ---- ④ 炮塔塔头：独立瞄准 + 双联形态 ----
+    // ---- ④ 发射塔：**通用挂架 + 可插拔发射器**（V6.6 重做）----
     //
-    // `mountPlan()` 决定每台武器落在哪个座、哪个管位：
-    //   1~4 台 → 座 0~3 前管（单装）
-    //   5~6 台 → 座 0~1 后管（那两座变双联）
-    // 双联的两根管共用同一座坐标，只沿艇身宽度方向各偏移 TWIN_OFFSET，
-    // 视觉上就是"一座上并联了两根炮管"。
+    // 之前塔是一整张武器贴图，塔和武器是**同一个东西**，所以：
+    //   · 想放大塔 → 武器也跟着放大 → 挤成一团
+    //   · 想加新武器 → 必须重画整座塔（连带挂架）
+    // 现在拆成两层：
+    //   **挂架（mount）** —— 通用、所有武器共用一套画法，代表"艇上的安装位"
+    //   **发射器（emitter）** —— 按 weapon id 画，插在挂架的转环上
+    // 以后新增第 5、6、N 种武器，只需要加一个 emitter 分支，挂架一律不动。
+    const gt = this.gTurret
+    gt.clear()
     const plan = this.mountPlan()
-    for (let i = 0; i < this.turretImgs.length; i++) {
-      const img = this.turretImgs[i]
+    // 挂载点局部坐标（比例 × 机体显示尺寸）
+    const MP = (seat: number, off: number) => {
+      const [hx, hy] = HARDPOINTS[seat]
+      return [X(hx * SUB_LEN, (hy + off) * SUB_WID), Y(hx * SUB_LEN, (hy + off) * SUB_WID)]
+    }
+
+    for (let i = 0; i < MAX_MOUNTS; i++) {
       const slot = plan[i]
       const w = this.weapons[i]
-      if (!slot || !w) { img.setVisible(false); continue }
-
-      // 挂载点局部坐标（比例 × 机体显示尺寸）
-      const [hx, hy] = HARDPOINTS[slot.seat]
-      // 双联：沿艇身宽度方向（局部 y 轴）偏移，前管在后、后管在前
-      const off = TWIN_OFFSET[slot.barrel]
-      const mountX = X(hx * 59, (hy + off) * 31)
-      const mountY = Y(hx * 59, (hy + off) * 31)
+      if (!slot || !w) continue
+      const [mountX, mountY] = MP(slot.seat, TWIN_OFFSET[slot.barrel])
 
       // 独立索敌：优先当前锁定目标，否则取射程内最近的
       const def = WEAPON_DEF[w.id]
@@ -2342,39 +2379,145 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
       if (tgt) want = Math.atan2(tgt.y - mountY, tgt.x - mountX)
       // 限幅：塔相对机体朝向最多偏 ±60°，防止甩出去挡住本体
       const rel = Phaser.Math.Angle.Wrap(want - this.aim)
-      const clamped = Phaser.Math.Clamp(rel, -1.05, 1.05)
-      img.setVisible(true)
-      img.setTexture(this.turretTex[w.id] ?? 'w_gun')
-      img.setPosition(mountX, mountY)
-      img.setRotation(this.aim + clamped)
-      // 双联的两根管略缩小（0.82×）：两座各挂两个全尺寸塔头会把艇身撑爆，
-      // 缩一点既保持辨识度又不破坏剪影
-      const sz = TURRET_SIZE * (slot.barrel === 1 ? 0.82 : 1)
-      img.setDisplaySize(sz, sz)
-      // 开火瞬间塔头发亮，给"它在射击"的反馈
-      img.setTint(w.timer > 0 ? 0xffffff : 0xbfd0ff)
+      const ang = this.aim + Phaser.Math.Clamp(rel, -1.05, 1.05)
+      // 双联的两根管缩到 0.52×：一座上挂两个全尺寸挂架会把艇身撑爆。
+      // 0.52 是配合 TWIN_OFFSET ±0.10（中心距 10.4px）算出来的 ——
+      // 缩得太少，两根管的 13.5px 半宽会在 10.4px 的间距上糊成一块厚板，
+      // 看不出"这是两根管"。
+      const k = slot.barrel === 1 ? 0.52 : 1
+      this.drawTurret(gt, mountX, mountY, ang, TURRET_L * k, TURRET_W * k, w)
     }
 
-    // 双联座的**连接梁**：两根管之间画一道短横梁，
+    // ---- 空挂架：没装武器的座也要画 ----
+    // 这是"前瞻性"的可见部分：玩家能看见艇上还有几个空位，
+    // 商店里那张「双联挂载」卡才会被理解成"填满这个洞"而不是抽象数字。
+    const used = new Set(plan.map(p => p.seat))
+    for (let s = 0; s < HARDPOINTS.length; s++) {
+      if (used.has(s)) continue
+      const [mx, my] = MP(s, 0)
+      this.drawEmptyMount(gt, mx, my, this.aim, TURRET_L * 0.78, TURRET_W * 0.78)
+    }
+
+    // ---- 双联连接梁：两根管之间一道短横梁 ----
     // 没有这道梁，双联看起来就是"两个挨着的独立塔"而不是"并联的一座"
     for (let s = 0; s < HARDPOINTS.length; s++) {
-      const twin = plan.filter(p => p.seat === s)
-      if (twin.length < 2) continue
-      const [hx, hy] = HARDPOINTS[s]
-      const ax = X(hx * 59, (hy + TWIN_OFFSET[0]) * 31)
-      const ay = Y(hx * 59, (hy + TWIN_OFFSET[0]) * 31)
-      const bx = X(hx * 59, (hy + TWIN_OFFSET[1]) * 31)
-      const by = Y(hx * 59, (hy + TWIN_OFFSET[1]) * 31)
-      neonLine(g, ax, ay, bx, by, UI.cyanDim, { width: 3.2, alpha: 0.85, bloom: false })
-      neonLine(g, ax, ay, bx, by, UI.cyanHi, { width: 1, alpha: 0.6, bloom: false })
+      if (plan.filter(p => p.seat === s).length < 2) continue
+      const [ax, ay] = MP(s, TWIN_OFFSET[0])
+      const [bx, by] = MP(s, TWIN_OFFSET[1])
+      neonLine(gt, ax, ay, bx, by, UI.cyanDim, { width: 3.2, alpha: 0.85, bloom: false })
+      neonLine(gt, ax, ay, bx, by, UI.cyanHi, { width: 1, alpha: 0.6, bloom: false })
     }
 
     // ---- ⑤ 推进器尾焰（移动时更长）----
     if (this.moving) {
+      // 尾焰起点跟着艇身放大：-14 是配 59px 艇身的，现在半长 49.5 要挪到艇尾
       const flame = Math.sin(this.t * 26) * 2.4 + 5
-      neonLine(g, X(-14, 0), Y(-14, 0), X(-14 - flame, 0), Y(-14 - flame, 0),
+      const tail = -SUB_LEN * 0.48
+      neonLine(g, X(tail, 0), Y(tail, 0), X(tail - flame, 0), Y(tail - flame, 0),
         UI.cyanHi, { width: 3, alpha: 0.75, bloom: true })
     }
+  }
+
+  /**
+   * 发射塔 = **通用挂架**（g.save/rotate 后以 0,0 为中心，长边沿局部 +x）。
+   *
+   * 挂架本身用**通用色**（cyanDim），**不带武器色** —— 这是刻意的：
+   * 座是艇上的固定设施，武器是可换的。如果挂架也染成武器色，
+   * "这座塔能换装别的炮"这件事就说不通了。武器色只出现在发射器上。
+   */
+  private drawTurret(g: Phaser.GameObjects.Graphics, cx: number, cy: number,
+                     ang: number, L: number, W: number, w: Weapon): void {
+    g.save()
+    g.translateCanvas(cx, cy)
+    g.rotateCanvas(ang)
+
+    // 挂架底：深色圆角矩形，压住艇身贴图让塔"有实体"
+    g.fillStyle(UI.panel, 0.94)
+    g.fillRoundedRect(-L / 2, -W / 2, L, W, 7)
+    neon(g, UI.cyanDim, () => { g.strokeRoundedRect(-L / 2, -W / 2, L, W, 7) },
+      { width: 1.6, alpha: 0.9, bloom: false })
+
+    // 四角卡榫：表达"发射器是插上去的、可拆换"，这是通用挂架最关键的符号
+    g.fillStyle(UI.cyanDim, 0.85)
+    for (const sx of [-1, 1]) {
+      for (const sy of [-1, 1]) {
+        g.fillRect(sx * (L / 2 - 5) - 2, sy * (W / 2 - 4) - 1.5, 4, 3)
+      }
+    }
+    // 中央转环：发射器的安装座
+    g.lineStyle(1, UI.cyanDim, 0.55)
+    g.strokeCircle(0, 0, W * 0.34)
+
+    // 发射器（按武器种类，插在转环上，指向局部 +x）
+    const k = L / TURRET_L
+    this.drawEmitter(g, w.id, EMITTER_SIZE * k, w.timer > 0)
+    g.restore()
+  }
+
+  /**
+   * 发射器（可插拔部件）。坐标系已被 `drawTurret` 平移旋转到挂架中心，
+   * **指向局部 +x**，所以这里只管朝右画。
+   *
+   * 新增武器 = 新增一个分支，挂架那套完全不用动 —— 这就是"通用安装"的落点。
+   */
+  private drawEmitter(g: Phaser.GameObjects.Graphics, id: WeaponId,
+                      s: number, firing: boolean): void {
+    const col = WEAPON_DEF[id].color
+    if (id === 'sonar') {
+      // 声呐：三层同心弧，开口朝 +x（喇叭形辐射面）
+      for (let i = 1; i <= 3; i++) {
+        g.lineStyle(1.8, col, firing ? 1 : 0.7)
+        g.beginPath(); g.arc(0, 0, s * 0.26 * i, -1.0, 1.0); g.strokePath()
+      }
+      g.fillStyle(col, 0.9); g.fillCircle(0, 0, s * 0.12)
+    } else if (id === 'gun') {
+      // 机关枪：三根平行枪管
+      for (let i = -1; i <= 1; i++) {
+        const yy = i * s * 0.3
+        g.lineStyle(2.4, col, i === 0 ? 1 : 0.65)
+        g.beginPath(); g.moveTo(-s * 0.35, yy); g.lineTo(s * 0.8, yy); g.strokePath()
+      }
+      // 枪口亮点：开火瞬间烧白，给"它在射击"的反馈
+      g.fillStyle(firing ? WHITE : col, 0.95)
+      g.fillCircle(s * 0.8, 0, s * 0.11)
+    } else if (id === 'torpedo') {
+      // 鱼雷发射管：粗筒 + 管口环
+      g.fillStyle(UI.panelHi, 0.95)
+      g.fillRoundedRect(-s * 0.4, -s * 0.3, s * 1.0, s * 0.6, 3)
+      g.lineStyle(1.8, col, 0.95)
+      g.strokeRoundedRect(-s * 0.4, -s * 0.3, s * 1.0, s * 0.6, 3)
+      g.lineStyle(2, firing ? WHITE : col, 0.9)
+      g.beginPath(); g.moveTo(s * 0.55, -s * 0.32); g.lineTo(s * 0.55, s * 0.32); g.strokePath()
+    } else {
+      // 电弧：两根电极柱 + 中间跳跃的弧光
+      g.lineStyle(2, col, 0.95)
+      g.beginPath(); g.moveTo(-s * 0.2, -s * 0.36); g.lineTo(s * 0.5, -s * 0.36); g.strokePath()
+      g.beginPath(); g.moveTo(-s * 0.2, s * 0.36); g.lineTo(s * 0.5, s * 0.36); g.strokePath()
+      neon(g, firing ? WHITE : col, () => {
+        g.beginPath()
+        g.moveTo(s * 0.5, -s * 0.36)
+        g.lineTo(s * 0.26, -s * 0.06)
+        g.lineTo(s * 0.62, s * 0.06)
+        g.lineTo(s * 0.38, s * 0.36)
+        g.strokePath()
+      }, { width: 1.6, bloom: firing })
+    }
+  }
+
+  /** 空挂架：暗色虚框 + 中心十字，表示"这个位子还空着、可以装" */
+  private drawEmptyMount(g: Phaser.GameObjects.Graphics, cx: number, cy: number,
+                         ang: number, L: number, W: number): void {
+    g.save()
+    g.translateCanvas(cx, cy)
+    g.rotateCanvas(ang)
+    g.lineStyle(1.2, UI.line, 0.5)
+    g.strokeRoundedRect(-L / 2, -W / 2, L, W, 7)
+    g.lineStyle(1, UI.line, 0.35)
+    g.beginPath()
+    g.moveTo(-L * 0.16, 0); g.lineTo(L * 0.16, 0)
+    g.moveTo(0, -W * 0.2); g.lineTo(0, W * 0.2)
+    g.strokePath()
+    g.restore()
   }
 
   // ==========================================================================
