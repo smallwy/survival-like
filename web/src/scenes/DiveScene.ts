@@ -68,13 +68,23 @@ import F_SWARM_TEX from '../assets/fish/swarm.png'
 import F_DRIFT_TEX from '../assets/fish/drift.png'
 import F_DASH_TEX from '../assets/fish/dash.png'
 
-/** 4 个侧装挂载点在机体局部坐标里的位置（单位：贴图像素，原点在贴图中心） */
+/**
+ * 4 个侧装挂载点在机体局部坐标里的位置（比例，原点在贴图中心）。
+ *
+ * 数值往中心收过一次：原来是 ±0.30 / ±0.26，玩家反馈「发射塔和武器大小有点
+ * 格格不入，感觉隔离太开」——挂载点离机体中心太远，塔头像是浮在机体外面
+ * 的独立小零件，不像"装在艇上的炮"。收到 ±0.21 / ±0.17 后塔头压在机体轮廓上，
+ * 视觉上才是一体的。
+ */
 const HARDPOINTS: Array<[number, number]> = [
-  [-0.30, 0.26],   // 左后
-  [-0.30, -0.26],  // 左前
-  [0.26, 0.26],    // 右后
-  [0.26, -0.26],   // 右前
+  [-0.21, 0.17],   // 左后
+  [-0.21, -0.17],  // 左前
+  [0.21, 0.17],    // 右后
+  [0.21, -0.17],   // 右前
 ]
+
+/** 塔头显示尺寸（px）。从 20 放大到 30 —— 20px 在 59px 的艇身上是"小零件"比例 */
+const TURRET_SIZE = 30
 
 /** 全场唯一近白：鱼骨与受击闪白专用，在混乱中最先被看见（V4 §3.3） */
 const WHITE = 0xffffff
@@ -188,14 +198,22 @@ type Kind = 'swarm' | 'dash' | 'drift' | 'boss'
 
 /**
  * 素材实际基准角补偿（弧度）。
+ * **基准值是 π（= Math.PI），不是 0。**
  *
- * 实测三张鱼贴图：梭形鲨带轻微 3/4 俯角、翼型掠食鱼几乎正右、水母是俯视对称不需要补偿。
- * 数字是目视校正的结果，改贴图就要重新量。
+ * 踩过的坑：一度以为贴图「朝右」，只给了 ±0.1 的微调，结果游戏里**鱼尾朝前游**
+ * ——玩家一眼就看出来不对（「不是鱼头往前移动吗」）。
+ *
+ * 实测依据（alpha 质量分布，逐列统计）：三张贴图都是**鱼头朝左**：
+ *   swarm 左半质量 6026 / 右半 4116，尾部列高递减到 0
+ *   drift 左半 9382 / 右半 3784
+ *   dash  左半 2619 / 右半 1016
+ * 贴图 rotation=0 时鱼头指向 -X 方向，角度就是 π。
+ * 所以绘制时的基准补偿必须是 π，各素材再在此基础上加微调。
  */
 const TEX_BASE_ROT: Partial<Record<Kind, number>> = {
-  swarm: -0.10,   // 素材略朝右上
-  dash: 0.02,
-  drift: 0,
+  swarm: Math.PI - 0.10,   // 朝左 + 素材略带俯角
+  dash: Math.PI + 0.02,
+  drift: Math.PI,          // 水母虽俯视对称，实测也是头朝左，同样要补偿
 }
 
 interface Enemy {
@@ -303,6 +321,20 @@ interface Arc {
 /** 鱼雷爆炸的冲击环（纯表现） */
 interface Blast { x: number; y: number; r: number; life: number }
 
+/**
+ * 火花：命中迸溅 / 枪口闪光共用的短命粒子。
+ * `ang`/`spd` 决定飞散方向，`kind` 决定画法（'flash' 枪口闪 · 'hit' 命中迸溅）。
+ */
+interface Spark {
+  x: number; y: number
+  vx: number; vy: number
+  life: number; maxLife: number
+  color: number
+  size: number
+  ang: number
+  kind: 'flash' | 'hit'
+}
+
 interface Upgrade {
   id: string
   name: string
@@ -368,6 +400,15 @@ export default class DiveScene extends Phaser.Scene {
   private bullets: Bullet[] = []
   private arcs: Arc[] = []
   private blasts: Blast[] = []
+  /**
+   * 命中火花 / 枪口闪光。
+   *
+   * 玩家反馈「发射的子弹不够酷炫」——除了把弹体本身做厚，
+   * 还需要**两个瞬间**：开火瞬间的枪口闪光、命中瞬间的火花迸溅。
+   * 没有这两个瞬间，射击只是"一条线飞过去"，没有打击感。
+   * 火花是短命对象（0.22s），用固定上限数组防爆炸性增长。
+   */
+  private sparks: Spark[] = []
   /** 玩家当前挂载的器械（最多 3 台，各自独立冷却、同时自动开火） */
   private weapons: Weapon[] = []
   private debris: Debris[] = []
@@ -755,6 +796,7 @@ export default class DiveScene extends Phaser.Scene {
       this.updateDebris(dt)
       this.updateMotes(dt)
       this.updateDrift(dt)
+      this.updateSparks(dt)
       this.autoFire(dt)
       this.drainOxygen(dt)
       this.updateWave(dt)
@@ -1110,6 +1152,10 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
           life: rng / 780, dmg: w.dmg, kind: 'gun',
           hit: new Set<number>(), alive: true,
         })
+        // 枪口闪光：从炮塔位置喷，而不是从机体中心喷 ——
+        // 喷在中心会看不出是"哪台武器开的火"
+        this.spawnMuzzleFlash(this.px + Math.cos(a) * 14, this.py + Math.sin(a) * 14,
+          a, WEAPON_DEF.gun.color)
       } else if (w.id === 'torpedo') {
         const e = this.nearestEnemy(rng); if (!e) continue
         const a = Math.atan2(e.y - this.py, e.x - this.px)
@@ -1119,6 +1165,8 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
           life: 3.0, dmg: w.dmg, kind: 'torpedo',
           hit: new Set<number>(), alive: true,
         })
+        this.spawnMuzzleFlash(this.px + Math.cos(a) * 14, this.py + Math.sin(a) * 14,
+          a, WEAPON_DEF.torpedo.color)
       } else {
         const first = this.nearestEnemy(rng); if (!first) continue
         this.fireArc(first, w)
@@ -1184,11 +1232,104 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
           b.hit.add(i)
           e.flash = 0.08
           this.hurt(e, b.dmg)
+          // 命中火花：沿弹道方向扇形迸溅，方向跟着弹走而不是随机散
+          // （随机散会看不出"这一发打中了"，跟弹道走才读得出打击方向）
+          this.spawnHitSparks(b.x, b.y, Math.atan2(b.vy, b.vx),
+            b.kind === 'gun' ? UI.amber : UI.danger)
           if (b.kind === 'torpedo') { this.explode(b.x, b.y, 120, b.dmg * 0.6); b.alive = false; break }
         }
       }
     }
     this.bullets = this.bullets.filter(b => b.alive)
+  }
+
+  // ==========================================================================
+  // 火花：命中迸溅 + 枪口闪光
+  // ==========================================================================
+
+  /**
+   * 命中火花：沿弹道方向**扇形迸溅**（±55°），而不是全向随机散。
+   *
+   * 全向随机散会看不出"这一发打中了哪里、从哪打来"；
+   * 跟弹道走才读得出打击方向，打击感来自方向一致性。
+   */
+  private spawnHitSparks(x: number, y: number, ang: number, color: number): void {
+    const n = 5
+    for (let i = 0; i < n; i++) {
+      const spread = -0.96 + (i / (n - 1)) * 1.92          // ±55°
+      const a = ang + Math.PI + spread                      // 主要朝弹道的反方向溅
+      const spd = 90 + Math.random() * 130
+      this.sparks.push({
+        x, y,
+        vx: Math.cos(a) * spd, vy: Math.sin(a) * spd,
+        life: 0.22, maxLife: 0.22,
+        color, size: 1.6 + Math.random() * 1.8, ang: a, kind: 'hit',
+      })
+    }
+  }
+
+  /**
+   * 枪口闪光：开火瞬间在炮口喷一小簇锥形火星。
+   * 只画 3 颗 + 一记闪光弧，多了会糊成一团、也拖性能。
+   */
+  private spawnMuzzleFlash(x: number, y: number, ang: number, color: number): void {
+    this.sparks.push({
+      x, y, vx: 0, vy: 0,
+      life: 0.11, maxLife: 0.11,
+      color, size: 7, ang, kind: 'flash',
+    })
+    for (let i = 0; i < 3; i++) {
+      const a = ang + (Math.random() - 0.5) * 0.7
+      const spd = 70 + Math.random() * 90
+      this.sparks.push({
+        x, y,
+        vx: Math.cos(a) * spd, vy: Math.sin(a) * spd,
+        life: 0.16, maxLife: 0.16,
+        color, size: 1.4 + Math.random() * 1.2, ang: a, kind: 'hit',
+      })
+    }
+  }
+
+  private updateSparks(dt: number): void {
+    for (const s of this.sparks) {
+      s.life -= dt
+      if (s.life <= 0) continue
+      if (s.kind === 'hit') {
+        s.x += s.vx * dt
+        s.y += s.vy * dt
+        s.vx *= 1 - 3.4 * dt          // 水的阻尼：火花在水里很快就停
+        s.vy *= 1 - 3.4 * dt
+      }
+    }
+    this.sparks = this.sparks.filter(s => s.life > 0)
+    // 硬上限：满屏鱼 + 高射速时火花可能爆炸性增长，超了直接丢最老的
+    if (this.sparks.length > 220) this.sparks.splice(0, this.sparks.length - 220)
+  }
+
+  private drawSparks(g: Phaser.GameObjects.Graphics): void {
+    for (const s of this.sparks) {
+      const k = Phaser.Math.Clamp(s.life / s.maxLife, 0, 1)   // 1 → 0
+      if (s.kind === 'flash') {
+        // 枪口闪光：一记朝弹道方向的锥形亮弧 + 中心白核
+        const L = s.size * (1.6 - k * 0.6)
+        const ca = Math.cos(s.ang), sa = Math.sin(s.ang)
+        const pa = -sa, pb = ca
+        g.fillStyle(WHITE, k * 0.85)
+        g.beginPath()
+        g.moveTo(s.x + ca * L * 1.25, s.y + sa * L * 1.25)
+        g.lineTo(s.x + pa * s.size * 0.62, s.y + pb * s.size * 0.62)
+        g.lineTo(s.x - pa * s.size * 0.62, s.y - pb * s.size * 0.62)
+        g.closePath(); g.fillPath()
+        g.fillStyle(s.color, k * 0.55)
+        g.fillCircle(s.x, s.y, s.size * 0.5)
+      } else {
+        // 命中火星：沿飞行方向拉成短条（"溅"不是"点"），越老越细越淡
+        const L = 4 + s.size * 2.2
+        const ca = Math.cos(s.ang), sa = Math.sin(s.ang)
+        neonLine(g, s.x, s.y, s.x - ca * L * k, s.y - sa * L * k, s.color,
+          { width: s.size * k, alpha: k, bloom: false })
+      }
+    }
   }
 
   /** 鱼雷爆炸：范围伤害随距离衰减 + 震屏 */
@@ -1594,6 +1735,9 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
 
     // 弹幕（曳光弹 / 鱼雷 / 电弧 / 爆炸环）画在敌人之上：玩家的攻击必须看得见
     this.drawProjectiles(g)
+    // 火花画在弹幕之上：命中迸溅和枪口闪光是"最亮的那一瞬间"，
+    // 被弹体盖住就失去意义了
+    this.drawSparks(g)
 
     // 鱼骨（画在敌人之上：V4 §3.3 掉落物必须最先被看见）
     this.drawBones(g)
@@ -1612,18 +1756,19 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
   // 表现层：声呐波前 / 肉屑 / 鱼骨 / 潜航器
   // ==========================================================================
 
-  /** 声呐波前：主环 + 内侧余波 + 外侧预兆，越扩越淡 */
-  private drawPulses(g: Phaser.GameObjects.Graphics): void {
-    for (const p of this.pulses) {
-      const k = p.r / p.maxR                 // 0→1
-      const a = (1 - k) * 0.9
-      if (a <= 0.02) continue
-      neonCircle(g, p.x, p.y, p.r, UI.cyanHi, { width: 2.4, alpha: a, bloom: false })
-      const r2 = p.r - 13
-      if (r2 > 3) neonCircle(g, p.x, p.y, r2, UI.cyan, { width: 1.5, alpha: a * 0.42, bloom: false })
-      const r3 = p.r + 11
-      if (r3 < p.maxR) neonCircle(g, p.x, p.y, r3, UI.cyan, { width: 1, alpha: a * 0.20, bloom: false })
-    }
+  /**
+   * 声呐波前 —— **已按用户要求移除圆环视觉**。
+   *
+   * 原本是从潜航器向外扩散的同心圆环（主环 + 内侧余波 + 外侧预兆）。
+   * 玩家反馈「弹射圆圈是啥，这个不需要」：满屏扩散的圆环既不像声呐，
+   * 又和弹幕混在一起干扰读图。
+   *
+   * `pulses` 数据结构**保留**：它承载声呐的伤害判定（环形波前扫过敌人），
+   * 移除的只是绘制。命中反馈改用已有的 `e.flash` 命中闪白 —— 命中时鱼身
+   * 自己亮一下，比从玩家身上扩散一个大圈更直接，也不挡视野。
+   */
+  private drawPulses(_g: Phaser.GameObjects.Graphics): void {
+    return
   }
 
   /**
@@ -1749,27 +1894,74 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
     }
 
     // —— 通用弹：机关枪曳光 / 鱼雷 ——
+    //
+    // 玩家反馈「发射的子弹不够酷炫」。旧版是一条单色直线 + 一个白点，
+    // 在满屏特效里完全没有存在感。重写成三段式：
+    //   ① **多层递减拖尾**：不是一条线，是 4 层叠出来的锥形残影，
+    //      越往后越细越淡 —— 速度感来自"长度梯度"而不是长度本身
+    //   ② **外发光晕**：弹头外包一层同色大半径低透明圆，让弹在深色层也发光
+    //   ③ **亮核**：白点 + 一圈本色环，弹头必须是全屏最亮的东西之一
+    // 鱼雷额外画**真实弹体轮廓**（尖头 + 圆柱身 + 尾翼），不再是一根线段。
     for (const b of this.bullets) {
       const sp = Math.max(1, Math.hypot(b.vx, b.vy))
       const ux = b.vx / sp, uy = b.vy / sp
+      // 垂直于弹道的方向，用来画鱼雷弹体的宽度
+      const px2 = -uy, py2 = ux
+
       if (b.kind === 'gun') {
-        // 曳光弹：沿运动反方向拉一条短亮线（长 18px）
-        const L = 18
-        neonLine(g, b.x, b.y, b.x - ux * L, b.y - uy * L, UI.amber,
-          { width: 2.4, alpha: 0.95, bloom: false })
-        g.fillStyle(WHITE, 0.95)
-        g.fillCircle(b.x, b.y, 1.8)
-      } else {
-        // 鱼雷：胶囊弹体 + 4 段逐渐变淡的尾迹 + 前部亮点
-        const tx = b.x - ux * 8, ty = b.y - uy * 8
-        for (let i = 1; i <= 4; i++) {
-          neonLine(g, b.x - ux * i * 7, b.y - uy * i * 7,
-            b.x - ux * (i * 7 + 6), b.y - uy * (i * 7 + 6),
-            UI.danger, { width: 3 - i * 0.5, alpha: 0.42 / i, bloom: false })
+        const col = UI.amber
+        // ① 4 层递减拖尾
+        for (let i = 0; i < 4; i++) {
+          const L0 = 10 + i * 7, L1 = L0 + 8
+          neonLine(g,
+            b.x - ux * L0, b.y - uy * L0,
+            b.x - ux * L1, b.y - uy * L1,
+            col, { width: 3.4 - i * 0.7, alpha: 0.9 / (i + 1.4), bloom: false })
         }
-        neonLine(g, tx, ty, b.x, b.y, UI.danger, { width: 3.2, alpha: 1, bloom: false })
+        // ② 外发光晕
+        g.fillStyle(col, 0.22)
+        g.fillCircle(b.x, b.y, 6.5)
+        g.fillStyle(col, 0.40)
+        g.fillCircle(b.x, b.y, 3.6)
+        // ③ 亮核 + 本色环
+        neonCircle(g, b.x, b.y, 2.6, col, { width: 1.6, alpha: 0.9, bloom: false })
         g.fillStyle(WHITE, 1)
-        g.fillCircle(b.x + ux * 3, b.y + uy * 3, 2.2)
+        g.fillCircle(b.x, b.y, 1.7)
+      } else {
+        const col = UI.danger
+        // ① 气泡尾迹：鱼雷在水里跑，尾迹应该是气泡不是焰火
+        for (let i = 1; i <= 5; i++) {
+          const bx = b.x - ux * i * 7, by = b.y - uy * i * 7
+          const wob = Math.sin(this.t * 9 + i * 1.7) * (1.6 + i * 0.5)
+          g.fillStyle(col, 0.5 / i)
+          g.fillCircle(bx + px2 * wob, by + py2 * wob, 3.2 - i * 0.42)
+        }
+        // ② 外发光晕
+        g.fillStyle(col, 0.20)
+        g.fillCircle(b.x, b.y, 9)
+        // ③ 真实弹体轮廓：尖头 + 圆柱身 + 尾翼（沿弹道方向的局部坐标）
+        const Nose = 7, Tail = 8, Half = 3.4
+        neon(g, UI.danger, () => {
+          g.beginPath()
+          g.moveTo(b.x + ux * Nose, b.y + uy * Nose)                       // 弹头尖
+          g.lineTo(b.x - ux * Tail + px2 * Half, b.y - uy * Tail + py2 * Half)  // 身尾·右
+          g.lineTo(b.x - ux * (Tail + 3) + px2 * (Half + 2.6),             // 尾翼·右
+            b.y - uy * (Tail + 3) + py2 * (Half + 2.6))
+          g.lineTo(b.x - ux * (Tail + 3) - px2 * (Half + 2.6),             // 尾翼·左
+            b.y - uy * (Tail + 3) - py2 * (Half + 2.6))
+          g.lineTo(b.x - ux * Tail - px2 * Half, b.y - uy * Tail - py2 * Half)  // 身尾·左
+          g.closePath(); g.strokePath()
+        }, { width: 1.8, alpha: 1, bloom: false })
+        // 弹体填色（暗红实心，让它有"实体"而不是线框）
+        g.fillStyle(UI.danger, 0.55)
+        g.beginPath()
+        g.moveTo(b.x + ux * Nose, b.y + uy * Nose)
+        g.lineTo(b.x - ux * Tail + px2 * Half, b.y - uy * Tail + py2 * Half)
+        g.lineTo(b.x - ux * Tail - px2 * Half, b.y - uy * Tail - py2 * Half)
+        g.closePath(); g.fillPath()
+        // ④ 头部亮点
+        g.fillStyle(WHITE, 1)
+        g.fillCircle(b.x + ux * 4, b.y + uy * 4, 2.3)
       }
     }
   }
@@ -1908,7 +2100,7 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
       img.setTexture(this.turretTex[w.id] ?? 'w_gun')
       img.setPosition(mountX, mountY)
       img.setRotation(this.aim + clamped)
-      img.setDisplaySize(20, 20)
+      img.setDisplaySize(TURRET_SIZE, TURRET_SIZE)
       // 开火瞬间塔头发亮，给"它在射击"的反馈
       img.setTint(w.timer > 0 ? 0xffffff : 0xbfd0ff)
     }
@@ -2279,6 +2471,7 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
     this.clearHits()
     this.enemies = []; this.bones = []; this.pulses = []; this.debris = []
     this.bullets = []; this.arcs = []; this.blasts = []   // 旧弹不能飘进新层
+    this.sparks = []
     // 背景立刻切到新层：过渡中点 cover=0.72 时几乎看不见旧景，
     // 后半段 cover 降到 0.28 自然就露出新层，衔接不跳变。
     // 注意不能调 syncEnv()——它会重算 depthM，把过渡的插值覆盖掉。
@@ -2437,6 +2630,7 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
 
   private restart(): void {
     this.enemies = []; this.bones = []; this.pulses = []; this.debris = []
+    this.sparks = []
     this.biomass = 0
     this.speedMul = 1; this.pickupMul = 1; this.killO2 = PLAYER.killO2
     this.burstTimer = 0
