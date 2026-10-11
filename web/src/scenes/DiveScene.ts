@@ -120,6 +120,16 @@ const SUB_WID = 52
 const MAX_MOUNTS = 8
 
 /**
+ * 商店刷新定价。
+ *
+ * 刷新是"用钱换选择权"，必须递增，否则钱多的时候可以无限刷到想要的卡，
+ * Build 多样性就没了。8 起、每次 +6：一波攒的 40 币大概够刷两三次，
+ * 再多就要牺牲一张卡的钱 —— 这个取舍才是刷新该有的代价。
+ */
+const REROLL_BASE = 8
+const REROLL_STEP = 6
+
+/**
  * 4 个物理座 × 每座 2 个管位 = 最多 8 个管位，但**武器上限是 6 台**（用户定的规格）。
  *
  * 分配规则（`mountPlan()`）：
@@ -426,6 +436,15 @@ interface Upgrade {
   name: string
   desc: string
   kind: 'weapon' | 'mount' | 'surv'
+  /**
+   * 售价（鱼骨）。
+   *
+   * 定价基准：L1 每波掉落上限 70（dropCap），鱼骨单个 value 5~7，
+   * 实测拾取率约六成 —— 也就是**一波大约能攒 40 币**。
+   * 所以常规定价 22~38（一波买一张还有富余），挂载扩容这种结构性卡 45~70
+   * （要攒一波多，是真正的投资）。刷新另算。
+   */
+  cost: number
   apply: (s: DiveScene) => void
   /** 返回 true 表示这张卡当前无效，不该出现在三选一里 */
   dead?: (s: DiveScene) => boolean
@@ -950,9 +969,11 @@ export default class DiveScene extends Phaser.Scene {
     // 键盘：商店 1/2/3，层末决策 1=下潜 / 2=上浮
     const K = Phaser.Input.Keyboard
     if (this.phase === 'shop') {
-      if (K.JustDown(this.keys.one) && this.offers[0]) this.pickUpgrade(this.offers[0])
-      else if (K.JustDown(this.keys.two) && this.offers[1]) this.pickUpgrade(this.offers[1])
-      else if (K.JustDown(this.keys.three) && this.offers[2]) this.pickUpgrade(this.offers[2])
+      // 商店变成"鱼骨经济"后，1/2/3 是**购买**而不是"选一张就走"：
+      // 买完还留在商店里，可以继续买第二张、刷新，或点"继续"开下一波。
+      if (K.JustDown(this.keys.one)) this.buyCard(0)
+      else if (K.JustDown(this.keys.two)) this.buyCard(1)
+      else if (K.JustDown(this.keys.three)) this.buyCard(2)
     } else if (this.phase === 'decide') {
       if (K.JustDown(this.keys.one)) this.diveDeeper()
       else if (K.JustDown(this.keys.two)) this.surface()
@@ -1208,6 +1229,10 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
         this.o2 = Math.min(this.o2Max, this.o2 + b.value)
         const gained = this.o2 - before
         b.alive = false
+        // 鱼骨**同时是货币**：捡到既有氧也有钱。
+        // 这两件事必须一起给 —— 只给钱的话氧气系统（血条+计时器）会失去
+        // 唯一的正向补充来源，只给氧的话"捡鱼骨"又和商店无关，循环还是断的。
+        this.bank += b.value
         // 回氧飘字。氧满时（gained ≈ 0）不飘 ——
         // 飘一个 "+0" 是在嘲笑玩家，那是最糟糕的反馈
         if (gained > 0.5) {
@@ -1215,6 +1240,8 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
         } else {
           this.spawnFloat(b.x, b.y - 8, '氧气已满', UI.cyanDim, 14)
         }
+        // 钱另飘一行（错开延迟，两行不打架）：让"这是在攒钱"变成可见的
+        this.spawnFloat(b.x, b.y - 26, `+${b.value} 骨`, BONE, 14)
         // 拾取时鱼骨位置炸一小簇青色粒子，让"吸进来了"有实感
         for (let i = 0; i < 3; i++) {
           const a = Math.random() * Math.PI * 2
@@ -2671,6 +2698,12 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
     if (this.mult > 1) {
       this.txt(`上浮可得 ${est}`, W - 24, by + 26, '13px', TXT.amber, MONO, 'right')
     }
+    // 鱼骨（商店货币）必须**常驻** HUD，不能只在商店里出现。
+    // 玩家要在战斗中就看见数字在涨，才会把"捡鱼骨"和"待会儿能买什么"连起来 ——
+    // 这也是"击杀→掉落→拾取→商店"这条链路以前最薄弱的一环。
+    const bY = by + (this.mult > 1 ? 48 : 26)
+    neonCircle(g, W - 106, bY + 8, 7, BONE, { width: 1.4, bloom: false })
+    this.txt(`${this.bank}`, W - 88, bY, '17px', TXT.cyber, MONO)
 
     // ⑤ 武器条（V6.3 建立，V6.6 重做）
     //
@@ -2862,9 +2895,13 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
     // 必须销毁锚点矩形：只清数组的话旧热区仍然 alive，
     // 会在下一波/下一局里响应已经看不见的点击（实测踩过同类坑）。
     for (const c of this.shopCards) c.rect.destroy()
+    for (const b of this.shopBtns) b.rect.destroy()
     for (const b of this.decideBtns) b.rect.destroy()
     for (const b of this.resultBtns) b.rect.destroy()
     this.shopCards = []
+    this.shopBtns = []
+    this.rerollBtnRect = null
+    this.leaveBtnRect = null
     this.decideBtns = []
     this.resultBtns = []
   }
@@ -2901,18 +2938,22 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
     // 弓与枪的定位不重叠，所以拿到哪张都会明显改变手感。
     {
       id: 'w_gun', name: '脉冲机关枪', desc: '高频连射 · 单体', kind: 'weapon',
+      cost: 30,
       apply: s => s.addWeapon('gun'),
     },
     {
       id: 'w_torp', name: '追踪鱼雷', desc: '低频追踪 · 范围爆炸', kind: 'weapon',
+      cost: 38,
       apply: s => s.addWeapon('torpedo'),
     },
     {
       id: 'w_arc', name: '链式电弧', desc: '瞬发连锁 · 多目标', kind: 'weapon',
+      cost: 34,
       apply: s => s.addWeapon('arc'),
     },
     {
       id: 'w_all', name: '弹药改良', desc: '全部器械 +1 级', kind: 'weapon',
+      cost: 26,
       apply: s => s.levelAllWeapons(),
       dead: s => s.weapons.length === 0,
     },
@@ -2927,17 +2968,20 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
     // 玩家看不出发生了什么 —— 逐级解锁才有"我的艇在变强"的实感。
     {
       id: 't_slot5', name: '双联挂载 I', desc: '解锁第 5 挂载位 · 首座改双联', kind: 'mount',
+      cost: 55,
       apply: s => { s.maxWeapons = 5 },
       dead: s => s.maxWeapons >= 5,
     },
     {
       id: 't_slot6', name: '双联挂载 II', desc: '解锁第 6 挂载位 · 次座改双联', kind: 'mount',
+      cost: 70,
       apply: s => { s.maxWeapons = 6 },
       // 前置：必须先有 5 槽。没拿到 I 就不该刷出 II
       dead: s => s.maxWeapons !== 5,
     },
     {
       id: 't_twin', name: '齐射同步', desc: '双联座射速 +25%', kind: 'mount',
+      cost: 45,
       apply: s => { s.twinRate = Math.min(0.6, s.twinRate + 0.25) },
       // 没双联就没意义
       dead: s => s.maxWeapons < 5,
@@ -2946,65 +2990,168 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
     // —— 生存 / 机动 ——
     {
       id: 'speed', name: '增压推进', desc: '移速 +15%', kind: 'surv',
+      cost: 24,
       apply: s => { s.speedMul *= 1.15 },
     },
     {
       id: 'pickup', name: '吸附鳍', desc: '拾取范围 +40%', kind: 'surv',
+      cost: 22,
       apply: s => { s.pickupMul *= 1.4 },
     },
     {
       id: 'tank', name: '扩容气瓶', desc: '氧气上限 +20 并回满', kind: 'surv',
+      cost: 36,
       apply: s => { s.o2Bonus += 20; s.o2Max = s.layer().o2Max + s.o2Bonus; s.o2 = s.o2Max },
     },
     {
       id: 'gill', name: '循环鳃', desc: '击杀额外回氧 +3', kind: 'surv',
+      cost: 28,
       apply: s => { s.killO2 += 3 },
     },
   ]
 
   private offers: Upgrade[] = []
+  /**
+   * 鱼骨存量 —— 商店货币（V6.7）。
+   *
+   * 之前商店是"每波免费三选一"，鱼骨只回氧、本质是变相分数，
+   * 于是"击杀 → 掉落 → 游过去捡 → 进商店"这条链路里，**捡**这个动作
+   * 对商店没有任何影响，循环是断的。现在鱼骨直接是钱：
+   * 捡得多 → 买得起更好的卡 → 打得更快 → 掉得更多。
+   */
+  private bank = 0
+  /** 三张卡的锁定状态：锁定后刷新不会被换掉（攒钱买下一波） */
+  private locked: boolean[] = [false, false, false]
+  /** 三张卡的售出状态：买过的格子留空，不重复卖同一格 */
+  private sold: boolean[] = [false, false, false]
+  /** 刷新价格：每次刷新递增，离开商店时重置 */
+  private rerollCost = 0
   private hoverCard = -1
   private hoverBtn = -1
+  /** 商店底部按钮（锁定 / 刷新 / 继续）的热区，和 shopCards 一样要随 clearHits 销毁 */
+  private shopBtns: { x: number; y: number; w: number; h: number; rect: Phaser.GameObjects.Rectangle }[] = []
+  /** 刷新 / 继续按钮的绘制矩形（热区创建时记下来，绘制时要用） */
+  private rerollBtnRect: { x: number; y: number; w: number; h: number } | null = null
+  private leaveBtnRect: { x: number; y: number; w: number; h: number } | null = null
 
   private openShop(): void {
     this.phase = 'shop'
     this.hoverCard = -1
-    //
-    // 先过滤"死卡"再抽三选一。
-    //
-    // 死卡 = 买了没有效果的卡（槽位已满还刷扩容卡、一台武器都没有还刷"全部升级"）。
-    // 一张无效卡会挤掉一个有效选项 —— 三选一本来就只有三个位置，
-    // 出现废卡等于这一波商店白给，是最伤玩家信任的事。
+    this.locked = [false, false, false]
+    this.sold = [false, false, false]
+    this.rerollCost = REROLL_BASE
+    // 开局先发一点启动资金：第一波还没捡到鱼骨时也能买一张便宜卡，
+    // 否则商店第一波必然空手而归，"鱼骨=钱"的第一印象就是负的。
+    if (this.bank < REROLL_BASE) this.bank = 20
+    this.rollOffers(true)
+    this.clearHits()
+  }
+
+  /**
+   * 抽三张（`fresh = true` 表示全新的三张，否则保留锁定格）。
+   *
+   * 先过滤"死卡"再抽。死卡 = 买了没有效果的卡（槽位已满还刷扩容卡、
+   * 一台武器都没有还刷"全部升级"）。一张无效卡会挤掉一个有效选项 ——
+   * 三选一本来就只有三个位置，出现废卡等于这一波商店白给，
+   * 是最伤玩家信任的事。
+   */
+  private rollOffers(fresh: boolean): void {
     const alive = this.pool.filter(u => !u.dead || !u.dead(this))
     // 兜底：极端情况下全被过滤光了（不该发生），退回全池，至少不崩
     const from = alive.length >= 3 ? alive : this.pool
-    this.offers = Phaser.Utils.Array.Shuffle(from.slice()).slice(0, 3)
+    const next = Phaser.Utils.Array.Shuffle(from.slice()).slice(0, 3)
+    if (!fresh) {
+      // 锁定格保留原卡：这是"攒钱买下一波"的唯一途径
+      for (let i = 0; i < 3; i++) {
+        if (this.locked[i] && !this.sold[i] && this.offers[i]) next[i] = this.offers[i]
+      }
+    }
+    this.offers = next
+  }
+
+  /** 买第 i 张。钱不够就什么都不做 —— 卡面会画成灰色，不用弹提示打断节奏 */
+  private buyCard(i: number): void {
+    if (this.phase !== 'shop') return
+    const up = this.offers[i]
+    if (!up || this.sold[i]) return
+    if (this.bank < up.cost) return
+    this.bank -= up.cost
+    up.apply(this)
+    this.sold[i] = true
+    this.locked[i] = false
+    // 买完要重建热区：同一波还能继续买第二张、第三张
     this.clearHits()
+  }
+
+  private reroll(): void {
+    if (this.phase !== 'shop') return
+    if (this.bank < this.rerollCost) return
+    this.bank -= this.rerollCost
+    this.rerollCost += REROLL_STEP
+    this.rollOffers(false)
+    this.clearHits()
+  }
+
+  private toggleLock(i: number): void {
+    if (this.sold[i]) return
+    this.locked[i] = !this.locked[i]
+  }
+
+  /**
+   * 离开商店。
+   *
+   * 注意是 startWave() 而不是 advance()：waveInLayer 已经在 advance 里加过了，
+   * 再走 advance 会多跳一波。
+   */
+  private leaveShop(): void {
+    if (this.phase !== 'shop') return
+    this.clearHits()
+    this.startWave()
   }
 
   private drawShop(g: Phaser.GameObjects.Graphics): void {
     const W = this.scale.width, H = this.scale.height
     g.fillStyle(UI.abyss, 0.72); g.fillRect(0, 0, W, H)
 
-    const cw = 220, ch = 240, gap = 24
+    const cw = 220, ch = 268, gap = 24
     const total = cw * 3 + gap * 2
     const x0 = (W - total) / 2
-    const y0 = H / 2 - ch / 2
+    const y0 = H / 2 - ch / 2 - 24
 
+    // —— 顶部：鱼骨存量 ——
+    // 这是"鱼骨=钱"能否被理解的关键：钱必须和卡同时出现在视野里，
+    // 玩家才能把"刚才捡的那些骨"和"现在能买什么"连起来。
     this.txt(`L${this.layerIdx + 1} ${this.layer().name} · 第 ${this.waveInLayer + 1} 波结束`,
-      W / 2, y0 - 56, '18px', TXT.cyber, FONT, 'center')
-    this.txt('按 1 / 2 / 3 或点击选择', W / 2, y0 - 28, '13px', TXT.mute, FONT, 'center')
+      W / 2, y0 - 74, '17px', TXT.cyber, FONT, 'center')
+    const bankX = W / 2
+    neonCircle(g, bankX - 96, y0 - 34, 13, BONE, { width: 1.6, bloom: false })
+    this.txt(`${this.bank}`, bankX - 76, y0 - 42, '26px', TXT.cyber, MONO)
+    this.txt('鱼骨', bankX - 42, y0 - 34, '13px', TXT.dim, FONT)
+    this.txt('点击卡片购买 · 右键锁 · 1/2/3 快捷购买', W / 2, y0 - 8, '12px', TXT.mute, FONT, 'center')
 
     if (this.shopCards.length === 0) {
-      for (let i = 0; i < this.offers.length; i++) {
-        const up = this.offers[i]
+      for (let i = 0; i < 3; i++) {
+        const up = this.offers[i] ?? this.pool[0]
         const x = x0 + i * (cw + gap), y = y0
         const idx = i
-        const rect = this.addHoverHit(x + cw / 2, y + ch / 2, cw, ch,
-          () => this.pickUpgrade(up),
+        // 卡主体热区**避开底部价格行**（锁定按钮在那儿，否则点锁就变成买卡）
+        const rect = this.addHoverHit(x + cw / 2, y + (ch - 46) / 2, cw, ch - 46,
+          () => this.buyCard(idx),
           v => { this.hoverCard = v ? idx : (this.hoverCard === idx ? -1 : this.hoverCard) })
         this.shopCards.push({ x, y, w: cw, h: ch, up, rect })
+        // 锁定按钮（卡底部右侧）
+        const lrect = this.addHoverHit(x + cw - 46, y + ch - 30, 62, 26,
+          () => this.toggleLock(idx), () => {})
+        this.shopBtns.push({ x: x + cw - 77, y: y + ch - 43, w: 62, h: 26, rect: lrect })
       }
+      // 底部动作按钮：刷新 / 继续
+      const byy = y0 + ch + 30, bw2 = 168, bh2 = 44
+      const rrect = this.addHoverHit(W / 2 - bw2 / 2 - 10, byy, bw2, bh2, () => this.reroll(), () => {})
+      this.shopBtns.push({ x: W / 2 - bw2 - 10, y: byy - bh2 / 2, w: bw2, h: bh2, rect: rrect })
+      const grect = this.addHoverHit(W / 2 + bw2 / 2 + 10, byy, bw2, bh2, () => this.leaveShop(), () => {})
+      this.shopBtns.push({ x: W / 2 + 10, y: byy - bh2 / 2, w: bw2, h: bh2, rect: grect })
+      this.rerollBtnRect = { x: W / 2 - bw2 - 10, y: byy - bh2 / 2, w: bw2, h: bh2 }
+      this.leaveBtnRect = { x: W / 2 + 10, y: byy - bh2 / 2, w: bw2, h: bh2 }
     }
 
     for (let i = 0; i < this.shopCards.length; i++) {
@@ -3012,12 +3159,19 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
       const up = c.up
       const hov = this.hoverCard === i
       const cx = c.x + c.w / 2
+      const isSold = this.sold[i]
+      const isLocked = this.locked[i]
+      const afford = this.bank >= up.cost
 
       // —— 卡体 ——
-      g.fillStyle(hov ? UI.panelHi : UI.panel, 0.94); g.fillRoundedRect(c.x, c.y, c.w, c.h, 12)
+      // 三态必须一眼分开：可买（亮）/ 买不起（压暗）/ 已售出（最暗 + 划掉）
+      const bodyA = isSold ? 0.5 : (afford ? 0.94 : 0.72)
+      g.fillStyle(isSold ? UI.panel : (hov && afford ? UI.panelHi : UI.panel), bodyA)
+      g.fillRoundedRect(c.x, c.y, c.w, c.h, 12)
       // 悬停时描边加亮加粗——纯 Graphics 卡片没有自带 hover 态，必须手绘
-      neon(g, hov ? UI.cyanHi : UI.cyan, () => { g.strokeRoundedRect(c.x, c.y, c.w, c.h, 12) },
-        { width: hov ? 3 : 2, bloom: hov })
+      const edgeCol = isSold ? UI.line : (isLocked ? UI.amber : (afford ? (hov ? UI.cyanHi : UI.cyan) : UI.line))
+      neon(g, edgeCol, () => { g.strokeRoundedRect(c.x, c.y, c.w, c.h, 12) },
+        { width: hov && afford ? 3 : 2, bloom: hov && afford })
 
       // —— 顶部类型色条：三类卡一眼分开，不用读文字 ——
       // 青=器械 / 琥珀=挂载扩容 / 紫=生存
@@ -3084,6 +3238,62 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
           : `挂载位 ${this.maxWeapons} → ${up.id === 't_slot5' ? 5 : 6}`
       }
       if (foot) this.txt(foot, cx, c.y + 196, '12px', footCol, FONT, 'center')
+
+      // —— 底部价格行：鱼骨图标 + 价格 + 锁定按钮 ——
+      const pyRow = c.y + c.h - 30
+      if (isSold) {
+        // 已售出：不画价格，画一条贯穿的"已购入"
+        g.fillStyle(UI.jade, 0.5)
+        g.fillRect(c.x + 14, pyRow + 4, c.w - 28, 1)
+        this.txt('已购入', cx, pyRow - 2, '16px', TXT.jade, FONT, 'center')
+      } else {
+        // 鱼骨币图标（小圆 + 十字，和飘字/HUD 用同一套记号）
+        const bx2 = cx - 44
+        neonCircle(g, bx2, pyRow + 4, 8, BONE, { width: 1.4, bloom: false })
+        this.txt(`${up.cost}`, bx2 + 13, pyRow - 4, '20px', afford ? TXT.cyber : TXT.warn, MONO)
+        // 买不起时不弹提示（打断节奏），而是把整张卡压暗 + 价格转告警色，
+        // 玩家自己会得出"我得再捡一波"的结论 —— 这就是鱼骨经济该教的判断。
+        this.txt(afford ? '购买' : '鱼骨不足', bx2 + 13 + String(up.cost).length * 12 + 8,
+          pyRow + 2, '12px', afford ? TXT.dim : TXT.warn, FONT)
+
+        // 锁定按钮
+        const lbx = c.x + c.w - 77, lby = c.y + c.h - 43
+        g.fillStyle(isLocked ? UI.amber : UI.panelHi, isLocked ? 0.9 : 0.7)
+        g.fillRoundedRect(lbx, lby, 62, 26, 6)
+        g.lineStyle(1.2, isLocked ? UI.amber : UI.line, isLocked ? 1 : 0.6)
+        g.strokeRoundedRect(lbx, lby, 62, 26, 6)
+        // 锁图标：锁定时闭合（实心方块 + 梁），未锁定时开口
+        const lcx2 = lbx + 15, lcy2 = lby + 13
+        g.lineStyle(1.8, isLocked ? UI.abyss : UI.cyanDim, 0.95)
+        g.beginPath()
+        if (isLocked) g.strokeRect(lcx2 - 5, lcy2 - 1, 10, 8)
+        else { g.moveTo(lcx2 - 5, lcy2 + 3); g.lineTo(lcx2 - 5, lcy2 - 1)
+               g.lineTo(lcx2 + 5, lcy2 - 1); g.lineTo(lcx2 + 5, lcy2 + 3) }
+        g.strokePath()
+        this.txt(isLocked ? '已锁定' : '锁定', lbx + 26, lby + 6, '12px',
+          isLocked ? TXT.amber : TXT.mute, FONT)
+      }
+    }
+
+    // —— 底部动作按钮 ——
+    if (this.rerollBtnRect) {
+      const r = this.rerollBtnRect
+      const canRoll = this.bank >= this.rerollCost
+      g.fillStyle(canRoll ? UI.panelHi : UI.panel, canRoll ? 0.92 : 0.6)
+      g.fillRoundedRect(r.x, r.y, r.w, r.h, 10)
+      neon(g, canRoll ? UI.cyan : UI.line, () => { g.strokeRoundedRect(r.x, r.y, r.w, r.h, 10) },
+        { width: 1.6, alpha: canRoll ? 0.9 : 0.5, bloom: false })
+      this.txt(`刷新  ${this.rerollCost} 骨`, r.x + r.w / 2, r.y + 8, '17px',
+        canRoll ? TXT.cyber : TXT.mute, FONT, 'center')
+      this.txt('保留已锁定的卡', r.x + r.w / 2, r.y + 26, '11px', TXT.dim, FONT, 'center')
+    }
+    if (this.leaveBtnRect) {
+      const b = this.leaveBtnRect
+      g.fillStyle(UI.panelHi, 0.92); g.fillRoundedRect(b.x, b.y, b.w, b.h, 10)
+      neon(g, UI.jade, () => { g.strokeRoundedRect(b.x, b.y, b.w, b.h, 10) },
+        { width: 2, alpha: 0.95, bloom: false })
+      this.txt('继续 · 进入下一波', b.x + b.w / 2, b.y + 8, '17px', TXT.jade, FONT, 'center')
+      this.txt(`剩余 ${this.bank} 鱼骨将保留`, b.x + b.w / 2, b.y + 26, '11px', TXT.dim, FONT, 'center')
     }
   }
 
@@ -3166,14 +3376,8 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
     void plan
   }
 
-  private pickUpgrade(up: Upgrade): void {
-    if (this.phase !== 'shop') return
-    up.apply(this)
-    this.clearHits()
-    // 注意是 startWave() 而不是 advance()：waveInLayer 已经在 advance 里加过了，
-    // 再走 advance 会多跳一波。
-    this.startWave()
-  }
+  // （V6.7：pickUpgrade 已拆成 buyCard / reroll / toggleLock / leaveShop，
+  //  商店从"免费三选一"改成鱼骨经济后可以买多张。）
 
   // ==========================================================================
   // 层末补给站：下潜 / 上浮（V6 相对 Brotato 的唯一结构增量）
@@ -3360,6 +3564,7 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
     this.enemies = []; this.bones = []; this.pulses = []; this.debris = []
     this.sparks = []; this.floats = []
     this.biomass = 0
+    this.bank = 0            // 鱼骨货币也要清零，否则重开一局带着上局的存款
     this.speedMul = 1; this.pickupMul = 1; this.killO2 = PLAYER.killO2
     this.burstTimer = 0
     this.px = this.scale.width / 2; this.py = this.scale.height / 2
@@ -3427,7 +3632,14 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
       surface: () => this.surface(),
       // 测试专用：立刻清场并推进（否则无头验证要真等 40-55 秒一波）
       skip: () => { this.enemies = []; this.spawnLeft = 0; this.advance() },
-      pick: (i: number) => { if (this.offers[i]) this.pickUpgrade(this.offers[i]) },
+      // V6.7：商店改成鱼骨经济后，pick 是"买第 i 张"（不再是一选就走）
+      pick: (i: number) => this.buyCard(i),
+      buy: (i: number) => this.buyCard(i),
+      reroll: () => this.reroll(),
+      lock: (i: number) => this.toggleLock(i),
+      leaveShop: () => this.leaveShop(),
+      bank: () => this.bank,
+      setBank: (v: number) => { this.bank = v },
       refill: () => { this.o2 = this.o2Max },
       hit: (i: number) => {
         const rs = (this as unknown as { __uiHitRoutes: { onClick: () => void }[] }).__uiHitRoutes ?? []
