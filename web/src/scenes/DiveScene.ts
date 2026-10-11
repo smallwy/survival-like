@@ -649,6 +649,18 @@ interface DriftLife {
   col: number
 }
 
+/** UI 合理性审计用的节点登记项（屏幕坐标系，左上角 + 尺寸）。 */
+interface UINode {
+  kind: 'text' | 'panel' | 'hit'
+  x: number; y: number; w: number; h: number
+  color?: string      // text/hit 颜色（'#rrggbb'）
+  fill?: string       // panel 填充色（用于对比度计算）
+  edge?: string       // panel 描边色
+  size?: number       // text 字号 px
+  text?: string       // text 内容（截断）
+  cat?: 'ui' | 'float'  // float = 飘字（瞬态，审计时可剔除）
+}
+
 export default class DiveScene extends Phaser.Scene {
   constructor() { super('dive') }
 
@@ -775,6 +787,8 @@ export default class DiveScene extends Phaser.Scene {
   private decideBtns: { x: number; y: number; w: number; h: number; label: string; sub: string; enabled: boolean; act: () => void; rect: Phaser.GameObjects.Rectangle }[] = []
   private resultBtns: { x: number; y: number; w: number; h: number; label: string; act: () => void; rect: Phaser.GameObjects.Rectangle }[] = []
   private txtPool: Phaser.GameObjects.Text[] = []
+  /** UI 合理性审计：每帧 draw 阶段累积的 UI 节点（__dive.uiProbe 导出） */
+  private ui: UINode[] = []
   private t = 0
 
   preload(): void {
@@ -1155,6 +1169,7 @@ export default class DiveScene extends Phaser.Scene {
     }
     if (K.JustDown(this.keys.esc)) this.scene.start('title')
 
+    this.ui.length = 0   // 审计：每帧重算 UI 节点（draw 阶段累积，供 __dive.uiProbe 导出）
     this.drawEnv()
     this.draw()
     // 弹窗相位（shop/decide/result）**不画战斗 HUD** —— 否则氧气条、波次点、
@@ -1871,7 +1886,7 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
       const w = f.text.length * size * 0.58
       g.fillStyle(UI.abyss, 0.55 * a)
       g.fillRoundedRect(f.x - w / 2 - 4, f.y - size * 0.72, w + 8, size * 1.32, 4)
-      this.txt(f.text, f.x, f.y, `${size}px`, this.hexOf(f.color), MONO, 'center')
+      this.txt(f.text, f.x, f.y, `${size}px`, this.hexOf(f.color), MONO, 'center', 'float')
         .setAlpha(a)
     }
   }
@@ -3159,7 +3174,8 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
     for (const t of this.txtPool) t.setVisible(false)
   }
   private txt(s: string, x: number, y: number, size: string, color: string,
-              font: string, align: 'left' | 'center' | 'right' = 'left')
+              font: string, align: 'left' | 'center' | 'right' = 'left',
+              cat: 'ui' | 'float' = 'ui')
     : Phaser.GameObjects.Text {
     let t = this.txtPool.find(o => !o.visible)
     if (!t) {
@@ -3173,6 +3189,12 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
     else if (align === 'right') t.setOrigin(1, 0)
     else t.setOrigin(0)
     t.setStroke('#04070d', 3)
+    // UI 合理性审计：把文字节点登记进 this.ui（屏幕坐标 + 颜色），供 __dive.uiProbe 导出
+    const b = t.getBounds()
+    this.ui.push({
+      kind: 'text', x: b.x, y: b.y, w: Math.max(1, b.width), h: Math.max(1, b.height),
+      color, size: parseInt(size, 10) || 12, text: s.slice(0, 48), cat,
+    })
     // 返回对象是为了让调用方能再设 alpha（飘字淡出要用）。
     // 之前返回 void，飘字只能"瞬间消失"不能淡出，这就是那个坑。
     return t
@@ -3849,6 +3871,8 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
   private drawStatPanel(g: Phaser.GameObjects.Graphics, x: number, y: number): void {
     const w = 250, rowH = 30
     const h = 44 + STAT_META.length * rowH
+    // 审计：每帧登记侧栏面板（用于对比度计算）
+    this.ui.push({ kind: 'panel', x, y, w, h, fill: '#' + (UI.panel as number).toString(16).padStart(6, '0') })
     g.fillStyle(UI.panel, 0.6); g.fillRoundedRect(x, y, w, h, 10)
     neon(g, UI.cyanDim, () => { g.strokeRoundedRect(x, y, w, h, 10) },
       { width: 1, alpha: 0.5, bloom: false })
@@ -3883,6 +3907,8 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
     const w = 250
     const cellH = 74
     const h = 44 + RELIC_SLOTS * cellH
+    // 审计：每帧登记侧栏面板（用于对比度计算）
+    this.ui.push({ kind: 'panel', x, y, w, h, fill: '#' + (UI.panel as number).toString(16).padStart(6, '0') })
     g.fillStyle(UI.panel, 0.6); g.fillRoundedRect(x, y, w, h, 10)
     neon(g, BONE, () => { g.strokeRoundedRect(x, y, w, h, 10) },
       { width: 1, alpha: 0.5, bloom: false })
@@ -4297,6 +4323,9 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
     g.fillStyle(0xffffff, 0.05); g.fillRoundedRect(x + 3, y + 3, w - 6, 11, 6)   // 顶部高光
     g.lineStyle(1, UI.cyanDim, 0.22); g.strokeRoundedRect(x + 2.5, y + 2.5, w - 5, h - 5, 12)  // 内描边
     neon(g, edge, () => { g.strokeRoundedRect(x, y, w, h, 14) }, { width: 2, bloom })
+    // 审计：登记面板（填充色用于对比度计算，描边色用于可视化）
+    const pf = '#' + (UI.panel as number).toString(16).padStart(6, '0')
+    this.ui.push({ kind: 'panel', x, y, w, h, fill: pf, edge: '#' + edge.toString(16).padStart(6, '0') })
     // 四角铆钉
     for (const [dx, dy] of [[x + 11, y + 11], [x + w - 11, y + 11], [x + 11, y + h - 11], [x + w - 11, y + h - 11]]) {
       g.fillStyle(edge, 0.7); g.fillCircle(dx, dy, 2.4)
@@ -4383,6 +4412,28 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
       reroll: () => this.reroll(),
       lock: (i: number) => this.toggleLock(i),
       leaveShop: () => this.leaveShop(),
+      // UI 合理性审计：导出当前帧的 UI 节点 + 主题底色（供 ui_audit 工具计算
+      // 越界 / 重叠 / 对比度 / 密度）。任何场景只要实现同样的 __dive.uiProbe
+      // 契约，就能被这套通用工具审计。
+      // 注意：热区/卡片只在首次绘制时建一次（数组持久），但 this.ui 每帧重置，
+      // 所以面板与热区必须从**持久数组**每帧补登记，否则弹窗帧读不到。
+      uiProbe: () => {
+        const pf = '#' + (UI.panel as number).toString(16).padStart(6, '0')
+        const nodes: UINode[] = this.ui.slice()
+        for (const c of this.shopCards) nodes.push({ kind: 'panel', x: c.x, y: c.y, w: c.w, h: c.h, fill: pf })
+        for (const b of this.shopBtns) nodes.push({ kind: 'hit', x: b.x, y: b.y, w: b.w, h: b.h })
+        // 注：reroll/leave 按钮已包含在 shopBtns 中，rerollBtnRect/leaveBtnRect
+        // 只是它的副本，勿重复登记（否则自我重叠 ratio=1.0 误报）。
+        for (const b of this.decideBtns) nodes.push({ kind: 'hit', x: b.x, y: b.y, w: b.w, h: b.h })
+        for (const b of this.resultBtns) nodes.push({ kind: 'hit', x: b.x, y: b.y, w: b.w, h: b.h })
+        return {
+          phase: this.phase,
+          W: this.scale.width,
+          H: this.scale.height,
+          nodes,
+          theme: { abyss: '#04070d', panel: '#08111c', panelHi: '#0e1a29' },
+        }
+      },
       bank: () => this.bank,
       setBank: (v: number) => { this.bank = v },
       // V6.8：属性与遗物
