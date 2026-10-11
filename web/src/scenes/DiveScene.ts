@@ -86,6 +86,22 @@ const HARDPOINTS: Array<[number, number]> = [
 /** 塔头显示尺寸（px）。从 20 放大到 30 —— 20px 在 59px 的艇身上是"小零件"比例 */
 const TURRET_SIZE = 30
 
+/**
+ * 4 个物理座 × 每座 2 个管位 = 最多 8 个管位，但**武器上限是 6 台**（用户定的规格）。
+ *
+ * 分配规则（`mountPlan()`）：
+ *   第 1~4 台 → 座 0~3 的**前管位**（单装形态）
+ *   第 5~6 台 → 座 0~1 的**后管位**（这两座变成双联形态）
+ *
+ * 为什么是"座 0、1 变双联"而不是随机：双联必须发生在**机体中前段**，
+ * 放在靠后的座会让艇尾拖两个大塔，剪影变成"螃蟹"。
+ *
+ * 管位的横向偏移（座局部坐标，沿艇身宽度方向）：前管 -0.07 / 后管 +0.07。
+ * 偏移量刻意小于塔头半径的一半 —— 双联要看起来是"并联的两根管"，
+ * 分开太多就变回两个独立的小零件，这正是上一轮被吐槽的问题。
+ */
+const TWIN_OFFSET = [-0.07, 0.07]
+
 /** 全场唯一近白：鱼骨与受击闪白专用，在混乱中最先被看见（V4 §3.3） */
 const WHITE = 0xffffff
 /** 鱼骨色：冷白微青。比 WHITE 略偏青，让骨架在暖色/紫色生物里也能跳出来 */
@@ -335,11 +351,48 @@ interface Spark {
   kind: 'flash' | 'hit'
 }
 
+/**
+ * 飘字：拾取 / 回氧 / 波次这类"发生了什么"的即时数字反馈。
+ *
+ * 用户诉求：「获取鱼骨 氧气增加的飘字」。之前完全没这个系统 ——
+ * 捡到鱼骨只是氧气条悄悄涨一点，玩家**不知道自己捡到了什么、加了多少**。
+ * 飘字把这个因果变成看得见的事件。
+ *
+ * 三条设计约束：
+ *   ① **上浮 + 淡出**，不是原地消失。上浮符合"气泡往上升"的水下直觉
+ *   ② 带 `scalePop`：出生瞬间放大再回落，没有这一下"弹跳"会显得呆板
+ *   ③ 同帧多个飘字必须**错开**（stagger），否则叠在一起糊成一团读不出数字
+ */
+interface FloatText {
+  x: number; y: number
+  vy: number
+  life: number; maxLife: number
+  text: string
+  color: number
+  size: number
+  /** 出生后延迟多久才开始上浮（错开同帧多个飘字） */
+  delay: number
+}
+
+/**
+ * 商店卡。
+ *
+ * `kind` 决定卡面视觉分区（V6.6 新增）：
+ *   'weapon' 装/升一台器械 —— 画真实器械图标 + 等级条
+ *   'mount'  挂载位扩容 —— 画座/管位示意图，这是"塔升级"的成长线
+ *   'surv'   生存/机动 —— 抽象环
+ *
+ * `maxed` 用于判断这张卡是否还有意义（槽位已满时不再提供扩容卡），
+ * 避免出现"买了没效果"的卡 —— 那是商店最伤玩家信任的事。
+ */
 interface Upgrade {
   id: string
   name: string
   desc: string
+  kind: 'weapon' | 'mount' | 'surv'
   apply: (s: DiveScene) => void
+  /** 返回 true 表示这张卡当前无效，不该出现在三选一里 */
+  dead?: (s: DiveScene) => boolean
 }
 
 interface Mote { x: number; y: number; r: number; vy: number; vx: number; a: number }
@@ -388,6 +441,22 @@ export default class DiveScene extends Phaser.Scene {
   private killO2 = PLAYER.killO2
   /** 受击闪白计时（氧气被撞时） */
   private hurtFlash = 0
+  /**
+   * 最后一次受击的来向（单位向量，指向"敌人所在的那一边"）。
+   * 用于**方向性暗角**：屏幕那一侧先红，玩家不用看血条也知道该往反方向跑。
+   */
+  private hurtDirX = 0
+  private hurtDirY = 0
+  /** 方向性暗角剩余时长（秒） */
+  private hurtDirT = 0
+  /**
+   * 氧气**显示值**，每帧向真实 `o2` 缓动。
+   *
+   * 为什么需要：氧气既是血条又是计时器，掉得很快。直接打印真实值会让数字
+   * 每帧乱跳，玩家读不出"我大概剩多少"。补间后数字是连续滚动的，
+   * 掉氧的**速率**也变成可读的视觉信号（滚得快 = 在挨打）。
+   */
+  private o2Shown = O2.max
   /** 本帧是否在移动（推进器尾焰长度用） */
   private moving = false
   /** 本帧受到的热泉上升推力（HUD 用来提示"正在被顶"，0 = 无） */
@@ -409,8 +478,26 @@ export default class DiveScene extends Phaser.Scene {
    * 火花是短命对象（0.22s），用固定上限数组防爆炸性增长。
    */
   private sparks: Spark[] = []
-  /** 玩家当前挂载的器械（最多 3 台，各自独立冷却、同时自动开火） */
+  /** 飘字（拾取 / 回氧 / 波次提示）。上限 24，超出丢最老的 */
+  private floats: FloatText[] = []
+  /** 玩家当前挂载的器械（各自独立冷却、同时自动开火） */
   private weapons: Weapon[] = []
+  /**
+   * 当前可挂载的器械上限。开局 4（= 4 个物理座），靠商店的
+   * 「双联挂载 I / II」卡解锁到 5 / 6。
+   *
+   * 为什么初始不是 6：一开局就满槽会让"拿新武器"这件事没有成长感，
+   * 也会让 4 个座上直接挂满双联 —— 艇身剪影会糊成一团。
+   */
+  private maxWeapons = 4
+  /**
+   * 双联座的射速加成（「齐射同步」卡累加，上限 60%）。
+   *
+   * 只作用于**后管位**（barrel === 1）的武器 —— 前管是原本就有的座，
+   * 给它加成等于凭空加强已有武器，玩家感受不到"双联"这个形态的价值。
+   * 加成打在后管上，"装了双联 → 那根新管射得更快"才是可读的因果。
+   */
+  private twinRate = 0
   private debris: Debris[] = []
   private motes: Mote[] = []
   /** 远景生物（纯装饰，不参与碰撞）—— 见DriftLife 注释 */
@@ -514,7 +601,9 @@ export default class DiveScene extends Phaser.Scene {
     const TEX_OF: Record<string, string> = {
       gun: 'w_gun', torpedo: 'w_torpedo', arc: 'w_arc',
     }
-    for (let i = 0; i < HARDPOINTS.length; i++) {
+    // 塔头对象池按**最大容量** 6 台建（不是 4 个座）——
+    // 第 5、6 台走双联，用的是另外两个 Image 而不是挤压前 4 个。
+    for (let i = 0; i < 6; i++) {
       const img = this.add.image(0, 0, 'w_gun').setDepth(61).setVisible(false)
       this.turretImgs.push(img)
     }
@@ -561,6 +650,12 @@ export default class DiveScene extends Phaser.Scene {
     this.o2Bonus = 0
     this.o2Max = LAYERS[0].o2Max
     this.o2 = this.o2Max
+    this.o2Shown = this.o2Max     // 补间值不复位的话，新局开头数字会从上一局的残值滚上来
+    // 挂载位必须复位：不复位的话重开一局直接带 6 座 + 满射速加成，
+    // 「靠商店卡解锁挂载」这条成长线会在第二局凭空消失。
+    this.maxWeapons = 4
+    this.twinRate = 0
+    this.hurtDirT = 0
     this.weapons = []
     this.bullets = []; this.arcs = []; this.blasts = []
     this.addWeapon('sonar')          // 开局只有声呐，其余靠波次间拾取
@@ -579,6 +674,11 @@ export default class DiveScene extends Phaser.Scene {
     this.buildMotes()
     this.buildDrift()    // 远景生物层：每层生态不同，换层必须重建
     this.syncEnv()      // 换层换背景 + 深度读数
+    // 波次开场提示：屏幕中央上方飘一行，玩家知道"新一波开始了"。
+    // 放在这里而不是 HUD 上，是因为 HUD 上的波次点太小，
+    // 战斗正酣时没人会去看角落里的进度点。
+    this.spawnFloat(this.scale.width / 2, this.scale.height * 0.26,
+      `第 ${this.waveInLayer + 1} 波`, UI.cyanHi, 26)
 
     // L5 最后一波：深渊守望者
     if (this.layerIdx === LAYERS.length - 1 && this.waveInLayer === WAVE_SHAPE.length - 1) {
@@ -777,6 +877,12 @@ export default class DiveScene extends Phaser.Scene {
     this.t += dt
 
     if (this.hurtFlash > 0) this.hurtFlash -= dt
+    if (this.hurtDirT > 0) this.hurtDirT -= dt
+    // 氧气显示值补间：指数逼近，8/s 的速率在大落差时约 0.3s 追平，
+    // 既能看清"在掉"又不至于滞后到骗人（掉氧停止后立刻停住）。
+    this.o2Shown += (this.o2 - this.o2Shown) * Math.min(1, dt * 8)
+    if (Math.abs(this.o2 - this.o2Shown) < 0.05) this.o2Shown = this.o2
+
     if (this.phase === 'descending') {
       // 下潜过渡：深度滚动 + 气泡上涌（阶段结束后才开战）
       this.descT += dt
@@ -797,6 +903,7 @@ export default class DiveScene extends Phaser.Scene {
       this.updateMotes(dt)
       this.updateDrift(dt)
       this.updateSparks(dt)
+      this.updateFloats(dt)
       this.autoFire(dt)
       this.drainOxygen(dt)
       this.updateWave(dt)
@@ -919,6 +1026,9 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
       if (d < e.r + PLAYER.r) {
         this.o2 -= (e.kind === 'boss' ? 34 : 24) * dt
         this.hurtFlash = 0.25
+        // 记下来向。注意 nx/ny 是「敌人 → 玩家」（敌人就是沿它追过来的），
+        // 所以要**取反**才是伤害的来向；直接存 nx 会让暗角红在错误的那一侧。
+        this.hurtDirX = -nx; this.hurtDirY = -ny; this.hurtDirT = 0.45
         // 轻微弹开，避免贴脸站桩
         e.x -= nx * 40 * dt
         e.y -= ny * 40 * dt
@@ -932,6 +1042,10 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
     if (Phaser.Math.Distance.Between(this.px, this.py, e.x, e.y) <= R) {
       this.o2 -= 18
       this.hurtFlash = 0.35
+      // Boss 震击是全屏伤害，但仍有来向：从玩家指向 Boss
+      const dx = e.x - this.px, dy = e.y - this.py
+      const len = Math.max(1, Math.hypot(dx, dy))
+      this.hurtDirX = dx / len; this.hurtDirY = dy / len; this.hurtDirT = 0.6
     }
     this.cameras.main.shake(220, 0.008)
   }
@@ -969,7 +1083,21 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
       if (e.kind === 'boss') this.bossDown = true
       this.spawnDebris(e)          // 软组织被共振震散
       this.dropBone(e)             // 只剩发光骨架
-      if (this.killO2 > 0) this.o2 = Math.min(this.o2Max, this.o2 + this.killO2)
+      // 击杀回氧飘字。注意：鱼骨是**另外一笔**收益（捡到才给），
+      // 这里是击杀瞬间给的，两笔来源不同，飘字位置也错开（击杀在鱼身上、
+      // 拾取在鱼骨上），玩家能分清"打死的"和"捡到的"
+      if (this.killO2 > 0) {
+        const before = this.o2
+        this.o2 = Math.min(this.o2Max, this.o2 + this.killO2)
+        if (this.o2 - before > 0.5) {
+          this.spawnFloat(e.x, e.y - e.r - 6, `+${Math.round(this.o2 - before)}`,
+            UI.cyanHi, 15)
+        }
+      }
+      // Boss 击杀是全屏级事件，用大号飘字
+      if (e.kind === 'boss') {
+        this.spawnFloat(e.x, e.y - 40, 'BOSS 击破', UI.violet, 24)
+      }
     }
   }
 
@@ -1044,8 +1172,27 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
         if (b.fade <= 0) { b.alive = false; continue }
       }
       if (Phaser.Math.Distance.Between(b.x, b.y, this.px, this.py) < pr) {
+        const before = this.o2
         this.o2 = Math.min(this.o2Max, this.o2 + b.value)
+        const gained = this.o2 - before
         b.alive = false
+        // 回氧飘字。氧满时（gained ≈ 0）不飘 ——
+        // 飘一个 "+0" 是在嘲笑玩家，那是最糟糕的反馈
+        if (gained > 0.5) {
+          this.spawnFloat(b.x, b.y - 8, `+${Math.round(gained)} O₂`, UI.cyan, 17)
+        } else {
+          this.spawnFloat(b.x, b.y - 8, '氧气已满', UI.cyanDim, 14)
+        }
+        // 拾取时鱼骨位置炸一小簇青色粒子，让"吸进来了"有实感
+        for (let i = 0; i < 3; i++) {
+          const a = Math.random() * Math.PI * 2
+          this.sparks.push({
+            x: b.x, y: b.y,
+            vx: Math.cos(a) * 60, vy: Math.sin(a) * 60,
+            life: 0.2, maxLife: 0.2, color: UI.cyan,
+            size: 1.5, ang: a, kind: 'hit',
+          })
+        }
       }
     }
     this.bones = this.bones.filter(b => b.alive)
@@ -1096,18 +1243,45 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
     }
   }
 
-  /** 挂载一台器械。超过 3 台时替换 id 相同的那台（不会无限堆） */
+  /**
+   * 挂载一台器械。**槽位没满就优先占新槽**，即使是已经在用的同款 ——
+   * 这跟 Brotato 一致：6 个槽可以放 6 把一样的枪，每把各占一座、各开一次火。
+   * 火力来源是「台数」而不是「单台等级」，所以重复挂载本身就是一种成长。
+   *
+   * 只有**槽位满了**才走合并升级：优先喂给同 id 且还没满级的那台；
+   * 找不到就挤掉最早挂载的那台（保持台数恒定，玩家不会莫名掉火力）。
+   *
+   * 槽位上限由 `maxWeapons` 决定：开局 4（对应 4 个物理座），
+   * 靠商店的「双联挂载」卡解锁到 5、6 —— 这就是"塔升级靠商店卡驱动"。
+   */
   private addWeapon(id: WeaponId, lvl = 1): void {
     const st = this.weaponStats(id, lvl)
-    const exist = this.weapons.find(w => w.id === id)
-    if (exist) {
-      exist.lvl = Math.min(5, exist.lvl + 1)
-      const s2 = this.weaponStats(id, exist.lvl)
-      exist.iv = s2.iv; exist.dmg = s2.dmg
-      return
+    if (this.weapons.length >= this.maxWeapons) {
+      const exist = this.weapons.find(w => w.id === id && w.lvl < 5)
+      if (exist) {
+        exist.lvl = Math.min(5, exist.lvl + 1)
+        const s2 = this.weaponStats(id, exist.lvl)
+        exist.iv = s2.iv; exist.dmg = s2.dmg
+        return
+      }
+      this.weapons.shift()
     }
-    if (this.weapons.length >= 3) this.weapons.shift()
     this.weapons.push({ id, iv: st.iv, timer: 0, dmg: st.dmg, lvl, anchor: 0 })
+  }
+
+  /**
+   * 槽位 → 挂载点分配表。
+   *
+   * 返回每项 `{ seat, barrel }`：seat 是 4 个物理座之一，barrel 是 0(前)/1(后)。
+   * 前 4 台各占一座的前管；第 5、6 台落到座 0、1 的后管 → 那两座变成双联。
+   */
+  private mountPlan(): Array<{ seat: number; barrel: number }> {
+    const plan: Array<{ seat: number; barrel: number }> = []
+    for (let i = 0; i < this.weapons.length; i++) {
+      if (i < HARDPOINTS.length) plan.push({ seat: i, barrel: 0 })
+      else plan.push({ seat: i - HARDPOINTS.length, barrel: 1 })
+    }
+    return plan
   }
 
   /** 全部器械升一级（「弹药改良」升级卡用） */
@@ -1124,13 +1298,17 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
    * 这是 Brotato 的核心手感：火力来自多个来源，操作只有一个。
    */
   private autoFire(dt: number): void {
-    for (const w of this.weapons) {
+    const plan = this.mountPlan()
+    for (let wi = 0; wi < this.weapons.length; wi++) {
+      const w = this.weapons[wi]
       // 钳到 0：没打到目标时 timer 会一直累加负值，
       // HUD 的冷却条按 timer/iv 算，负值会让进度条反向画满。
       w.timer = Math.max(0, w.timer - dt)
       if (w.timer > 0) continue
       const def = WEAPON_DEF[w.id]
       const rng = def.range + (w.lvl - 1) * 26
+      // 双联座的射速加成只作用于后管位（见 twinRate 注释）
+      const twinBoost = (plan[wi]?.barrel === 1) ? (1 + this.twinRate) : 1
 
       if (w.id === 'sonar') {
         // 声呐是全向的：射程内有鱼就发一圈波，不需要瞄准。
@@ -1171,7 +1349,7 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
         const first = this.nearestEnemy(rng); if (!first) continue
         this.fireArc(first, w)
       }
-      w.timer = def.iv / (1 + (w.lvl - 1) * 0.12)
+      w.timer = def.iv / ((1 + (w.lvl - 1) * 0.12) * twinBoost)
     }
   }
 
@@ -1330,6 +1508,63 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
           { width: s.size * k, alpha: k, bloom: false })
       }
     }
+  }
+
+  // ==========================================================================
+  // 飘字：把"发生了什么"变成看得见的事件
+  // ==========================================================================
+
+  /**
+   * 生成一条飘字。
+   *
+   * `delay` 用来错开同帧的多个飘字：满屏鱼骨时一帧可能连捡 5 个，
+   * 全部同时从同一个点上浮会叠成一坨看不清。每个错开 0.07s 就能读清。
+   */
+  private spawnFloat(x: number, y: number, text: string, color: number, size = 18): void {
+    // 同帧已有几条就往后排几条，实现"错开"
+    const same = this.floats.filter(f => f.life > f.maxLife - 0.12).length
+    this.floats.push({
+      x, y,
+      vy: -46 - Math.random() * 14,
+      life: 0.95, maxLife: 0.95,
+      text, color, size,
+      delay: Math.min(0.35, same * 0.07),
+    })
+    if (this.floats.length > 24) this.floats.splice(0, this.floats.length - 24)
+  }
+
+  private updateFloats(dt: number): void {
+    for (const f of this.floats) {
+      if (f.delay > 0) { f.delay -= dt; continue }
+      f.life -= dt
+      // 上浮减速（水的阻尼），不是匀速 —— 匀速会像 UI 动画不像水里冒出来的
+      f.vy *= 1 - 1.6 * dt
+      f.y += f.vy * dt
+    }
+    this.floats = this.floats.filter(f => f.life > 0)
+  }
+
+  private drawFloats(g: Phaser.GameObjects.Graphics): void {
+    for (const f of this.floats) {
+      if (f.delay > 0) continue
+      const k = Phaser.Math.Clamp(f.life / f.maxLife, 0, 1)      // 1 → 0
+      // 出生弹跳：0.15s 内从 1.35× 回落到 1×
+      const pop = k > 0.85 ? 1 + (k - 0.85) / 0.15 * 0.35 : 1
+      // 末段淡出 + 略微上飘加速（"飘走"而不是"原地消失"）
+      const a = k > 0.4 ? 1 : k / 0.4
+      const size = Math.round(f.size * pop)
+      // 描边：飘字压在花花绿绿的背景/鱼群上，没有深色描边会看不清
+      const w = f.text.length * size * 0.58
+      g.fillStyle(UI.abyss, 0.55 * a)
+      g.fillRoundedRect(f.x - w / 2 - 4, f.y - size * 0.72, w + 8, size * 1.32, 4)
+      this.txt(f.text, f.x, f.y, `${size}px`, this.hexOf(f.color), MONO, 'center')
+        .setAlpha(a)
+    }
+  }
+
+  /** 把 0xRRGGBB 转成 '#rrggbb'（txt() 收字符串色） */
+  private hexOf(c: number): string {
+    return '#' + c.toString(16).padStart(6, '0')
   }
 
   /** 鱼雷爆炸：范围伤害随距离衰减 + 震屏 */
@@ -1738,6 +1973,8 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
     // 火花画在弹幕之上：命中迸溅和枪口闪光是"最亮的那一瞬间"，
     // 被弹体盖住就失去意义了
     this.drawSparks(g)
+    // 飘字画在火花之上：数字必须是最清晰的层，不能被粒子盖住
+    this.drawFloats(g)
 
     // 鱼骨（画在敌人之上：V4 §3.3 掉落物必须最先被看见）
     this.drawBones(g)
@@ -2076,16 +2313,26 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
     }
     g.closePath(); g.fillPath()
 
-    // ---- ④ 炮塔塔头：独立瞄准 ----
-    // 4 个挂载点固定在机体上（跟随机体旋转），但塔头自身再转一次去瞄准目标。
-    for (let i = 0; i < HARDPOINTS.length; i++) {
+    // ---- ④ 炮塔塔头：独立瞄准 + 双联形态 ----
+    //
+    // `mountPlan()` 决定每台武器落在哪个座、哪个管位：
+    //   1~4 台 → 座 0~3 前管（单装）
+    //   5~6 台 → 座 0~1 后管（那两座变双联）
+    // 双联的两根管共用同一座坐标，只沿艇身宽度方向各偏移 TWIN_OFFSET，
+    // 视觉上就是"一座上并联了两根炮管"。
+    const plan = this.mountPlan()
+    for (let i = 0; i < this.turretImgs.length; i++) {
       const img = this.turretImgs[i]
+      const slot = plan[i]
       const w = this.weapons[i]
-      if (!w) { img.setVisible(false); continue }
-      // 挂载点局部坐标（以机体长宽为单位的比例）× 机体显示尺寸
-      const [hx, hy] = HARDPOINTS[i]
-      const mountX = X(hx * 59, hy * 31)
-      const mountY = Y(hx * 59, hy * 31)
+      if (!slot || !w) { img.setVisible(false); continue }
+
+      // 挂载点局部坐标（比例 × 机体显示尺寸）
+      const [hx, hy] = HARDPOINTS[slot.seat]
+      // 双联：沿艇身宽度方向（局部 y 轴）偏移，前管在后、后管在前
+      const off = TWIN_OFFSET[slot.barrel]
+      const mountX = X(hx * 59, (hy + off) * 31)
+      const mountY = Y(hx * 59, (hy + off) * 31)
 
       // 独立索敌：优先当前锁定目标，否则取射程内最近的
       const def = WEAPON_DEF[w.id]
@@ -2100,9 +2347,26 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
       img.setTexture(this.turretTex[w.id] ?? 'w_gun')
       img.setPosition(mountX, mountY)
       img.setRotation(this.aim + clamped)
-      img.setDisplaySize(TURRET_SIZE, TURRET_SIZE)
+      // 双联的两根管略缩小（0.82×）：两座各挂两个全尺寸塔头会把艇身撑爆，
+      // 缩一点既保持辨识度又不破坏剪影
+      const sz = TURRET_SIZE * (slot.barrel === 1 ? 0.82 : 1)
+      img.setDisplaySize(sz, sz)
       // 开火瞬间塔头发亮，给"它在射击"的反馈
       img.setTint(w.timer > 0 ? 0xffffff : 0xbfd0ff)
+    }
+
+    // 双联座的**连接梁**：两根管之间画一道短横梁，
+    // 没有这道梁，双联看起来就是"两个挨着的独立塔"而不是"并联的一座"
+    for (let s = 0; s < HARDPOINTS.length; s++) {
+      const twin = plan.filter(p => p.seat === s)
+      if (twin.length < 2) continue
+      const [hx, hy] = HARDPOINTS[s]
+      const ax = X(hx * 59, (hy + TWIN_OFFSET[0]) * 31)
+      const ay = Y(hx * 59, (hy + TWIN_OFFSET[0]) * 31)
+      const bx = X(hx * 59, (hy + TWIN_OFFSET[1]) * 31)
+      const by = Y(hx * 59, (hy + TWIN_OFFSET[1]) * 31)
+      neonLine(g, ax, ay, bx, by, UI.cyanDim, { width: 3.2, alpha: 0.85, bloom: false })
+      neonLine(g, ax, ay, bx, by, UI.cyanHi, { width: 1, alpha: 0.6, bloom: false })
     }
 
     // ---- ⑤ 推进器尾焰（移动时更长）----
@@ -2159,39 +2423,103 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
     // 分母用 max(基准, 当前上限)，这样买了扩容气瓶后条会**变长**（正反馈可见），
     // 又不会超出槽宽。下潜后上限压缩必须可见地变短——这是玩家理解
     // "越深容错越小"的唯一显式信号（UI规格 V3 §5.2）。
-    const bw = 420, bh = 18, bx = cx - bw / 2, by = 26
+    const bw = 420, bh = 20, bx = cx - bw / 2, by = 26
     const full = Math.max(O2.max, this.o2Max)
     const curRatio = Phaser.Math.Clamp(this.o2 / full, 0, 1)
     const capRatio = Phaser.Math.Clamp(this.o2Max / full, 0, 1)
     const pct = this.o2 / this.o2Max
     const low = pct < 0.2
     const col = low ? UI.danger : (pct < 0.5 ? UI.amber : UI.cyan)
-    const pulse = low ? (this.t * 4 % 1 < 0.5 ? 1 : 0.55) : 1
+    // 低氧脉冲改**正弦**而不是方波：方波是"闪"，正弦是"呼吸"。
+    // 呼吸感更接近窒息这个生理联想，而且不会在低帧率下抖动成噪点。
+    const pulse = low ? 0.6 + 0.4 * Math.abs(Math.sin(this.t * 4.2)) : 1
 
+    // 槽底 + 被压缩掉的上限余量（灰）
     g.fillStyle(UI.panel, 0.75); g.fillRoundedRect(bx, by, bw, bh, 9)
     if (capRatio < 1) {
       g.fillStyle(UI.line, 0.5); g.fillRoundedRect(bx + bw * capRatio, by, bw * (1 - capRatio), bh, 9)
     }
+    // 剩余氧（实心）
     g.fillStyle(col, pulse)
     g.fillRoundedRect(bx, by, Math.max(2, bw * curRatio), bh, 9)
+
+    // —— 刻度：每 20 单位一格，让"还剩几格"可以目测 ——
+    // 空条上画细刻度，实心区上画暗色刻度（保证两种底色下都看得见）。
+    const TICK = 20
+    for (let v = TICK; v < full; v += TICK) {
+      const tx = bx + bw * (v / full)
+      if (tx > bx + bw - 2) break
+      const lit = tx <= bx + bw * curRatio
+      g.fillStyle(lit ? UI.abyss : UI.line, lit ? 0.45 : 0.55)
+      g.fillRect(tx, by + 4, 1, bh - 8)
+    }
+    // —— 危险阈值线：20% 处一条竖线，越线即死 ——
+    // 玩家不该靠心算判断"还剩多少会死"，把阈值画进条里。
+    const dzX = bx + bw * (0.2 * this.o2Max / full)
+    g.fillStyle(UI.danger, 0.55 + 0.35 * Math.abs(Math.sin(this.t * 2)))
+    g.fillRect(dzX - 1, by - 3, 2, bh + 6)
+    this.txt('危险', dzX, by + bh + 12, '9px', TXT.warn, FONT, 'center')
+
     neon(g, low ? UI.danger : UI.cyanDim, () => { g.strokeRoundedRect(bx, by, bw, bh, 9) },
-      { width: 1, alpha: 0.8, bloom: false })
-    this.txt(`${Math.ceil(this.o2)} / ${this.o2Max}`, cx, by + bh / 2, '20px', TXT.cyber, MONO, 'center')
+      { width: low ? 2 : 1, alpha: 0.8, bloom: false })
+    // 数值用补间后的 o2Shown：连续滚动，掉氧速率可读
+    this.txt(`${Math.ceil(this.o2Shown)} / ${this.o2Max}`, cx, by + bh / 2, '20px',
+      low ? TXT.warn : TXT.cyber, MONO, 'center')
     // 耗氧速率（越深越快，必须显式告诉玩家）
     this.txt(`-${L.drain.toFixed(1)}/s`, bx - 12, by + 2, '13px', TXT.dim, MONO, 'right')
 
-    // ③ 波次进度
+    // ③ 波次进度（V6.6：环倒计时 + 剩余敌人 + 下潜进度）
+    const wx0 = bx + bw + 18
     const wi = this.waveInLayer + 1
-    this.txt(`第 ${wi} / ${WAVE_SHAPE.length} 波`, bx + bw + 18, by + 2, '16px', TXT.main, MONO)
+    this.txt(`第 ${wi} / ${WAVE_SHAPE.length} 波`, wx0, by + 2, '16px', TXT.main, MONO)
     for (let i = 0; i < WAVE_SHAPE.length; i++) {
-      const px1 = bx + bw + 18 + i * 16, py1 = by + bh + 6
+      const px1 = wx0 + i * 16, py1 = by + bh + 6
       // 结算时当前波还没"完成"，所以最后一个点在 result 相位不点亮
       const done = this.phase === 'result' ? i < this.waveInLayer : i <= this.waveInLayer
       g.fillStyle(done ? UI.cyan : UI.line, 1)
       g.fillCircle(px1, py1, 4)
+      // 当前波的点加一圈呼吸环：一眼看出"进度停在第几波"
+      if (i === this.waveInLayer && this.phase === 'wave') {
+        const br = 4 + 3 * Math.abs(Math.sin(this.t * 2.4))
+        g.lineStyle(1.5, UI.cyan, 0.5)
+        g.strokeCircle(px1, py1, br)
+      }
     }
+
     if (this.phase === 'wave') {
-      this.txt(`${Math.max(0, Math.ceil(this.waveTimer))}s`, bx + bw + 18, by + bh + 14, '13px', TXT.dim, MONO)
+      // —— 环形倒计时：弧长 = 本波剩余时间比例 ——
+      // 比纯数字强的点在于：扫一眼弧度就知道"这波还剩多久"，
+      // 数字只在你盯着看时有用，弧度是余光可读的。
+      const dur = Math.max(1, WAVE_SHAPE[this.waveInLayer].dur)
+      const left = Phaser.Math.Clamp(this.waveTimer / dur, 0, 1)
+      const wcx = wx0 + 18, wcy = by + bh + 36, wr = 15
+      g.lineStyle(3, UI.abyss, 0.75)
+      g.beginPath(); g.arc(wcx, wcy, wr, 0, Math.PI * 2); g.strokePath()
+      const wcol = left < 0.25 ? UI.danger : UI.cyan
+      g.lineStyle(3, wcol, 0.95)
+      g.beginPath(); g.arc(wcx, wcy, wr, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * left)
+      g.strokePath()
+      this.txt(`${Math.max(0, Math.ceil(this.waveTimer))}`, wcx, wcy, '15px',
+        left < 0.25 ? TXT.warn : TXT.cyber, MONO, 'center')
+      this.txt('s', wcx + wr + 6, wcy - 6, '10px', TXT.dim, MONO)
+
+      // —— 剩余敌人：清波进度的唯一确定信号 ——
+      // 波次计时器到点不等于波次结束（还要清场），必须让"还剩几只"可见，
+      // 否则玩家不知道为什么还不进商店。
+      const alive = this.enemies.reduce((n, e) => n + (e.alive ? 1 : 0), 0)
+      const spawning = this.spawnLeft > 0
+      this.txt(spawning ? `剩余 ${alive} · 涌入中` : `剩余 ${alive}`,
+        wx0, by + bh + 60, '13px', alive > 0 ? TXT.dim : TXT.jade, MONO)
+    } else if (this.phase === 'descending') {
+      // —— 下潜进度条：下潜是一次"过渡"，玩家需要一个明确的进度 ——
+      const k = Math.min(1, this.descT / this.descDur)
+      const dw = 120, dx2 = wx0, dy2 = by + bh + 26
+      g.fillStyle(UI.panel, 0.7); g.fillRoundedRect(dx2, dy2, dw, 8, 4)
+      g.fillStyle(UI.cyan, 0.9); g.fillRoundedRect(dx2, dy2, Math.max(3, dw * k), 8, 4)
+      neon(g, UI.cyanDim, () => { g.strokeRoundedRect(dx2, dy2, dw, 8, 4) },
+        { width: 1, alpha: 0.7, bloom: false })
+      this.txt('下潜中', dx2, dy2 - 14, '12px', TXT.cyan, FONT)
+      this.txt(`${Math.round(k * 100)}%`, dx2 + dw + 8, dy2 - 2, '12px', TXT.dim, MONO)
     }
 
     // ④ 生物质（含倍率后的预估值，让"再赌一层"的收益可见）
@@ -2201,39 +2529,70 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
       this.txt(`上浮可得 ${est}`, W - 24, by + 26, '13px', TXT.amber, MONO, 'right')
     }
 
-    // ⑤ 武器槽（V6.3）
+    // ⑤ 武器条（V6.3 建立，V6.6 重做）
     //
-    // 三个槽 = 最多挂三台器械。每槽必须同时回答三个问题：
-    //   装了什么（图形签名）· 多强（等级点）· 什么时候好（冷却进度）
+    // 槽数 = `maxWeapons`（4 → 靠商店卡解锁到 6），**不再写死 3**。
+    // 每槽必须同时回答四个问题：
+    //   装了什么（图形签名）· 多强（等级点）· 什么时候好（冷却环）· 是不是双联（角标）
     // 冷却进度是 Brotato 手感的可读性核心：玩家要能学会"机关枪在转、等下"。
-    const sy = this.scale.height - 46
-    for (let i = 0; i < 3; i++) {
-      const sx = 24 + i * 52, sw = 44
+    const sy = this.scale.height - 50
+    const slots = this.maxWeapons
+    const sw = 46, gap = 52
+    const plan = this.mountPlan()
+    for (let i = 0; i < slots; i++) {
+      const sx = 24 + i * gap
       const w = this.weapons[i]
-      g.fillStyle(w ? UI.panelHi : UI.panel, w ? 0.9 : 0.6)
-      g.fillRoundedRect(sx, sy, sw, sw, 8)
-      neon(g, w ? WEAPON_DEF[w.id].color : UI.line,
-        () => { g.strokeRoundedRect(sx, sy, sw, sw, 8) },
-        { width: w ? 2 : 1, alpha: w ? 0.9 : 0.5, bloom: false })
+      const twin = plan[i]?.barrel === 1
+      const wcol = w ? WEAPON_DEF[w.id].color : UI.line
+
+      g.fillStyle(w ? UI.panelHi : UI.panel, w ? 0.9 : 0.55)
+      g.fillRoundedRect(sx, sy, sw, sw, 9)
+
       if (!w) {
-        this.txt('空', sx + sw / 2, sy + sw / 2, '11px', TXT.mute, FONT, 'center')
+        // 空槽：只画暗描边 + 序号，不画"空"字（字在小方块里反而更乱）
+        neon(g, UI.line, () => { g.strokeRoundedRect(sx, sy, sw, sw, 9) },
+          { width: 1, alpha: 0.45, bloom: false })
+        this.txt(String(i + 1), sx + sw / 2, sy + sw / 2 - 6, '13px', TXT.mute, MONO, 'center')
         continue
       }
-      this.drawWeaponIcon(g, w.id, sx + sw / 2, sy + 18, 11)
+
+      neon(g, wcol, () => { g.strokeRoundedRect(sx, sy, sw, sw, 9) },
+        { width: twin ? 1.6 : 2, alpha: 0.9, bloom: false })
+
+      const icx = sx + sw / 2, icy = sy + 19
+      this.drawWeaponIcon(g, w.id, icx, icy, 12)
+
+      // —— 冷却环：绕图标画一圈进度弧，从 12 点顺时针填充 ——
+      // 用环而不是底部细条：环的"转满一圈"直接对应"又射了一发"，
+      // 6 把武器同时转的时候，火力节奏是**看得见的**。
+      if (w.timer > 0) {
+        const k = Phaser.Math.Clamp(1 - w.timer / Math.max(0.01, w.iv), 0, 1)
+        g.lineStyle(3, UI.abyss, 0.8)
+        g.beginPath(); g.arc(icx, icy, 15, 0, Math.PI * 2); g.strokePath()
+        g.lineStyle(3, wcol, 0.95)
+        g.beginPath(); g.arc(icx, icy, 15, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * k)
+        g.strokePath()
+      }
+
       // 等级点：最多 5 个小方块，从左到右填充
       for (let k = 0; k < 5; k++) {
-        const px1 = sx + 8 + k * 6, py1 = sy + 34
-        g.fillStyle(k < w.lvl ? WEAPON_DEF[w.id].color : UI.line, k < w.lvl ? 1 : 0.5)
+        const px1 = sx + 8 + k * 6.5, py1 = sy + 35
+        g.fillStyle(k < w.lvl ? wcol : UI.line, k < w.lvl ? 1 : 0.45)
         g.fillRect(px1, py1, 4, 4)
       }
-      // 冷却进度：底部细条，ready 时不画（避免"永远亮着"的噪声）
-      if (w.timer > 0) {
-        const k = 1 - w.timer / Math.max(0.01, w.iv)
-        g.fillStyle(UI.abyss, 0.7); g.fillRect(sx + 3, sy + sw - 6, sw - 6, 3)
-        g.fillStyle(WEAPON_DEF[w.id].color, 0.95)
-        g.fillRect(sx + 3, sy + sw - 6, (sw - 6) * k, 3)
+
+      // —— 双联角标：右上角上下两个琥珀小方块 ——
+      // 和商店卡里的挂载示意图用同一套视觉语言（双联 = 一上一下两个半块），
+      // 玩家在卡面学到的记号，在 HUD 上能直接认出来。
+      if (twin) {
+        g.fillStyle(UI.amber, 0.95)
+        g.fillRect(sx + sw - 11, sy + 4, 5, 4)
+        g.fillRect(sx + sw - 11, sy + 10, 5, 4)
       }
     }
+    // 挂载计数：解锁卡买了之后这里会跳，是"塔在成长"的即时反馈
+    this.txt(`挂载 ${this.weapons.length}/${this.maxWeapons}`,
+      24, sy - 16, '12px', this.weapons.length < this.maxWeapons ? TXT.dim : TXT.cyan, MONO)
     // 技能冷却
     const ready = this.burstTimer <= 0
     const k = ready ? 1 : 1 - this.burstTimer / O2.burstCd
@@ -2255,16 +2614,61 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
     //   低氧 → 红色心跳边框（越低频越快，直接映射"心跳"这个生理联想）
     //   热泉 → 底部上升箭头 + 提示（归因到环境，而不是"我操作有问题"）
     const lowPct = this.o2 / this.o2Max
-    if (lowPct < 0.32 && (this.phase === 'wave' || this.phase === 'descending')) {
+    const H = this.scale.height
+    const gasping = lowPct < 0.32 && (this.phase === 'wave' || this.phase === 'descending')
+    if (gasping) {
       const urgency = 1 - lowPct / 0.32                // 0→1 越低越急
       const rate = 2.2 + urgency * 3.4
       const beat = Math.max(0, Math.sin(this.t * rate * Math.PI))
       const a = (0.12 + 0.5 * beat) * (0.35 + urgency * 0.65)
       const bw2 = 10 + beat * 14
-      neon(g, UI.danger, () => { g.strokeRect(bw2 / 2, bw2 / 2, W - bw2, this.scale.height - bw2) },
+      neon(g, UI.danger, () => { g.strokeRect(bw2 / 2, bw2 / 2, W - bw2, H - bw2) },
         { width: 3 + beat * 3, alpha: a, bloom: beat > 0.7 })
       this.txt('O₂ 告急', W / 2, 62, `${Math.round(16 + beat * 4)}px`,
         TXT.amber, FONT, 'center')
+      // 心跳式缩放：镜头跟着心跳微微"吸"一下。
+      // 幅度刻意压到 1% 以内 —— 这个信号要能被**感觉到**而不是被看到，
+      // 再大就会干扰走位判断，那是玩法不能接受的代价。
+      this.cameras.main.setZoom(1 + beat * 0.009 * urgency)
+    } else {
+      // 必须每帧显式复位：只在高氧时不设的话，镜头会卡在最后一次缩放上
+      this.cameras.main.setZoom(1)
+    }
+
+    // —— 受击方向性暗角（V6.6）——
+    //
+    // 受击只给"闪一下"是无方向的信息，玩家不知道该往哪躲。
+    // 让**伤害来的那一侧**先红，方向信息就变成了本能反应。
+    // 用多层递减 alpha 的矩形模拟渐变（Graphics 没有渐变填充）。
+    if (this.hurtDirT > 0) {
+      const k = Phaser.Math.Clamp(this.hurtDirT / 0.45, 0, 1)
+      const wR = Math.max(0, this.hurtDirX)      // 敌人在右 → 右边红
+      const wL = Math.max(0, -this.hurtDirX)
+      const wD = Math.max(0, this.hurtDirY)
+      const wU = Math.max(0, -this.hurtDirY)
+      const NL = 6, dep = 120, band = dep / NL
+      for (let i = 0; i < NL; i++) {
+        const t = i / NL
+        const al = 0.5 * k * (1 - t)
+        if (al <= 0.004) continue
+        const ins = t * dep
+        if (wR > 0.01) {
+          g.fillStyle(UI.danger, al * wR)
+          g.fillRect(W - ins - band, ins, band + 1, H - ins * 2)
+        }
+        if (wL > 0.01) {
+          g.fillStyle(UI.danger, al * wL)
+          g.fillRect(ins, ins, band + 1, H - ins * 2)
+        }
+        if (wD > 0.01) {
+          g.fillStyle(UI.danger, al * wD)
+          g.fillRect(ins, H - ins - band, W - ins * 2, band + 1)
+        }
+        if (wU > 0.01) {
+          g.fillStyle(UI.danger, al * wU)
+          g.fillRect(ins, ins, W - ins * 2, band + 1)
+        }
+      }
     }
     if (this.vpPush > 0) {
       const byy = this.scale.height - 108
@@ -2289,7 +2693,8 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
     for (const t of this.txtPool) t.setVisible(false)
   }
   private txt(s: string, x: number, y: number, size: string, color: string,
-              font: string, align: 'left' | 'center' | 'right' = 'left'): void {
+              font: string, align: 'left' | 'center' | 'right' = 'left')
+    : Phaser.GameObjects.Text {
     let t = this.txtPool.find(o => !o.visible)
     if (!t) {
       t = this.add.text(0, 0, '', { fontFamily: font, fontSize: size, color })
@@ -2302,6 +2707,9 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
     else if (align === 'right') t.setOrigin(1, 0)
     else t.setOrigin(0)
     t.setStroke('#04070d', 3)
+    // 返回对象是为了让调用方能再设 alpha（飘字淡出要用）。
+    // 之前返回 void，飘字只能"瞬间消失"不能淡出，这就是那个坑。
+    return t
   }
 
   // ==========================================================================
@@ -2349,29 +2757,66 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
     // 这三张是 Brotato 手感的核心：火力来源变多，但玩家操作**不变**（仍然只走位）。
     // 弓与枪的定位不重叠，所以拿到哪张都会明显改变手感。
     {
-      id: 'w_gun', name: '脉冲机关枪', desc: '高频连射 · 单体',
+      id: 'w_gun', name: '脉冲机关枪', desc: '高频连射 · 单体', kind: 'weapon',
       apply: s => s.addWeapon('gun'),
     },
     {
-      id: 'w_torp', name: '追踪鱼雷', desc: '低频追踪 · 范围爆炸',
+      id: 'w_torp', name: '追踪鱼雷', desc: '低频追踪 · 范围爆炸', kind: 'weapon',
       apply: s => s.addWeapon('torpedo'),
     },
     {
-      id: 'w_arc', name: '链式电弧', desc: '瞬发连锁 · 多目标',
+      id: 'w_arc', name: '链式电弧', desc: '瞬发连锁 · 多目标', kind: 'weapon',
       apply: s => s.addWeapon('arc'),
     },
     {
-      id: 'w_all', name: '弹药改良', desc: '全部器械 +1 级',
+      id: 'w_all', name: '弹药改良', desc: '全部器械 +1 级', kind: 'weapon',
       apply: s => s.levelAllWeapons(),
+      dead: s => s.weapons.length === 0,
     },
-    // —— 生存 / 机动 ——
-    { id: 'speed', name: '增压推进', desc: '移速 +15%', apply: s => { s.speedMul *= 1.15 } },
-    { id: 'pickup', name: '吸附鳍', desc: '拾取范围 +40%', apply: s => { s.pickupMul *= 1.4 } },
+
+    // —— 挂载位扩容卡（V6.6：塔升级走商店卡驱动）——
+    //
+    // 这是"潜航器养成"的成长线：4 个物理座开局就画在艇身上（空 U 型托架），
+    // 玩家一眼能看见"还有位置没装"。扩容卡把上限从 4 → 5 → 6，
+    // 第 5、6 台会把座 0、1 变成**双联**（一根座上并联两根炮管 + 连接梁）。
+    //
+    // 顺序很重要：必须先 5 再 6。直接跳到 6 会让艇身上凭空多出两个塔，
+    // 玩家看不出发生了什么 —— 逐级解锁才有"我的艇在变强"的实感。
     {
-      id: 'tank', name: '扩容气瓶', desc: '氧气上限 +20 并回满',
+      id: 't_slot5', name: '双联挂载 I', desc: '解锁第 5 挂载位 · 首座改双联', kind: 'mount',
+      apply: s => { s.maxWeapons = 5 },
+      dead: s => s.maxWeapons >= 5,
+    },
+    {
+      id: 't_slot6', name: '双联挂载 II', desc: '解锁第 6 挂载位 · 次座改双联', kind: 'mount',
+      apply: s => { s.maxWeapons = 6 },
+      // 前置：必须先有 5 槽。没拿到 I 就不该刷出 II
+      dead: s => s.maxWeapons !== 5,
+    },
+    {
+      id: 't_twin', name: '齐射同步', desc: '双联座射速 +25%', kind: 'mount',
+      apply: s => { s.twinRate = Math.min(0.6, s.twinRate + 0.25) },
+      // 没双联就没意义
+      dead: s => s.maxWeapons < 5,
+    },
+
+    // —— 生存 / 机动 ——
+    {
+      id: 'speed', name: '增压推进', desc: '移速 +15%', kind: 'surv',
+      apply: s => { s.speedMul *= 1.15 },
+    },
+    {
+      id: 'pickup', name: '吸附鳍', desc: '拾取范围 +40%', kind: 'surv',
+      apply: s => { s.pickupMul *= 1.4 },
+    },
+    {
+      id: 'tank', name: '扩容气瓶', desc: '氧气上限 +20 并回满', kind: 'surv',
       apply: s => { s.o2Bonus += 20; s.o2Max = s.layer().o2Max + s.o2Bonus; s.o2 = s.o2Max },
     },
-    { id: 'gill', name: '循环鳃', desc: '击杀额外回氧 +3', apply: s => { s.killO2 += 3 } },
+    {
+      id: 'gill', name: '循环鳃', desc: '击杀额外回氧 +3', kind: 'surv',
+      apply: s => { s.killO2 += 3 },
+    },
   ]
 
   private offers: Upgrade[] = []
@@ -2381,7 +2826,16 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
   private openShop(): void {
     this.phase = 'shop'
     this.hoverCard = -1
-    this.offers = Phaser.Utils.Array.Shuffle(this.pool.slice()).slice(0, 3)
+    //
+    // 先过滤"死卡"再抽三选一。
+    //
+    // 死卡 = 买了没有效果的卡（槽位已满还刷扩容卡、一台武器都没有还刷"全部升级"）。
+    // 一张无效卡会挤掉一个有效选项 —— 三选一本来就只有三个位置，
+    // 出现废卡等于这一波商店白给，是最伤玩家信任的事。
+    const alive = this.pool.filter(u => !u.dead || !u.dead(this))
+    // 兜底：极端情况下全被过滤光了（不该发生），退回全池，至少不崩
+    const from = alive.length >= 3 ? alive : this.pool
+    this.offers = Phaser.Utils.Array.Shuffle(from.slice()).slice(0, 3)
     this.clearHits()
   }
 
@@ -2412,31 +2866,161 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
 
     for (let i = 0; i < this.shopCards.length; i++) {
       const c = this.shopCards[i]
+      const up = c.up
       const hov = this.hoverCard === i
+      const cx = c.x + c.w / 2
+
+      // —— 卡体 ——
       g.fillStyle(hov ? UI.panelHi : UI.panel, 0.94); g.fillRoundedRect(c.x, c.y, c.w, c.h, 12)
       // 悬停时描边加亮加粗——纯 Graphics 卡片没有自带 hover 态，必须手绘
       neon(g, hov ? UI.cyanHi : UI.cyan, () => { g.strokeRoundedRect(c.x, c.y, c.w, c.h, 12) },
         { width: hov ? 3 : 2, bloom: hov })
-      this.txt(String(i + 1), c.x + 16, c.y + 14, '14px', TXT.mute, MONO)
-      // 器械卡画真实图标，属性卡保留抽象环
-      const wid = c.up.id.startsWith('w_') ? c.up.id.slice(2) : null
+
+      // —— 顶部类型色条：三类卡一眼分开，不用读文字 ——
+      // 青=器械 / 琥珀=挂载扩容 / 紫=生存
+      const bandCol = up.kind === 'weapon' ? UI.cyan : up.kind === 'mount' ? UI.amber : UI.violet
+      g.fillStyle(bandCol, hov ? 1 : 0.8)
+      g.fillRoundedRect(c.x + 10, c.y + 10, c.w - 20, 3, 2)
+
+      this.txt(String(i + 1), c.x + 16, c.y + 24, '14px', TXT.mute, MONO)
+      // 类型标签（右上角）
+      const kindLabel = up.kind === 'weapon' ? '器械' : up.kind === 'mount' ? '挂载' : '生存'
+      this.txt(kindLabel, c.x + c.w - 16, c.y + 24, '12px',
+        up.kind === 'mount' ? TXT.amber : TXT.mute, FONT, 'right')
+
+      // —— 中部图示：按类型画不同的东西 ——
+      const wid = up.id.startsWith('w_') ? up.id.slice(2) : null
       if (wid === 'gun' || wid === 'torpedo' || wid === 'arc' || wid === 'sonar') {
-        this.drawWeaponIcon(g, wid, c.x + c.w / 2, c.y + 44, 18)
+        // 器械：画真实器械图标（形状差异而非颜色，11px 也分得清）
+        this.drawWeaponIcon(g, wid, cx, c.y + 62, 20)
+        // 等级点：画**最高**那台的等级；同款挂了多台时补一个 ×N。
+        // 「同款可以挂多台」是 V6.6 的改动，卡面必须把台数也表达出来，
+        // 否则玩家会以为重复拿同一把是白拿。
+        const heldAll = this.weapons.filter(w => w.id === wid)
+        if (heldAll.length) {
+          const topLvl = Math.max(...heldAll.map(w => w.lvl))
+          this.drawLevelPips(g, cx, c.y + 92, topLvl, WEAPON_DEF[wid].color)
+          if (heldAll.length > 1) {
+            this.txt(`×${heldAll.length}`, cx + 32, c.y + 92, '12px', TXT.cyan, MONO, 'left')
+          }
+        }
+      } else if (up.kind === 'mount') {
+        // 挂载扩容：**画座/管位示意图** —— 让玩家看见"艇上多了哪个位置"
+        this.drawMountDiagram(g, cx, c.y + 62, up.id)
       } else {
-        neonCircle(g, c.x + c.w / 2, c.y + 44, 18, UI.cyan, { width: 2, bloom: false })
+        neonCircle(g, cx, c.y + 62, 20, UI.violet, { width: 2, bloom: false })
       }
-      this.txt(c.up.name, c.x + c.w / 2, c.y + 90, '20px', TXT.cyber, FONT, 'center')
-      this.txt(c.up.desc, c.x + c.w / 2, c.y + 128, '15px', TXT.main, FONT, 'center')
-      // 已持有的器械卡标出「升级 Lv N→N+1」，否则玩家不知道买到的是新武器还是强化
-      const held = wid && wid !== 'all' ? this.weapons.find(w => w.id === wid) : null
-      if (held) {
-        this.txt(`已持有 · Lv${held.lvl} → Lv${Math.min(5, held.lvl + 1)}`,
-          c.x + c.w / 2, c.y + 162, '12px', TXT.amber, FONT, 'center')
+
+      this.txt(up.name, cx, c.y + 122, '20px', TXT.cyber, FONT, 'center')
+      this.txt(up.desc, cx, c.y + 156, '15px', TXT.main, FONT, 'center')
+
+      // —— 底部状态行：这张卡买了会发生什么，必须写死 ——
+      // 玩家不该靠猜来判断"买到的是新武器还是强化"
+      let foot = ''
+      let footCol: string = TXT.amber
+      if (wid && wid !== 'all') {
+        const heldAll = this.weapons.filter(w => w.id === wid)
+        if (heldAll.length === 0) {
+          foot = `新装备 · 占用 1 个挂载位`
+          footCol = TXT.cyan
+        } else if (this.weapons.length < this.maxWeapons) {
+          // 还有空位 → 同款再加一台，火力来自台数
+          foot = `加装第 ${heldAll.length + 1} 台 · 与现役并联开火`
+          footCol = TXT.cyan
+        } else {
+          // 满了 → 只能并进已有的一台去升级
+          const lv = Math.min(...heldAll.map(w => w.lvl))
+          foot = `槽位已满 · 升级一台 Lv${lv} → Lv${Math.min(5, lv + 1)}`
+          footCol = TXT.amber
+        }
       } else if (wid === 'all') {
-        this.txt(`${this.weapons.length} 台器械同时 +1 级`,
-          c.x + c.w / 2, c.y + 162, '12px', TXT.amber, FONT, 'center')
+        foot = `${this.weapons.length} 台器械同时 +1 级`
+      } else if (up.kind === 'mount') {
+        foot = up.id === 't_twin'
+          ? `双联座射速 +25%（当前 +${Math.round(this.twinRate * 100)}%）`
+          : `挂载位 ${this.maxWeapons} → ${up.id === 't_slot5' ? 5 : 6}`
+      }
+      if (foot) this.txt(foot, cx, c.y + 196, '12px', footCol, FONT, 'center')
+    }
+  }
+
+  /** 等级点：5 格，已达成实心 + 发光，未达成空心 */
+  private drawLevelPips(g: Phaser.GameObjects.Graphics, cx: number, cy: number,
+                        lvl: number, col: number): void {
+    const n = 5, gap = 11, w = 7
+    const x0 = cx - ((n - 1) * gap) / 2
+    for (let i = 0; i < n; i++) {
+      const x = x0 + i * gap
+      if (i < lvl) {
+        g.fillStyle(col, 0.95); g.fillRect(x - w / 2, cy - 2.5, w, 5)
+      } else {
+        g.lineStyle(1, col, 0.4); g.strokeRect(x - w / 2, cy - 2.5, w, 5)
       }
     }
+  }
+
+  /**
+   * 挂载位示意图（挂载扩容卡专用）。
+   *
+   * 画一根横向的"挂载梁"，上面按当前挂载数摆方块：
+   * 已占用的画实心（器械本色），**这张卡会新解锁的那一个画闪烁的空心框**。
+   *
+   * 为什么必须画示意：只写"解锁第 5 挂载位"是抽象数字，玩家不知道
+   * 第 5 位长在哪、和前 4 个有什么不同。画出"第 5 位会挂在第 1 座旁边变成双联"，
+   * 这张卡的价值才是看得见的。
+   */
+  private drawMountDiagram(g: Phaser.GameObjects.Graphics, cx: number, cy: number,
+                           id: string): void {
+    const target = id === 't_slot5' ? 5 : id === 't_slot6' ? 6 : this.maxWeapons
+    const n = Math.max(target, this.maxWeapons)
+    const gap = 15, bw = 11, bh = 13
+    const x0 = cx - ((n - 1) * gap) / 2
+
+    // 挂载梁
+    neonLine(g, x0 - 8, cy, x0 + (n - 1) * gap + 8, cy, UI.cyanDim,
+      { width: 2, alpha: 0.7, bloom: false })
+
+    const plan = this.mountPlan()
+    for (let i = 0; i < n; i++) {
+      const x = x0 + i * gap
+      const occupied = i < this.weapons.length
+      // 这张卡新解锁的那一位：闪烁空心框
+      const isNew = i === target - 1
+      // 双联位（第 5、6 位）画成"上下两个半块"，直观表达并联
+      const twin = i >= HARDPOINTS.length
+
+      if (twin) {
+        // 双联：一上一下两个半块
+        const col = occupied ? WEAPON_DEF[this.weapons[i].id].color : UI.cyan
+        for (const dir of [-1, 1]) {
+          const yy = cy + dir * 4
+          if (occupied) {
+            g.fillStyle(col, 0.95); g.fillRect(x - bw / 2, yy - bh / 5, bw, bh / 2.2)
+          } else {
+            g.lineStyle(1, isNew ? UI.amber : UI.cyanDim, isNew ? 1 : 0.45)
+            g.strokeRect(x - bw / 2, yy - bh / 5, bw, bh / 2.2)
+          }
+        }
+      } else {
+        const col = occupied ? WEAPON_DEF[this.weapons[i].id].color : UI.cyan
+        if (occupied) {
+          g.fillStyle(col, 0.95); g.fillRect(x - bw / 2, cy - bh / 2, bw, bh)
+        } else {
+          const a = isNew ? 1 : 0.45
+          const c2 = isNew ? UI.amber : UI.cyanDim
+          g.lineStyle(isNew ? 1.6 : 1, c2, a)
+          g.strokeRect(x - bw / 2, cy - bh / 2, bw, bh)
+        }
+      }
+
+      // 新解锁位：外面套一圈闪烁提示环
+      if (isNew) {
+        const blink = 0.45 + 0.55 * Math.abs(Math.sin(this.t * 5))
+        neonCircle(g, x, cy, 11, UI.amber, { width: 1.6, alpha: blink, bloom: false })
+      }
+    }
+    // 座编号（双联位标成 "1·B" 这种，说明它挂在第 1 座的后管）
+    void plan
   }
 
   private pickUpgrade(up: Upgrade): void {
@@ -2471,7 +3055,8 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
     this.clearHits()
     this.enemies = []; this.bones = []; this.pulses = []; this.debris = []
     this.bullets = []; this.arcs = []; this.blasts = []   // 旧弹不能飘进新层
-    this.sparks = []
+    this.sparks = []; this.floats = []
+    this.hurtDirT = 0; this.hurtFlash = 0   // 旧层的受击暗角不能带进新层
     // 背景立刻切到新层：过渡中点 cover=0.72 时几乎看不见旧景，
     // 后半段 cover 降到 0.28 自然就露出新层，衔接不跳变。
     // 注意不能调 syncEnv()——它会重算 depthM，把过渡的插值覆盖掉。
@@ -2630,7 +3215,7 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
 
   private restart(): void {
     this.enemies = []; this.bones = []; this.pulses = []; this.debris = []
-    this.sparks = []
+    this.sparks = []; this.floats = []
     this.biomass = 0
     this.speedMul = 1; this.pickupMul = 1; this.killO2 = PLAYER.killO2
     this.burstTimer = 0
