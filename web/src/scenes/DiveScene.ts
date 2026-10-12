@@ -34,7 +34,7 @@
  */
 
 import Phaser from 'phaser'
-import { UI, TXT, FONT, MONO } from '../config/theme'
+import { UI, TXT, FONT, MONO, MENU } from '../config/theme'
 import { SUBS, getSub, SUB_ART, SUB_ART_R, type SubDef, type SubId } from '../config/subs'
 import { ITEM_ART } from '../config/itemArt'
 import { neon, neonCircle, neonLine, glowPool } from '../render/neon'
@@ -111,6 +111,15 @@ const SEAT_RING_R = 40
 const TURRET_R = 12
 /** 发射器（插在塔座上的那件武器）基准尺寸。略大于塔座 —— 炮管探出座圈是正常的 */
 const EMITTER_SIZE = 14
+/**
+ * 发射器转塔的**角速度上限**（弧度/秒）—— V6.26。
+ *
+ * 有了独立索敌之后，换目标时炮口要转过去。瞬间"啪"地弹到新角度看起来像贴图错位，
+ * 所以让它真的**转**过去；16 rad/s ≈ 2.5 圈/秒，180° 掉头约 0.2s：
+ * 长到看得见转向（"发射器在施法"），短到来得及打中正在游走的鱼。
+ * 这个值只管"转多快"，不影响"打谁"——后者是每帧重算的最近目标。
+ */
+const TURRET_SPIN = 16
 
 /**
  * 潜艇显示尺寸（px）。
@@ -349,6 +358,19 @@ const STAT_META: Array<{
   { k: 'regen',   name: '循环泵',   pct: false, col: UI.cyanHi, icon: 'regen' },
   { k: 'killO2',  name: '击杀回氧', pct: false, col: UI.cyanHi, icon: 'kill' },
 ]
+
+/**
+ * 商店属性卡的 **卡 id → Stats 键** 映射（V6.25）。
+ *
+ * 卡 id 和统计键不同名（`tank` 对应 `o2Bonus`、`gill` 对应 `killO2`、
+ * 其余带 `s_` 前缀），所以不能在卡面里直接按 id 查 STAT_META。
+ * 抽成模块级常量是为了让「画符号」和「画进度条」共用同一张表。
+ */
+const STAT_CARD: Record<string, keyof Stats> = {
+  speed: 'speed', pickup: 'pickup', tank: 'o2Bonus', gill: 'killO2',
+  s_dmg: 'dmg', s_rate: 'rate', s_crit: 'crit', s_range: 'range',
+  s_armor: 'armor', s_dodge: 'dodge', s_regen: 'regen', s_luck: 'luck',
+}
 
 // ---------------------------------------------------------------------------
 // 遗物（被动道具，V6.8）
@@ -749,6 +771,20 @@ interface Weapon {
   ivLast: number
   /** 开火闪光剩余秒数（0.15s）。"施法过程"要看得见，靠的就是这一帧爆发。 */
   fireFlash: number
+  /**
+   * 发射器**自己的**世界朝向（弧度）—— V6.26。
+   *
+   * 为什么要存在武器上而不是每帧现算：发射器和装载器是**两个独立部件**，
+   * 发射器自己索敌、自己转塔。旧版把塔角写成
+   * `机体朝向 + clamp(目标角 - 机体朝向, ±70°)`，等于把炮的指向**绑在移动方向**上
+   * —— 玩家往上走，全船炮口就一起抬到上面，哪怕鱼在下方。
+   * 用户原话：「发射器不会选择就近射击，会受上下左右影响…我移动上面就一直射击上面」。
+   *
+   * 现在这个值由 `slewTurretAims` 每帧逼近"我这座塔最近的目标"，
+   * 画塔（drawSub）与出弹（turretPose）**共用同一个值**，
+   * 保证"炮口指哪、弹就从哪出"，不会再出现两套角度打架。
+   */
+  aimAng: number
 }
 
 /** 通用弹：机关枪（直线）与鱼雷（追踪）共用 */
@@ -1671,6 +1707,9 @@ export default class DiveScene extends Phaser.Scene {
       if (k >= 1) { this.phase = 'wave'; this.startWave() }
     } else if (this.phase === 'wave') {
       this.movePlayer(dt)
+      // 发射器转塔必须在 movePlayer **之后**（座圈世界坐标依赖本帧的 px/py/aim），
+      // 又必须在 autoFire **之前**（开火时读的就是这一帧算好的炮口朝向）。
+      this.slewTurretAims(dt)
       this.updateEnemies(dt)
       this.updatePulses(dt)
       this.updateBullets(dt)
@@ -1764,10 +1803,18 @@ export default class DiveScene extends Phaser.Scene {
       this.gHud.clear()
       this.hideTexts()
       for (const t of this.txtPool) if (t.getData('cat') === 'float') t.setVisible(false)
-      for (const im of this.shopArt) im.setVisible(false)
       this.floats.length = 0
     }
     // 弹窗分派（原在 drawHud 末尾，drawHud 相位门控后必须独立出来）
+    //
+    // ⚠️ 商店立绘的显隐归**相位**管，不能交给 drawShop 自己管（V6.26 修）：
+    // drawShop 只在 `phase === 'shop'` 时被调用，它内部那句"每帧先全隐"
+    // 因此在离开商店后就再也不会执行 —— 而离开商店那一帧的最后状态是"亮着的"，
+    // 于是那张立绘**永久冻在世界里**，跟着镜头漂、还压在战斗画面上
+    // （depth 95，比鱼/艇/炮塔都高）。用户实测：
+    // 「选择发射器之后 场景中还有遗留」——残留物就是商店中卡那张武器的立绘。
+    // 修法：把"全隐"提到相位分派之前，只留 `shop` 这一帧例外（由 drawShop 点亮）。
+    if (this.phase !== 'shop') for (const im of this.shopArt) im.setVisible(false)
     if (this.phase === 'shop') this.drawShop(this.g)
     if (this.phase === 'decide') this.drawDecide(this.g)
     if (this.phase === 'result') this.drawResult(this.g)
@@ -2339,12 +2386,18 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
     }
   }
 
-  /** 索敌：射程内最近的敌人 */
-  private nearestEnemy(range: number): Enemy | null {
+  /**
+   * 索敌：射程内最近的敌人。
+   *
+   * `ox/oy` 是可选原点 —— V6.26 起发射器**以自己塔座为原点**索敌：
+   * 船有 6 个座、座圈半径 40px，按机体中心算的话艉侧的座会把"自己鼻子底下
+   * 的鱼"判成远处目标，出现"这座塔明明贴着鱼却转头打远的那条"。
+   */
+  private nearestEnemy(range: number, ox = this.px, oy = this.py): Enemy | null {
     let best: Enemy | null = null, bd = range
     for (const e of this.enemies) {
       if (!e.alive) continue
-      const d = Phaser.Math.Distance.Between(this.px, this.py, e.x, e.y)
+      const d = Phaser.Math.Distance.Between(ox, oy, e.x, e.y)
       if (d < bd) { bd = d; best = e }
     }
     return best
@@ -2385,7 +2438,7 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
       this.weapons.shift()
     }
     this.weapons.push({ id, iv: st.iv, timer: 0, dmg: st.dmg, lvl, anchor: 0,
-      ivLast: st.iv, fireFlash: 0 })
+      ivLast: st.iv, fireFlash: 0, aimAng: this.aim })
   }
 
   /**
@@ -2432,6 +2485,57 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
     return plan
   }
 
+  /** 第 i 座塔座的**世界坐标**（座圈随艇身朝向一起转，发射器则独立瞄准）。 */
+  private seatPos(i: number): { x: number; y: number } | null {
+    const slot = this.mountPlan()[i]
+    if (!slot) return null
+    const ca = Math.cos(this.aim), sa = Math.sin(this.aim)
+    const sx = SEAT_RING_R * Math.cos(slot.ang)
+    const sy = SEAT_RING_R * Math.sin(slot.ang)
+    return { x: this.px + sx * ca - sy * sa, y: this.py + sx * sa + sy * ca }
+  }
+
+  /** 第 i 座在**射程内**最近的目标（以**塔座**而不是机体中心为原点） */
+  private seatTarget(i: number): { tgt: Enemy | null; rng: number } | null {
+    const w = this.weapons[i]
+    const p = this.seatPos(i)
+    if (!w || !p) return null
+    const def = WEAPON_DEF[w.id]
+    // 射程算法必须和 autoFire 一致，否则塔会指向一个实际打不到的目标
+    const rng = (def.range + (w.lvl - 1) * 26) * (1 + this.st.range)
+    return { tgt: this.nearestEnemy(rng, p.x, p.y), rng }
+  }
+
+  /**
+   * 发射器独立索敌（V6.26）。
+   *
+   * 旧的炮塔角是 `机体朝向 + clamp(目标角 − 机体朝向, ±70°)` —— 这个式子
+   * 把"打谁"和"往哪走"绑死了：往上游，全船炮只能在上方 ±70° 里挑，
+   * 于是"移动上面就一直射击上面"（用户实测）。而 Brotato 的手感恰恰相反：
+   * 火力来自多个**各自为战**的来源，玩家的操作只有走位。
+   *
+   * 现在改为：每座塔**从自己座位的坐标**出发，独立锁定射程内最近的敌人，
+   * 以 TURRET_SPIN 的角速度转过去；射程内没有目标就回到艇首方向待机。
+   * 结果 = 装载器（座圈，跟着艇身转）+ 发射器（旋回部，自己找鱼）两件东西各转各的，
+   * 这才是"插在座上的独立发射器"该有的样子。
+   */
+  private slewTurretAims(dt: number): void {
+    for (let i = 0; i < this.weapons.length; i++) {
+      const w = this.weapons[i]
+      const st = this.seatTarget(i)
+      if (!st) continue
+      const p = this.seatPos(i)!
+      const want = st.tgt
+        ? Math.atan2(st.tgt.y - p.y, st.tgt.x - p.x)
+        : this.aim
+      const rel = Phaser.Math.Angle.Wrap(want - w.aimAng)
+      // 指数逼近（转得快时也不会甩过头）+ 角速度硬上限（防止一帧内绕大半圈）
+      const step = Phaser.Math.Clamp(
+        rel * Math.min(1, dt * 14), -TURRET_SPIN * dt, TURRET_SPIN * dt)
+      w.aimAng = Phaser.Math.Angle.Wrap(w.aimAng + step)
+    }
+  }
+
   /**
    * 第 i 台器械的**炮塔位姿**（世界坐标 + 实际朝向）。
    *
@@ -2441,28 +2545,19 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
    * 玩家根本看不出是哪个炮开的火。用户原话：
    * 「需要衔接发射器，视觉上可以很清楚看到发射器转向发射」。
    *
-   * 这里和 `drawSub` 用**完全相同的算法**（座圈角度 + 索敌 + ±70° 限幅），
-   * 两处必须一致：任何一处改了另一处没跟上，弹就会从炮塔旁边飞出来。
+   * 朝向直接取 `w.aimAng`（由 `slewTurretAims` 每帧算好），
+   * 和 `drawSub` 画塔用的是**同一个值** —— 任何一处另算一套，
+   * 弹就会从炮管旁边飞出来。V6.26 之前两处各写了一遍限幅公式，
+   * 这次合并成一个来源，就是为了根除这种"两处算法必须手动同步"的隐患。
    * 返回 null 表示这台没占到位（不该发生，兜底用）。
    */
   private turretPose(i: number): { x: number; y: number; ang: number } | null {
-    const plan = this.mountPlan()
-    const slot = plan[i]
+    const slot = this.mountPlan()[i]
     const w = this.weapons[i]
     if (!slot || !w) return null
-    const ca = Math.cos(this.aim), sa = Math.sin(this.aim)
-    const sx = SEAT_RING_R * Math.cos(slot.ang)
-    const sy = SEAT_RING_R * Math.sin(slot.ang)
-    const x = this.px + sx * ca - sy * sa
-    const y = this.py + sx * sa + sy * ca
-    const def = WEAPON_DEF[w.id]
-    const rng = (def.range + (w.lvl - 1) * 26) * (1 + this.st.range)
-    const tgt = this.nearestEnemy(rng)
-    let want = this.aim
-    if (tgt) want = Math.atan2(tgt.y - y, tgt.x - x)
-    const rel = Phaser.Math.Angle.Wrap(want - this.aim)
-    const ang = this.aim + Phaser.Math.Clamp(rel, -1.22, 1.22)
-    return { x, y, ang }
+    const p = this.seatPos(i)
+    if (!p) return null
+    return { x: p.x, y: p.y, ang: w.aimAng }
   }
 
   /** 全部器械升一级（「弹药改良」升级卡用） */
@@ -3084,6 +3179,17 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
     g.clear()
     const W = this.scale.width, H = this.scale.height
     const L = this.layer()
+
+    // —— 弹窗相位（商店 / 决策 / 结算）**不画环境层** ——
+    // 那几个页面是一整张实底页，环境层（海雪 / 每层动态 / 远景生物剪影）
+    // 不该透上来。而且它**一定会透上来**：gBg 没进 `uiCam.ignore` 名单，
+    // 于是被 uiCam 再画一遍、盖在商店底色之上 —— depth 5 < 10 也挡不住，
+    // 因为这是两个相机的渲染次序问题，不是深度问题。
+    // 实机证据：商店截图的左右两侧能看到远处水母剪影在卡片之间飘。
+    if (this.phase === 'shop' || this.phase === 'decide' || this.phase === 'result') {
+      this.gDim.clear()
+      return
+    }
 
     // 极淡的一层环境色，把背景图色调往 UI 色系拉一点（不能压死画面）
     g.fillStyle(L.tint, 0.10)
@@ -3933,17 +4039,11 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
       const mountX = X(seatX, seatY)
       const mountY = Y(seatX, seatY)
 
-      // 独立索敌：优先当前锁定目标，否则取射程内最近的
-      const def = WEAPON_DEF[w.id]
-      // 必须和 autoFire 用同一个射程，否则塔会指向一个实际打不到的目标
-      const rng = (def.range + (w.lvl - 1) * 26) * (1 + this.st.range)
-      const tgt = this.nearestEnemy(rng)
-      let want = this.aim
-      if (tgt) want = Math.atan2(tgt.y - mountY, tgt.x - mountX)
-      // 限幅：塔相对机体朝向最多偏 ±70°。圆座本身不怕重叠了，
-      // 但仍要限幅 —— 超过 ±90° 炮管会指向艇尾，玩家读起来像"这塔在打自己"
-      const rel = Phaser.Math.Angle.Wrap(want - this.aim)
-      const ang = this.aim + Phaser.Math.Clamp(rel, -1.22, 1.22)
+      // 独立索敌：塔的朝向**不在这里算**，直接取 slewTurretAims 每帧维护的
+      // `w.aimAng` —— 出弹（turretPose）读的是同一个值，两处绝不会打架。
+      // V6.26 之前这里另算了一遍 `机体朝向 + clamp(±70°)`，结果是
+      // 「往上走就一直朝上打」：炮口被移动方向锁住了。
+      const ang = w.aimAng
       // 装填进度 0..1：分母用**上一发的实际间隔**（含等级/齐射/高压供能），
       // 这样升级后装填环的转速和真实开火节奏仍然一致。
       const ivD = w.ivLast > 0 ? w.ivLast : w.iv
@@ -4504,14 +4604,17 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
     // 另外暗角本身也是"要不要去捡"的一环：屏幕越红，玩家越倾向冒险出去补氧，
     // 而这个动作恰好是危险的那一个。
     const o2pct = this.o2 / Math.max(1, this.o2Max)
-    if (o2pct < 0.3 && this.phase === 'wave') {
-      const sev = Phaser.Math.Clamp((0.3 - o2pct) / 0.3, 0, 1)
+    if (o2pct < 0.28 && this.phase === 'wave') {
+      const sev = Phaser.Math.Clamp((0.28 - o2pct) / 0.28, 0, 1)
       const breath = 0.55 + 0.45 * Math.sin(this.t * 5.2)   // 正弦是"喘"，方波是"闪"
       const H = this.scale.height
-      const NL = 7, dep = 26 + 96 * sev, band = dep / NL
+      // 强度刻意压在 0.26 以内：这是一条**常驻**警示（低于 28% 就一直亮着），
+      // 太浓会变成一层红滤镜盖住战场信息。第一版取 0.34 / 深入 96px，
+      // 实机截图里整屏套了个红框，敌人颜色都被改写了 —— 那是"看不清"而不是"紧张"。
+      const NL = 7, dep = 20 + 74 * sev, band = dep / NL
       for (let i = 0; i < NL; i++) {
         const t = i / NL
-        const al = 0.34 * sev * breath * (1 - t)
+        const al = 0.26 * sev * breath * (1 - t)
         if (al <= 0.004) continue
         const ins = t * dep
         g.fillStyle(UI.danger, al)
@@ -4599,7 +4702,7 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
   }
   private txt(s: string, x: number, y: number, size: string, color: string,
               font: string, align: 'left' | 'center' | 'right' = 'left',
-              cat: 'ui' | 'float' = 'ui')
+              cat: 'ui' | 'float' = 'ui', stroke = true)
     : Phaser.GameObjects.Text {
     // 池按 **屏幕层 / 世界层** 分开复用：
     //   · UI 文本（氧气读数、深度、卡面标题…）→ 归 UI 相机（zoom 1，屏幕坐标）
@@ -4629,7 +4732,10 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
     if (align === 'center') t.setOrigin(0.5)
     else if (align === 'right') t.setOrigin(1, 0)
     else t.setOrigin(0)
-    t.setStroke('#04070d', 3)
+    // 深色描边保证文字在任何背景上立得住。**但亮底按钮上的深色字必须关掉它** ——
+    // 否则深色字 + 深色描边 = 一团糊（V6.25 的"实心主按钮"需要这个开关）。
+    if (stroke) t.setStroke('#04070d', 3)
+    else t.setStroke('rgba(0,0,0,0)', 0)
     // UI 合理性审计：把文字节点登记进 this.ui（屏幕坐标 + 颜色），供 __dive.uiProbe 导出
     const b = t.getBounds()
     this.ui.push({
@@ -5102,12 +5208,28 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
     const W = this.scale.width, H = this.scale.height
     // 立绘每帧先全隐，下面按卡逐个点亮（避免卡片数量变化时残留上一帧的立绘）
     for (const im of this.shopArt) im.setVisible(false)
-    this.drawSeaBackdrop(g, W, H, 0.70)
-    // 聚焦暗幕：整屏压暗一层，**卡片画在它之后** → 视觉上只有卡是亮的。
-    // Brotato 的商店也是这样（卡亮、周围暗）。这是让界面"精致"最省力、
-    // 也最有效的一步：不需要改任何内容，只把注意力交给卡片。
-    g.fillStyle(UI.abyss, 0.42)
+    // ==========================================================================
+    // V6.25 商店视觉重做：从「霓虹半透明」改成「实底 + 清晰层级」
+    // ==========================================================================
+    //
+    // 为什么推翻 V6.10 那一版（有实测数据，不是审美偏好）：
+    // 量用户截图发现 **卡与卡之间的背景亮度 62 / 方差 51，而卡内只有 34 / 29**
+    // —— 全场最抢眼的东西是卡片背后的霓虹装饰，不是玩家该做的决策。
+    // 根因两条：① 背景还在画海景（圆环、网纹、光点）
+    //           ② 卡面是半透明的，背景辉光直接透进卡里
+    //              （实测立绘区内部亮度方差 26.6，一张实底卡应该接近 0）
+    //
+    // Brotato 反过来做：背景近纯黑（亮度 ~15、方差 ~5），卡是不透明实底、
+    // 比背景**亮一档**。**"清晰简单"来自对比，不来自装饰。**
+    //
+    // 所以这一版只做三件事：背景实黑、卡面实底、描边去辉光改硬边。
+    g.fillStyle(MENU.page, 1)
     g.fillRect(0, 0, W, H)
+    // 上下两条极淡的压暗带：留一点"页面"感（有顶栏/底栏的边界），
+    // 但亮度压得极低，绝不与卡片争焦点。
+    g.fillStyle(0x000000, 0.4)
+    g.fillRect(0, 0, W, 66)
+    g.fillRect(0, H - 86, W, 86)
 
     // ==========================================================================
     // V6.10 商店梳理：把「三张卡 + 顶栏 + 底栏」重排成一条清晰的视觉轴
@@ -5158,10 +5280,11 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
 
     // ---- 顶栏：标题 + 鱼骨胶囊 + 侧栏页签（同一行，视觉一体）----
     const barY = y0 - BAR_H - 30
-    g.fillStyle(UI.panel, 0.72); g.fillRoundedRect(W / 2 - total / 2 - 24, barY, total + 48, BAR_H, 12)
-    neon(g, UI.cyanDim, () => {
-      g.strokeRoundedRect(W / 2 - total / 2 - 24, barY, total + 48, BAR_H, 12)
-    }, { width: 1, alpha: 0.4, bloom: false })
+    // 顶栏也用**实底**（原来 0.72 半透明）—— 半透明会把背景的漂浮物透上来，
+    // 顶栏是"这是哪一关"的锚点，不该是磨砂玻璃。
+    g.fillStyle(MENU.card, 1); g.fillRoundedRect(W / 2 - total / 2 - 24, barY, total + 48, BAR_H, 12)
+    g.lineStyle(2, MENU.divider, 1)
+    g.strokeRoundedRect(W / 2 - total / 2 - 23, barY + 1, total + 46, BAR_H - 2, 11)
 
     this.txt(`L${this.layerIdx + 1} ${this.layer().name} · 第 ${this.waveInLayer + 1} 波结束`,
       W / 2, barY + 9, '18px', TXT.cyber, FONT, 'center')
@@ -5171,9 +5294,9 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
     const bankStr = `${this.bank}`
     const bankW = 34 + bankStr.length * 15 + 40
     const bankX = W / 2, bankY = barY + 45
-    g.fillStyle(UI.panelHi, 0.92); g.fillRoundedRect(bankX - bankW / 2, bankY - 12, bankW, 24, 12)
-    neon(g, BONE, () => { g.strokeRoundedRect(bankX - bankW / 2, bankY - 12, bankW, 24, 12) },
-      { width: 1.2, alpha: 0.55, bloom: false })
+    g.fillStyle(MENU.slot, 1); g.fillRoundedRect(bankX - bankW / 2, bankY - 12, bankW, 24, 12)
+    g.lineStyle(1, MENU.divider, 1)
+    g.strokeRoundedRect(bankX - bankW / 2 + 0.5, bankY - 11.5, bankW - 1, 23, 12)
     neonCircle(g, bankX - bankW / 2 + 17, bankY, 7.5, BONE, { width: 1.6, bloom: false })
     this.txt(bankStr, bankX + 6, bankY - 10, '18px', TXT.cyber, MONO, 'center')
     this.txt('鱼骨', bankX + bankW / 2 - 13, bankY - 8, '13px', TXT.dim, FONT, 'right')
@@ -5187,10 +5310,10 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
     // ---- 侧栏页签：移到顶栏右端，与被它控制的面板同一行（治 ④）----
     const tabW = 130, tabH = 30
     const tabX = W / 2 + total / 2 + 24 - tabW, tabY = barY + (BAR_H - tabH) / 2
-    g.fillStyle(this.shopInfoOpen ? UI.panelHi : UI.panel, 0.92)
+    g.fillStyle(this.shopInfoOpen ? MENU.cardHi : MENU.card, 1)
     g.fillRoundedRect(tabX, tabY, tabW, tabH, 8)
-    neon(g, this.shopInfoOpen ? UI.cyanHi : UI.cyanDim,
-      () => { g.strokeRoundedRect(tabX, tabY, tabW, tabH, 8) }, { width: 1.6, bloom: false })
+    g.lineStyle(2, this.shopInfoOpen ? MENU.edge : MENU.divider, 1)
+    g.strokeRoundedRect(tabX + 1, tabY + 1, tabW - 2, tabH - 2, 7)
     this.txt(this.shopInfoOpen ? '收起状态 ▴' : '查看状态 ▾',
       tabX + tabW / 2, tabY + 8, '13px', this.shopInfoOpen ? TXT.cyber : TXT.main, FONT, 'center')
 
@@ -5285,35 +5408,30 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
         : up.kind === 'mount' ? UI.amber
         : up.kind === 'relic' ? BONE : UI.violet
 
-      // —— 卡体 ——
-      // ① 投影：先垫一层偏移的暗块，卡就"浮"在背景上（纯 Graphics 没有阴影，必须手绘）
-      g.fillStyle(UI.abyss, isSold ? 0.35 : 0.55)
-      g.fillRoundedRect(c.x + 3, c.y + 6, c.w, c.h, 14)
-      // ② 卡面。三态必须一眼分开：可买（亮）/ 买不起（压暗）/ 已售出（最暗 + 划掉）
-      const bodyA = isSold ? 0.42 : (afford ? 0.96 : 0.74)
-      g.fillStyle(isSold ? UI.panel : (hov && afford ? UI.panelHi : UI.panel), bodyA)
-      g.fillRoundedRect(c.x, c.y, c.w, c.h, 14)
-      // ③ 卡面上缘的 1px 冷高光：模拟"顶面受光"，是卡片有厚度的关键一笔
-      g.fillStyle(0xffffff, isSold ? 0.06 : 0.15)
-      g.fillRoundedRect(c.x + 10, c.y + 2, c.w - 20, 1.5, 1)
-      // ④ 内侧暗描边：卡面与描边之间垫一层"倒角"，卡片不再是扁平色块
-      g.lineStyle(1, UI.abyss, 0.5)
-      g.strokeRoundedRect(c.x + 2, c.y + 2, c.w - 4, c.h - 4, 12)
-      // 悬停时描边加亮加粗——纯 Graphics 卡片没有自带 hover 态，必须手绘
-      const edgeCol = isSold ? UI.line : (isLocked ? UI.amber : (afford ? (hov ? UI.cyanHi : UI.cyan) : UI.line))
-      neon(g, edgeCol, () => { g.strokeRoundedRect(c.x, c.y, c.w, c.h, 14) },
-        { width: hov && afford ? 3 : 2, bloom: hov && afford })
-      // 悬停时卡内整体上浮 3px 的"抬升感"：顶部高光带加强 + 卡体轻微提亮
-      if (hov && !isSold) {
-        g.fillStyle(0xffffff, 0.06)
-        g.fillRoundedRect(c.x + 4, c.y + 4, c.w - 8, 14, 7)
-      }
+      // —— 卡体：**不透明实底**。三态靠「描边亮度」分档，不靠透明度 ——
+      // 半透明是这一版要根治的病：卡一旦透明，背景的辉光就变成卡内的噪点。
+      g.fillStyle(isSold ? MENU.slot : (hov && afford ? MENU.cardHi : MENU.card), 1)
+      g.fillRoundedRect(c.x, c.y, c.w, c.h, 12)
+      // 上缘 1px 冷高光：给卡面一点"实体"的读感。
+      // 不做投影 —— 背景已经近黑，投影本来就看不见，画了只是白费。
+      g.fillStyle(0xffffff, isSold ? 0.03 : 0.08)
+      g.fillRoundedRect(c.x + 12, c.y + 2, c.w - 24, 1, 0.5)
 
-      // —— 类型标识：**左侧通高竖条**（物品卡的语汇）+ 顶部一小段色带 ——
-      // 竖条比"顶部横条"更像一张卡，也更容易在余光里分辨类型。
-      g.fillStyle(bandCol, isSold ? 0.3 : (hov ? 1 : 0.85))
+      // —— 描边：**颜色分类型、亮度分状态**（Brotato 的做法）——
+      // Brotato 用边框区分稀有度，我们用它区分类型：整条边都在说同一件事，
+      // 比"卡顶一条小色带"可读得多（那一条只有 3px 高，余光根本扫不到）。
+      // 买不起时整条边压到 0.26 —— 类型仍然认得出，但一眼知道"现在买不了"。
+      // 用 lineStyle 硬边而不是 neon()：辉光会把卡边糊掉 2~3px，
+      // 而"边缘锐利"正是那种清楚感的来源。
+      const edgeCol = isSold ? MENU.edge : bandCol
+      const edgeA = isSold ? 0.4 : (afford ? (hov ? 1 : 0.7) : 0.26)
+      g.lineStyle(hov && afford ? 3 : 2, edgeCol, edgeA)
+      g.strokeRoundedRect(c.x + 1, c.y + 1, c.w - 2, c.h - 2, 11)
+
+      // —— 类型标识：**左侧通高竖条**（物品卡的语汇）——
+      // 和边框同色，一起构成"这张卡属于哪一类"的第二重提示。
+      g.fillStyle(bandCol, isSold ? 0.28 : (afford ? 1 : 0.4))
       g.fillRoundedRect(c.x + 2, c.y + 18, 4, c.h - 36, 2)
-      g.fillRoundedRect(c.x + 14, c.y + 12, c.w - 28, 3, 1.5)
 
       // —— 首行：序号（快捷键提示）+ 类型标签 + 锁定按钮 ——
       this.txt(`[${i + 1}]`, c.x + 16, c.y + 20, '15px',
@@ -5326,22 +5444,17 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
       // 结果是"属性"两个字被锁定按钮压住（实机截图可见）。
       this.txt(kindLabel, c.x + 46, c.y + 21, '13px', kindCol, FONT)
 
-      // —— 立绘框：内嵌深色画框 + 类型色底光，让图示从「贴纸」升级成「立绘」——
-      const ax = c.x + 18, ay = c.y + artTop, aw = c.w - 36, ah = artH
-      g.fillStyle(UI.abyss, 0.62); g.fillRoundedRect(ax, ay, aw, ah, 10)
-      g.fillStyle(bandCol, 0.08); g.fillRoundedRect(ax, ay, aw, ah, 10)
-      neon(g, bandCol, () => { g.strokeRoundedRect(ax, ay, aw, ah, 10) },
-        { width: 1.2, alpha: 0.4, bloom: false })
-      // 展台：底部椭圆光晕（两层）+ 一道透视网纹 —— 让图示像"摆在台子上"而不是"贴在卡上"
-      g.fillStyle(bandCol, 0.15); g.fillEllipse(cx, ay + ah - 9, aw * 0.52, 10)
-      g.fillStyle(bandCol, 0.10); g.fillEllipse(cx, ay + ah - 9, aw * 0.28, 6)
-      g.lineStyle(1, bandCol, 0.16)
-      for (let k = -2; k <= 2; k++) {
-        g.beginPath()
-        g.moveTo(cx + k * aw * 0.085, ay + ah - 13)
-        g.lineTo(cx + k * aw * 0.042, ay + ah - 3)
-        g.strokePath()
-      }
+      // —— 立绘位：比卡面**更深**的实底槽 + 1px 细边 ——
+      // 深底让亮色立绘"跳"出来（Brotato 的图标位也是这种"底比卡深"的关系）。
+      // 这里**必须不透明**：原来的 0.62 会让背景辉光透进画框，
+      // 实测量到的画框内亮度方差 26.6 —— 那不是"氛围"，那是噪点。
+      const ax = c.x + 16, ay = c.y + artTop, aw = c.w - 32, ah = artH
+      g.fillStyle(MENU.slot, 1)
+      g.fillRoundedRect(ax, ay, aw, ah, 8)
+      g.lineStyle(1, MENU.divider, isSold ? 0.5 : 1)
+      g.strokeRoundedRect(ax + 0.5, ay + 0.5, aw - 1, ah - 1, 8)
+      // 原「展台」（椭圆光晕 + 透视网纹）已删除：那是三条叠在立绘下面的装饰线，
+      // 在实底槽上只会把画面弄脏。图示"有分量"靠的是深底对比，不是垫光。
 
       // —— 立绘内容：按类型画不同的东西（统一以立绘框中心为基准）——
       const artY = ay + ah / 2
@@ -5403,19 +5516,29 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
         // 遗物：有真立绘就不叠代码符号（会糊成一团），没有的才画一帧专属符号
         if (!hasArt) this.drawRelicIcon(g, up.relicId ?? 'echo_heart', cx, artY, artS)
       } else {
-        // 属性卡：画一个**进度条**，条里填的是"这个属性现在到哪了"
-        // 比抽象圆环有用：玩家能看见"共振强度已经 +24%，再加 12% 就到 36%"
-        this.drawStatGauge(g, cx, artY - 4, up.id)
+        // 属性卡：**大符号 + 进度条**（V6.25）。
+        // 原来这块只有一根细条，占着整个立绘位却几乎没内容 —— 这是"卡面空、
+        // 看着粗糙"的最后一个来源。Brotato 的属性卡是"一个图标 + 一行绿字"：
+        // **图标负责被记住，数字负责被比较**，两者缺一不可。
+        const sk = STAT_CARD[up.id]
+        if (sk) {
+          const gcol = STAT_META.find(m => m.k === sk)?.col ?? UI.cyan
+          this.drawStatGlyph(g, sk, cx, artY - ah * 0.20, Math.min(46, ah * 0.44), gcol)
+        }
+        this.drawStatGauge(g, cx, artY + ah * 0.26, up.id)
       }
 
-      // —— 名称：卡面最大字号，唯一的主标题 ——
-      this.txt(up.name, cx, c.y + nameRel, '22px', isSold ? TXT.dim : TXT.cyber, FONT, 'center')
+      // —— 名称：卡面最大字号，**纯白** ——
+      // 原来是青色（TXT.cyber）。改白是刻意的：Brotato 的卡名就是白字，
+      // 在深色实底上白字对比度最高；青色留给"数值"用，别让两种信息抢同一种颜色。
+      this.txt(up.name, cx, c.y + nameRel, '22px', isSold ? TXT.mute : '#ffffff', FONT, 'center')
 
-      // —— 描述：**自动折行**，最多 3 行（治 ①）——
+      // —— 描述：**绿色**，这是"这张卡给我什么"的收益行 ——
+      // Brotato 把收益写成绿字（+5生命再生），说明写成灰字。层级靠颜色分，不靠字号。
       const descLines = this.wrapByWidth(up.desc, 14, c.w - 40, 3)
       for (let li = 0; li < descLines.length; li++) {
         this.txt(descLines[li], cx, c.y + descRel + li * 19, '14px',
-          isSold ? TXT.mute : TXT.main, FONT, 'center')
+          isSold ? TXT.mute : TXT.jade, FONT, 'center')
       }
 
       // —— 状态行：这张卡买了会发生什么，必须写死 ——
@@ -5459,7 +5582,12 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
           ? `占用遗物槽 ${this.relics.length + 1} / ${RELIC_SLOTS}`
           : '遗物槽已满'
       }
-      if (foot) this.txt(foot, cx, c.y + footRel, '13px', isSold ? TXT.mute : footCol, FONT, 'center')
+      // 状态行统一降为灰字 —— 它是**元信息**（占几个座位 / 进化哪台），
+      // Brotato 这一行也是灰的。只有"受阻"这类要提醒的（footCol 为告警色）保留橙。
+      if (foot) {
+        const fc = isSold ? TXT.mute : (footCol === TXT.amber ? TXT.amber : TXT.dim)
+        this.txt(foot, cx, c.y + footRel, '13px', fc, FONT, 'center')
+      }
 
       // 遗物的代价单独一行，告警色，画在状态行下方（字号 12，与状态行拉开一档）
       if (up.kind === 'relic' && up.relicId) {
@@ -5475,12 +5603,12 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
         }
       }
 
-      // —— 底部价格行：整条独立底板 + 鱼骨图标 + 价格 + 状态词 ——
-      // 用一条比卡体更深的底板把价格「托」出来，价格和描述就不会混成一片。
       const pY = c.y + c.h - PRICE_H - 12
-      g.fillStyle(UI.abyss, 0.6); g.fillRoundedRect(c.x + 12, pY, c.w - 24, PRICE_H, 10)
-      g.lineStyle(1, isSold ? UI.line : (afford ? bandCol : UI.line), isSold ? 0.4 : 0.45)
-      g.strokeRoundedRect(c.x + 12, pY, c.w - 24, PRICE_H, 10)
+      // 价格条：改成**不透明深底**（原来是 0.6 半透明）。
+      // 它要在视觉上"托住"价格数字，半透明会让卡面纹理透上来、把数字糊掉。
+      g.fillStyle(MENU.slot, 1); g.fillRoundedRect(c.x + 12, pY, c.w - 24, PRICE_H, 8)
+      g.lineStyle(1, MENU.divider, isSold ? 0.5 : 1)
+      g.strokeRoundedRect(c.x + 12.5, pY + 0.5, c.w - 25, PRICE_H - 1, 8)
 
       if (isSold) {
         // 已售出：不画价格，画一条贯穿的"已购入"
@@ -5533,37 +5661,36 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
     if (this.rerollBtnRect) {
       const r = this.rerollBtnRect
       const canRoll = this.bank >= this.rerollCost
-      g.fillStyle(canRoll ? UI.panelHi : UI.panel, canRoll ? 0.94 : 0.6)
-      g.fillRoundedRect(r.x, r.y, r.w, r.h, 12)
-      neon(g, canRoll ? UI.cyan : UI.line, () => { g.strokeRoundedRect(r.x, r.y, r.w, r.h, 12) },
-        { width: 1.6, alpha: canRoll ? 0.9 : 0.5, bloom: false })
-      // 按钮内容排成**两行**（主信息 / 说明），行位固定 9 / 32，与按钮高 56 匹配。
-      // 上一版把"价格+标题"和"说明"都挤在中心线上：17px 标题从中心−9 起、
-      // 12px 说明从中心+11 起 —— 实际是叠着的（用户截图里能看到两行压在一起）。
-      // 两行按 10 / 35 排（按钮高 56）：上一版 9 / 32 让 19px 主行与 12px 副行
-      // 只隔 3px，视觉上黏在一起。副标题也从 mute 提到 dim —— 12px 的暗色小字
-      // 在按钮里读起来就是噪点。
-      const line1 = r.y + 10, line2 = r.y + 35
-      const priceStr = `${this.rerollCost} 骨`
-      const titleStr = '刷新卡面'
-      const wIcon = 7, wPrice = priceStr.length * 9, wTitle = titleStr.length * 18
-      const grpW = wIcon * 2 + 5 + wPrice + 14 + wTitle
+      // 次按钮：**扁平实色块 + 硬边 + 单行内容**。
+      // 原来是"两行文字塞进霓虹描边块"，读起来像信息堆而不是一个按钮。
+      // Brotato 的刷新按钮就一行（图标 + 数字 + 文字），剩下的空间用来呼吸。
+      g.fillStyle(canRoll ? MENU.card : MENU.slot, 1)
+      g.fillRoundedRect(r.x, r.y, r.w, r.h, 10)
+      g.lineStyle(2, canRoll ? MENU.edge : MENU.divider, 1)
+      g.strokeRoundedRect(r.x + 1, r.y + 1, r.w - 2, r.h - 2, 9)
+      const priceStr = `${this.rerollCost}`
+      const titleStr = '刷新'
+      const wIcon = 8, wPrice = priceStr.length * 12, wTitle = titleStr.length * 19
+      const grpW = wIcon * 2 + 8 + wPrice + 16 + wTitle
       let gx = r.x + (r.w - grpW) / 2
-      neonCircle(g, gx + wIcon, line1 + 9, wIcon, BONE, { width: 1.3, bloom: false })
-      gx += wIcon * 2 + 5
-      this.txt(priceStr, gx, line1, '16px', canRoll ? TXT.cyber : TXT.mute, MONO, 'left')
-      this.txt(titleStr, gx + wPrice + 14, line1 - 1, '17px',
-        canRoll ? TXT.cyber : TXT.mute, FONT, 'left')
-      this.txt('已锁定的卡会保留', r.x + r.w / 2, line2, '12px',
-        canRoll ? TXT.dim : TXT.mute, FONT, 'center')
+      neonCircle(g, gx + wIcon, r.y + r.h / 2, wIcon, BONE, { width: 1.4, bloom: false })
+      gx += wIcon * 2 + 8
+      this.txt(priceStr, gx, r.y + r.h / 2 - 12, '20px',
+        canRoll ? TXT.bone : TXT.mute, MONO, 'left')
+      this.txt(titleStr, gx + wPrice + 16, r.y + r.h / 2 - 11, '19px',
+        canRoll ? TXT.main : TXT.mute, FONT, 'left')
     }
     if (this.leaveBtnRect) {
       const b = this.leaveBtnRect
-      g.fillStyle(UI.panelHi, 0.96); g.fillRoundedRect(b.x, b.y, b.w, b.h, 12)
-      neon(g, UI.jade, () => { g.strokeRoundedRect(b.x, b.y, b.w, b.h, 12) },
-        { width: 2.4, alpha: 0.95, bloom: true })
-      this.txt('继续 · 下一波', b.x + b.w / 2, b.y + 10, '19px', TXT.jade, FONT, 'center')
-      this.txt(`剩余 ${this.bank} 鱼骨保留`, b.x + b.w / 2, b.y + 35, '12px', TXT.dim, FONT, 'center')
+      // 主按钮：**实心亮块 + 深色字**。反白是"这就是你要点的那一个"最强的信号 ——
+      // 霓虹描边做不到这件事（满屏都在发光，就没有重点）。
+      // 深色字必须关掉 txt 的默认描边（见 txt 的 stroke 参数）。
+      g.fillStyle(UI.jade, 0.95)
+      g.fillRoundedRect(b.x, b.y, b.w, b.h, 10)
+      this.txt('继续 · 下一波', b.x + b.w / 2, b.y + 9, '20px',
+        '#04140f', FONT, 'center', 'ui', false)
+      this.txt(`剩余 ${this.bank} 鱼骨保留`, b.x + b.w / 2, b.y + 34, '12px',
+        '#0a2a22', FONT, 'center', 'ui', false)
     }
   }
 
@@ -5853,6 +5980,98 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
    * 同样的"暴击 +8%"，在 0% 和 60% 时是完全不同的两个决策（后者快触顶了）。
    * 条里同时画出"现在"和"买了之后"，玩家不用心算。
    */
+  /**
+   * 属性卡的符号（V6.25）。全部用最简几何形，靠**形状**区分而不是颜色 ——
+   * 12 种属性在 40px 下要能一眼分开，颜色只有 5 种，不够用。
+   * 这些符号只承担"被记住"：数值比较交给下面的进度条。
+   */
+  private drawStatGlyph(g: Phaser.GameObjects.Graphics, k: keyof Stats,
+                        cx: number, cy: number, s: number, col: number): void {
+    const path = (fn: () => void, w = 2.4, a = 1) =>
+      neon(g, col, () => { g.beginPath(); fn(); g.strokePath() }, { width: w, alpha: a, bloom: false })
+    const seg = (x1: number, y1: number, x2: number, y2: number, w = 2.4, a = 1) =>
+      neonLine(g, x1, y1, x2, y2, col, { width: w, alpha: a, bloom: false })
+    switch (k) {
+      case 'dmg':      // 向上箭头 = 强度
+        path(() => {
+          g.moveTo(cx, cy - s * 0.5); g.lineTo(cx + s * 0.42, cy + s * 0.06)
+          g.lineTo(cx + s * 0.16, cy + s * 0.06); g.lineTo(cx + s * 0.16, cy + s * 0.5)
+          g.lineTo(cx - s * 0.16, cy + s * 0.5); g.lineTo(cx - s * 0.16, cy + s * 0.06)
+          g.lineTo(cx - s * 0.42, cy + s * 0.06); g.closePath()
+        })
+        break
+      case 'rate':     // 三条速度线
+        for (let i = -1; i <= 1; i++) {
+          seg(cx - s * 0.46, cy + i * s * 0.3, cx + s * 0.32, cy + i * s * 0.3, 2.4, i === 0 ? 1 : 0.55)
+        }
+        break
+      case 'crit':     // 准星
+        neonCircle(g, cx, cy, s * 0.4, col, { width: 2.4, bloom: false })
+        seg(cx - s * 0.62, cy, cx - s * 0.2, cy); seg(cx + s * 0.2, cy, cx + s * 0.62, cy)
+        seg(cx, cy - s * 0.62, cx, cy - s * 0.2); seg(cx, cy + s * 0.2, cx, cy + s * 0.62)
+        break
+      case 'range':    // 同心弧
+        for (let i = 0; i < 3; i++) {
+          path(() => { g.arc(cx - s * 0.34, cy, s * (0.3 + i * 0.2), -0.85, 0.85) },
+            2.2, 1 - i * 0.28)
+        }
+        break
+      case 'armor':    // 盾形
+        path(() => {
+          g.moveTo(cx, cy - s * 0.5); g.lineTo(cx + s * 0.42, cy - s * 0.26)
+          g.lineTo(cx + s * 0.32, cy + s * 0.3); g.lineTo(cx, cy + s * 0.52)
+          g.lineTo(cx - s * 0.32, cy + s * 0.3); g.lineTo(cx - s * 0.42, cy - s * 0.26)
+          g.closePath()
+        })
+        break
+      case 'dodge':    // 划开的斜线 = 躲开
+        seg(cx - s * 0.5, cy + s * 0.42, cx + s * 0.06, cy - s * 0.14, 2.8)
+        seg(cx + s * 0.3, cy - s * 0.38, cx + s * 0.5, cy - s * 0.5, 2.8, 0.5)
+        seg(cx + s * 0.14, cy - s * 0.52, cx + s * 0.52, cy - s * 0.14, 2.2, 0.55)
+        break
+      case 'speed':    // 双层人字
+        for (let i = 0; i < 2; i++) {
+          path(() => {
+            g.moveTo(cx - s * 0.46 + i * s * 0.34, cy - s * 0.36)
+            g.lineTo(cx - s * 0.08 + i * s * 0.34, cy)
+            g.lineTo(cx - s * 0.46 + i * s * 0.34, cy + s * 0.36)
+          }, 2.8, 1 - i * 0.4)
+        }
+        break
+      case 'pickup':   // 磁吸：中心圆 + 两侧外弧
+        neonCircle(g, cx, cy + s * 0.08, s * 0.26, col, { width: 2.4, bloom: false })
+        path(() => { g.arc(cx, cy + s * 0.08, s * 0.5, -0.75, 0.75) }, 2.4, 0.6)
+        path(() => { g.arc(cx, cy + s * 0.08, s * 0.5, Math.PI - 0.75, Math.PI + 0.75) }, 2.4, 0.6)
+        break
+      case 'luck':     // 四角星
+        path(() => {
+          g.moveTo(cx, cy - s * 0.52); g.lineTo(cx + s * 0.14, cy - s * 0.14)
+          g.lineTo(cx + s * 0.52, cy); g.lineTo(cx + s * 0.14, cy + s * 0.14)
+          g.lineTo(cx, cy + s * 0.52); g.lineTo(cx - s * 0.14, cy + s * 0.14)
+          g.lineTo(cx - s * 0.52, cy); g.lineTo(cx - s * 0.14, cy - s * 0.14)
+          g.closePath()
+        })
+        break
+      case 'regen':    // 循环箭头
+        path(() => { g.arc(cx, cy, s * 0.38, 0.55, Math.PI * 1.72) }, 2.6)
+        seg(cx + s * 0.18, cy - s * 0.46, cx + s * 0.46, cy - s * 0.24, 2.4)
+        seg(cx + s * 0.46, cy - s * 0.24, cx + s * 0.2, cy - s * 0.16, 2.4)
+        break
+      case 'killO2':   // 环 + 十字（回氧）
+        neonCircle(g, cx, cy, s * 0.44, col, { width: 2.2, bloom: false })
+        seg(cx - s * 0.2, cy, cx + s * 0.2, cy, 2.6)
+        seg(cx, cy - s * 0.2, cx, cy + s * 0.2, 2.6)
+        break
+      default:         // o2Bonus · 扩容气瓶：胶囊 + 加号
+        neon(g, col, () => {
+          g.strokeRoundedRect(cx - s * 0.28, cy - s * 0.46, s * 0.56, s * 0.92, s * 0.28)
+        }, { width: 2.4, bloom: false })
+        seg(cx - s * 0.13, cy, cx + s * 0.13, cy, 2.4)
+        seg(cx, cy - s * 0.13, cx, cy + s * 0.13, 2.4)
+        break
+    }
+  }
+
   private drawStatGauge(g: Phaser.GameObjects.Graphics, cx: number, cy: number,
                         cardId: string): void {
     // 卡 id → 属性键 + 这一张给多少
@@ -5882,13 +6101,16 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
     const w = 172, h = 20
     const x0 = cx - w / 2, y0 = cy - h / 2
 
-    g.fillStyle(UI.panel, 0.9); g.fillRoundedRect(x0, y0, w, h, 7)
-    // "买了会到哪"先画一层浅色，再在上面盖"现在已经到哪" ——
-    // 两层叠着看，增量就是中间那段差值，一眼可见
-    g.fillStyle(UI.violet, 0.35); g.fillRoundedRect(x0, y0, Math.max(2, w * next), h, 5)
-    g.fillStyle(UI.violet, 0.95); g.fillRoundedRect(x0, y0, Math.max(2, w * cur), h, 5)
-    neon(g, UI.violet, () => { g.strokeRoundedRect(x0, y0, w, h, 5) },
-      { width: 1.2, alpha: 0.8, bloom: false })
+    const gcol = STAT_META.find(x => x.k === m.k)?.col ?? UI.violet
+    // 槽底改**不透明**（原来 0.9）：卡面已经是实底，槽底也必须实底，
+    // 否则那一点透上来的纹理会把"两个数字叠在一起比较"的关系搅浑。
+    // 进度条的颜色改跟**属性本身**走（和上面的大符号同色），
+    // 原来一律用紫色，12 种属性长一个样，等于放弃了"余光辨色"这条通道。
+    g.fillStyle(MENU.slot, 1); g.fillRoundedRect(x0, y0, w, h, 7)
+    g.fillStyle(gcol, 0.35); g.fillRoundedRect(x0, y0, Math.max(2, w * next), h, 5)
+    g.fillStyle(gcol, 0.95); g.fillRoundedRect(x0, y0, Math.max(2, w * cur), h, 5)
+    g.lineStyle(1, MENU.divider, 1)
+    g.strokeRoundedRect(x0 + 0.5, y0 + 0.5, w - 1, h - 1, 5)
 
     // 增量段标一个箭头，避免玩家看不出"浅色那段是我要买的"
     if (next > cur + 0.01) {

@@ -94,9 +94,16 @@ def main():
         # 必须真的按一次 Enter 进 dive —— 否则 create()/startRun() 没跑过，
         # 读到的全是字段默认值（踩过：layerCardT 恒为 0，误判成"层卡没播"）。
         key("Enter", "Enter", 13)
-        time.sleep(0.9)
-        # 层入场卡只在开局 2.6s 内存在，必须**立刻**读，不能等到第 ⑥ 节
-        card0 = ev("(()=>{const s=__sg.scene.getScene('dive');return s.layerCardT})()")
+        # 等 dive 的 create() 真的跑完再读 —— preload 要加载十几张贴图，
+        # 固定 sleep 0.9s 时可能还没 create（读到的 layerCardT 是字段默认值 0，
+        # 会误判成"层卡没播"）。改成**轮询它出现**，这才是这条断言真正要测的。
+        card0 = 0
+        for _ in range(60):
+            card0 = ev("(()=>{const s=__sg.scene.getScene('dive');"
+                       "return s ? s.layerCardT : 0})()") or 0
+            if card0 > 0:
+                break
+            time.sleep(0.25)
         print("== ① 每层的节奏表与机制 ==")
         layers = ev(
             "(()=>{const s=__sg.scene.getScene('dive');const out=[];"
@@ -181,29 +188,40 @@ def main():
         print("  开局 layerCardT =", round(card0 or 0, 2), "（>0 表示层卡正在播）")
         results['⑥开局播层入场卡'] = bool(card0) and card0 > 0
 
+        # 抓图前必须把相位**钉在 wave** —— 前面把 spawnLeft/enemies 清零会让
+        # 波次判定为"已清完"直接进商店，抓到的就全是商店界面（踩过一次）。
+        KEEP_WAVE = ("s.phase='wave';s.waveTimer=60;s.spawnLeft=999;")
+
         # 回到 L1 抓一张层卡
         ev("(()=>{const s=__sg.scene.getScene('dive');s.layerIdx=0;s.layerCardT=2.6;"
-           "s.spawnLeft=0;s.enemies=[];return 1})()")
+           + KEEP_WAVE + "s.enemies.length=0;return 1})()")
         time.sleep(0.35)
         shot("v624-01_层卡_L1阳光带.png")
 
-        # L2 暗流：进层 + 放敌人 + 抓图
+        # L2 暗流：进层 + 层卡
         ev("(()=>{const s=__sg.scene.getScene('dive');s.layerIdx=1;s.layerCardT=2.6;"
-           "s.o2Max=100;s.o2=88;s.spawnLeft=999;return 1})()")
+           "s.o2Max=100;s.o2=88;s.o2Shown=88;" + KEEP_WAVE + "s.enemies.length=0;return 1})()")
         time.sleep(0.4)
         shot("v624-02_层卡_L2弱光带暗流.png")
-        ev("(()=>{const s=__sg.scene.getScene('dive');s.enemies.length=0;"
-           "for(let i=0;i<16;i++)s.spawnEnemy();"
+
+        # L2 战斗：暗流提示 + 敌人
+        ev("(()=>{const s=__sg.scene.getScene('dive');" + KEEP_WAVE +
+           "s.enemies.length=0;for(let i=0;i<16;i++)s.spawnEnemy();"
            "s.enemies.forEach((e,i)=>{const a=i*2.4;const d=150+(i%4)*60;"
            "e.x=s.px+Math.cos(a)*d;e.y=s.py+Math.sin(a)*d;e.hp=99999;e.maxHp=99999;});"
            "return 1})()")
         time.sleep(0.9)
         shot("v624-03_战斗_暗流提示.png")
 
-        # 低氧暗角：把氧气压到 12%
-        ev("(()=>{const s=__sg.scene.getScene('dive');s.o2=12;s.o2Max=100;"
-           "s.o2Shown=12;return 1})()")
-        time.sleep(0.25)
+        # 低氧暗角：氧气压到 16%，**清空敌人**再拍。
+        # ⚠️ 不能留着贴脸的敌人：接触伤害是"每只每帧"结算的，16 只叠在玩家身上
+        #    是 384 氧/秒，等待期间玩家就溺水了 —— 上次拍到的其实是结算页。
+        ev("(()=>{const s=__sg.scene.getScene('dive');s.phase='wave';s.waveTimer=60;"
+           "s.spawnLeft=999;s.enemies.length=0;s.bones.length=0;"
+           "s.o2Max=100;s.o2=16;s.o2Shown=16;return 1})()")
+        time.sleep(0.15)
+        print("  抓图时 phase =", ev("(()=>{const s=__sg.scene.getScene('dive');return s.phase})()"),
+              " o2 =", ev("(()=>{const s=__sg.scene.getScene('dive');return Math.round(s.o2)})()"))
         shot("v624-04_低氧暗角.png")
 
         print("\n== 结果 ==")
