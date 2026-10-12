@@ -162,7 +162,7 @@ const O2 = {
   boneFade: 1.6,      // 沉底后原地淡出时长（秒）
   boneBlink: 0.9,     // 淡出末段的闪烁频率提示
   boneBase: 4,        // 鱼骨回氧基数，实际按鱼体大小放大（大鱼骨更值钱）
-  pickupR: 26,        // 拾取半径（硬约束①：必须游过去，不做远程磁吸）
+  pickupR: 34,        // 拾取半径（V6.9 放大 + 近距软磁吸，见 updateBones）
   burstCost: 20,      // 排气爆发消耗
   burstCd: 12,        // 排气爆发冷却
   burstR: 250,        // 排气爆发半径
@@ -418,13 +418,17 @@ const LAYERS: LayerDef[] = [
   { name: '深渊带',   sub: 'THE ABYSS',    o2Max: 60,  drain: 3.00, dropCap: 160, toll: 0,  vis: 0.10, depthTop: 6000,  depthBot: 11000, ventPush: 0,   tint: 0x0a0614, motes: 110, hpMul: 3.20, cntMul: 2.10, dashMul: 1.3, driftRatio: 0.22 },
 ]
 
-/** 每层 4 波的形状模板（V6 §3.1） */
+/** 每层 4 波的形状模板（V6 §3.1；V6.9 节奏对齐 Brotato：波更短、怪更密） */
 const WAVE_SHAPE = [
-  { count: 12, dashRatio: 0.00, hpMul: 1.00, dur: 40 },
-  { count: 18, dashRatio: 0.25, hpMul: 1.15, dur: 45 },
-  { count: 26, dashRatio: 0.35, hpMul: 1.30, dur: 50 },
-  { count: 36, dashRatio: 0.45, hpMul: 1.50, dur: 55 },
+  { count: 22, dashRatio: 0.00, hpMul: 1.00, dur: 30 },
+  { count: 32, dashRatio: 0.25, hpMul: 1.15, dur: 36 },
+  { count: 44, dashRatio: 0.35, hpMul: 1.30, dur: 42 },
+  { count: 58, dashRatio: 0.45, hpMul: 1.50, dur: 48 },
 ]
+
+/** 基础镜头倍率（V6.9 可读性）：Brotato 的「一眼看清」来自角色占屏比例大，
+ *  世界坐标不变，把视野缩到 1/1.25 并让镜头始终跟随潜航器。 */
+const CAM_ZOOM = 1.25
 
 type Kind = 'swarm' | 'dash' | 'drift' | 'boss'
 
@@ -451,6 +455,7 @@ const TEX_BASE_ROT: Partial<Record<Kind, number>> = {
 interface Enemy {
   x: number; y: number
   vx: number; vy: number
+  kx: number; ky: number   // 击退速度（V6.9 打击感），指数衰减，与移动叠加
   hp: number; maxHp: number
   r: number
   kind: Kind
@@ -866,6 +871,10 @@ export default class DiveScene extends Phaser.Scene {
     this.input.on('pointerdown', (p: Phaser.Input.Pointer) => routeDown(this, p))
     this.input.on('pointermove', (p: Phaser.Input.Pointer) => routeMove(this, p))
 
+    // V6.9 商店：Tab 键切换「艇体状态」面板（点击页签同效）。capture 防止 Tab 抢走焦点。
+    kb.addCapture('TAB')
+    kb.on('keydown-TAB', () => { if (this.phase === 'shop') this.shopInfoOpen = !this.shopInfoOpen })
+
     this.scale.on('resize', () => this.layout())
     this.startRun()
     this.exposeProbe()
@@ -961,19 +970,17 @@ export default class DiveScene extends Phaser.Scene {
     else if (r < L.driftRatio + dashP) kind = 'dash'
     else kind = 'swarm'
 
-    const base = kind === 'drift' ? 55 : kind === 'dash' ? 26 : 14
+    const base = kind === 'drift' ? 110 : kind === 'dash' ? 52 : 30
     const hp = Math.round(base * hpScale)
     // 深潜印记的代价：敌人整体 +10% 移速。你变强了，但它们也更快追上你
     const relicSpd = this.hasRelic('abyss_mark') ? 1.1 : 1
     const spd = (kind === 'drift' ? 42 : kind === 'dash' ? 96 : 68) * relicSpd
 
     this.enemies.push({
-      x, y, vx: 0, vy: 0,
+      x, y, vx: 0, vy: 0, kx: 0, ky: 0,
       hp, maxHp: hp,
-      // V6.6 放大体型：机体从 59px 放大到 99px 后，22~40px 的敌人显得格外小，
-      // 既看不清种类也看不清有没有被打中。半径整体放大约 30%
-      // （显示尺寸 = r×2.4，所以 swarm 22px → 34px、drift 40px → 60px）。
-      r: kind === 'drift' ? 25 : kind === 'dash' ? 19 : 14,
+      // V6.6 放大体型 + V6.9 再放大一档（配合镜头 1.25×，对齐 Brotato 可读性）
+      r: kind === 'drift' ? 27 : kind === 'dash' ? 20 : 15,
       kind,
       color: kind === 'drift' ? UI.amber : kind === 'dash' ? UI.magenta : UI.jade,
       speed: spd,
@@ -988,9 +995,9 @@ export default class DiveScene extends Phaser.Scene {
 
   private spawnBoss(): void {
     const W = this.scale.width
-    const hp = Math.round(1100 * this.layer().hpMul)
+    const hp = Math.round(1500 * this.layer().hpMul)
     this.enemies.push({
-      x: W / 2, y: -90, vx: 0, vy: 0,
+      x: W / 2, y: -90, vx: 0, vy: 0, kx: 0, ky: 0,
       hp, maxHp: hp,
       r: 44, kind: 'boss',
       color: UI.violet,
@@ -1094,7 +1101,7 @@ export default class DiveScene extends Phaser.Scene {
     if (this.spawnLeft > 0 && this.spawnTimer <= 0) {
       this.spawnEnemy()
       this.spawnLeft--
-      this.spawnTimer = 0.28
+      this.spawnTimer = 0.22
     }
 
     this.waveTimer -= dt
@@ -1170,6 +1177,13 @@ export default class DiveScene extends Phaser.Scene {
     if (K.JustDown(this.keys.esc)) this.scene.start('title')
 
     this.ui.length = 0   // 审计：每帧重算 UI 节点（draw 阶段累积，供 __dive.uiProbe 导出）
+
+    // 镜头跟随 + 拉近（V6.9）：Brotato 的可读性来自「角色占屏比例大」。
+    // 世界坐标不变，把视野缩到 1/CAM_ZOOM 并始终以潜航器为中心（setBounds 防越界）。
+    const cam = this.cameras.main
+    cam.setBounds(0, 0, this.scale.width, this.scale.height)
+    cam.centerOn(this.px, this.py)
+
     this.drawEnv()
     this.draw()
     // 弹窗相位（shop/decide/result）**不画战斗 HUD** —— 否则氧气条、波次点、
@@ -1280,6 +1294,16 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
         }
       }
 
+      // 击退积分与衰减（V6.9 打击感）：命中推离玩家的位移，指数衰减归零
+      if (e.kx !== 0 || e.ky !== 0) {
+        e.x += e.kx * dt
+        e.y += e.ky * dt
+        const dec = Math.exp(-9 * dt)
+        e.kx *= dec; e.ky *= dec
+        if (Math.abs(e.kx) < 2) e.kx = 0
+        if (Math.abs(e.ky) < 2) e.ky = 0
+      }
+
       // 接触伤害：氧气就是血条（V6 §3.2）。贴着不放 = 24 氧/秒。
       if (d < e.r + PLAYER.r) {
         // 护甲（耐压壳）在这里生效：持续磨损按乘算减免。
@@ -1375,6 +1399,14 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
     let d = dmg * this.dmgMulNow()
     if (crit) d *= 1 + this.st.critMul
     e.hp -= d
+    // 受击反馈（V6.9 打击感）：每次命中都——白闪 + 击退 + 掉血漂字
+    e.flash = Math.max(e.flash, 0.09)
+    if (e.kind !== 'boss') {
+      const kd = e.kind === 'drift' ? 46 : 120
+      const dd = Phaser.Math.Distance.Between(e.x, e.y, this.px, this.py) || 1
+      e.kx += (e.x - this.px) / dd * kd
+      e.ky += (e.y - this.py) / dd * kd
+    }
     if (crit) {
       e.flash = 0.14
       this.spawnFloat(e.x, e.y - e.r - 14, `暴击 ${Math.round(d)}`, UI.violet, 17)
@@ -1388,6 +1420,10 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
         }
         if (best) { best.hp -= d * 0.4; best.flash = 0.1 }
       }
+    } else {
+      // 普通命中小漂字：Brotato 每跳伤害都有数字，这是「打疼了」的基本节奏
+      this.spawnFloat(e.x + (Math.random() * 16 - 8), e.y - e.r - 12,
+        `${Math.round(d)}`, 0xe8f4ff, 12)
     }
     if (e.hp <= 0 && e.alive) {
       e.alive = false
@@ -1470,16 +1506,25 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
     const H = this.scale.height
     for (const b of this.bones) {
       if (!b.alive) continue
-      // 下沉：比气泡"上浮"更有重量感
+      // 软磁吸（V6.9 节奏对齐 Brotato）：游进 2.4× 拾取半径，鱼骨就开始往身上漂。
+      // 只近距生效，保留「要游过去捡」的取舍；沉底的骨也会被吸起来。
+      const dpx = this.px - b.x, dpy = this.py - b.y
+      const dp = Math.hypot(dpx, dpy)
+      const pulled = dp < pr * 2.4 && dp > 1
+      if (pulled) {
+        b.vx += (dpx / dp) * 520 * dt
+        b.vy += (dpy / dp) * 520 * dt
+      }
+      // 下沉：比气泡"上浮"更有重量感（被吸住时不强制下沉）
       b.vy += 34 * dt
-      if (b.vy > O2.boneSinkV) b.vy = O2.boneSinkV
-      b.vx *= 0.94                    // 水阻
+      if (!pulled && b.vy > O2.boneSinkV) b.vy = O2.boneSinkV
+      if (!pulled) b.vx *= 0.94                    // 水阻
       b.x += b.vx * dt
       b.y += b.vy * dt
       b.rot += b.spin * dt
       b.spin *= 0.985
-      // 到达沉底深度：停止下沉，转为原地淡出
-      if (b.y >= H - O2.boneFloor) {
+      // 到达沉底深度：停止下沉，转为原地淡出（正被吸住的骨不结算沉底）
+      if (!pulled && b.y >= H - O2.boneFloor) {
         b.y = H - O2.boneFloor
         b.vy = 0; b.vx = 0
         b.fade -= dt
@@ -2179,8 +2224,10 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
         sprite.setAlpha(charging ? 0.92 : 0.88)
         // tint 在 WebGL 下是加色混合：给白色会把暗色鱼身烧成一片亮白（L4 实测）。
         // 所以常态用 clear（不染色），只有蓄力时才叠一层红。
-        sprite.setTint(charging ? 0xff6060 : 0xffffff)
-        if (!charging) sprite.clearTint()
+        // 受击白闪（V6.9 打击感）：用 setTintFill 烧成纯白剪影，命中瞬间"啪"地亮一下
+        if (e.flash > 0) sprite.setTintFill(0xffffff)
+        else if (charging) sprite.setTint(0xff6060)
+        else sprite.clearTint()
         sprite.setVisible(true)
         // 蓄力预警圈画在贴图之上，必须压得住
         if (charging && e.kind !== 'boss') {
@@ -2201,6 +2248,7 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
         // 发光核心（铁律：每条鱼都有，远距离也能定位）。必须画在贴图之上。
         g.fillStyle(c, 1)
         g.fillCircle(e.x, e.y, 2)
+        this.drawEnemyHpBar(g, e)
         continue    // 贴图路径已画完，矢量轮廓跳过
       }
 
@@ -2303,6 +2351,12 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
       // 发光核心：远距离也能看见的一个 2px 亮点（铁律）
       g.fillStyle(c, 1)
       g.fillCircle(e.x, e.y, 2)
+      // 受击白闪（矢量路径）：叠一层白色椭圆剪影，命中瞬间"啪"地亮一下
+      if (e.flash > 0) {
+        g.fillStyle(0xffffff, Phaser.Math.Clamp(e.flash / 0.09, 0, 1) * 0.62)
+        g.fillEllipse(e.x, e.y, e.r * 2.3, e.r * 1.7)
+      }
+      this.drawEnemyHpBar(g, e)
     }
 
     // 弹幕（曳光弹 / 鱼雷 / 电弧 / 爆炸环）画在敌人之上：玩家的攻击必须看得见
@@ -2405,7 +2459,7 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
    *      矢量生物更合适，梭形鱼/翼型鱼这些小体型则保留矢量轮廓 + 发光核心。
    */
   private fishSprite(e: Enemy, col: number): Phaser.GameObjects.Image | null {
-    if (this.enemies.length > 80) return null
+    if (this.enemies.length > 120) return null
     // 显示尺寸阈值：低于 26px 贴图细节会糊成一团，走矢量
     if (e.r * 2.4 < 26 && e.kind !== 'boss') return null
     const key = e.tex
@@ -2554,6 +2608,17 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
    * 用全场唯一的近白色 BONE，满屏混乱时最先被看见（V4 §3.3）。
    * 大鱼留大骨架，所以"挑大鱼打"在视觉上直接可读，不用看数值。
    */
+  /** 小血条（V6.9 打击感）：敌人受损后才显示，满血不画，避免满屏噪点 */
+  private drawEnemyHpBar(g: Phaser.GameObjects.Graphics, e: Enemy): void {
+    if (e.kind === 'boss' || !e.alive || e.hp >= e.maxHp) return
+    const bw = Phaser.Math.Clamp(e.r * 2.4, 20, 48)
+    const bx = e.x - bw / 2, by = e.y - e.r - 11
+    const pct = Phaser.Math.Clamp(e.hp / e.maxHp, 0, 1)
+    g.fillStyle(UI.abyss, 0.75); g.fillRect(bx, by, bw, 3.5)
+    g.fillStyle(pct > 0.5 ? UI.jade : pct > 0.25 ? UI.amber : UI.danger, 0.95)
+    g.fillRect(bx, by, bw * pct, 3.5)
+  }
+
   private drawBones(g: Phaser.GameObjects.Graphics): void {
     for (const b of this.bones) {
       // 沉底后开始淡出：用 alpha 渐隐 + 末段闪烁提示"要没了"
@@ -2565,8 +2630,16 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
       const X = (lx: number, ly: number) => b.x + lx * ca - ly * sa
       const Y = (lx: number, ly: number) => b.y + lx * sa + ly * ca
       const L = b.size, half = L / 2
-      const a = 0.42 * blink * f          // f: 沉底后线性渐隐 —— 骨头是「待拾取物」不是主角，
-                                          // 亮度必须低于敌人与子弹，否则满场白骨抢走全部注意力
+      const a = 0.55 * blink * f          // V6.9 提亮：拾取物必须一眼可辨（旧 0.42 太隐身）
+
+      // 柔光晕 + 呼吸脉冲环：让「这是能捡的」从剪影层面就读得懂，不再像散落白骨
+      g.fillStyle(BONE, 0.06 * f)
+      g.fillCircle(b.x, b.y, L * 1.05)
+      g.fillStyle(UI.cyan, 0.05 * f)
+      g.fillCircle(b.x, b.y, L * 1.5)
+      const pk = (this.t * 0.7 + b.rot) % 1
+      g.lineStyle(1.2, BONE, 0.26 * (1 - pk) * f)
+      g.strokeCircle(b.x, b.y, L * (0.5 + pk * 0.75))
 
       neonLine(g, X(-half, 0), Y(-half, 0), X(half, 0), Y(half, 0), BONE, { width: 1.6, alpha: a, bloom: false })
       // 肋骨 4 对：中间宽、两端窄
@@ -2733,11 +2806,12 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
     g.translateCanvas(cx, cy)
     g.rotateCanvas(ang)
 
-    // 挂架底：深色圆角矩形，压住艇身贴图让塔"有实体"
-    g.fillStyle(UI.panel, 0.94)
+    // 挂架底（V6.9 改半透明）：满 alpha 的深色板在亮层像「黑色方框」（被用户点名吐槽）。
+    // 保留「压住艇身让塔有实体」的功能，但降到 0.5 透明，融入艇身不再抢眼。
+    g.fillStyle(UI.panel, 0.5)
     g.fillRoundedRect(-L / 2, -W / 2, L, W, 7)
     neon(g, UI.cyanDim, () => { g.strokeRoundedRect(-L / 2, -W / 2, L, W, 7) },
-      { width: 1.6, alpha: 0.9, bloom: false })
+      { width: 1.4, alpha: 0.5, bloom: false })
 
     // 四角卡榫：表达"发射器是插上去的、可拆换"，这是通用挂架最关键的符号
     g.fillStyle(UI.cyanDim, 0.85)
@@ -3110,10 +3184,10 @@ this.px = Phaser.Math.Clamp(this.px, 24, W - 24)
       // 心跳式缩放：镜头跟着心跳微微"吸"一下。
       // 幅度刻意压到 1% 以内 —— 这个信号要能被**感觉到**而不是被看到，
       // 再大就会干扰走位判断，那是玩法不能接受的代价。
-      this.cameras.main.setZoom(1 + beat * 0.009 * urgency)
+      this.cameras.main.setZoom(CAM_ZOOM + beat * 0.009 * urgency)
     } else {
       // 必须每帧显式复位：只在高氧时不设的话，镜头会卡在最后一次缩放上
-      this.cameras.main.setZoom(1)
+      this.cameras.main.setZoom(CAM_ZOOM)
     }
 
     // —— 受击方向性暗角（V6.6）——
@@ -3483,6 +3557,7 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
   /** 刷新价格：每次刷新递增，离开商店时重置 */
   private rerollCost = 0
   private hoverCard = -1
+  private shopInfoOpen = false   // V6.9 商店：右侧艇体状态面板默认收起，点击页签/Tab 展开
   private hoverBtn = -1
   /** 商店底部按钮（锁定 / 刷新 / 继续）的热区，和 shopCards 一样要随 clearHits 销毁 */
   private shopBtns: { x: number; y: number; w: number; h: number; rect: Phaser.GameObjects.Rectangle }[] = []
@@ -3585,12 +3660,19 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
     this.txt('鱼骨', bankX - 42, y0 - 34, '13px', TXT.dim, FONT)
     this.txt('点击卡片购买 · 右键锁 · 1/2/3 快捷购买', W / 2, y0 - 8, '12px', TXT.mute, FONT, 'center')
 
-    // —— 两侧常驻面板：左边属性、右边遗物 ——
-    // Brotato 的商店把属性表放在卡片旁边而不是藏进二级页面，原因是：
-    // 玩家的购买决策**依赖**当前属性（我暴击已经 60% 了，再买 +8% 意义不大）。
-    // 属性看不见，商店就只能靠瞎买，build 也就无从谈起。
-    this.drawStatPanel(g, 24, y0 - 40)
-    this.drawRelicSlots(g, W - 24 - 250, y0 - 40)
+    // —— 两侧面板（V6.9 改为可选查看）：默认收起，点右上页签展开 ——
+    // 保留 Brotato「决策要看属性」的优点，但平时不占视野，让商店聚焦立绘与卡面。
+    if (this.shopInfoOpen) {
+      this.drawStatPanel(g, 24, y0 - 40)
+      this.drawRelicSlots(g, W - 24 - 250, y0 - 40)
+    }
+    // 折叠页签（每帧绘制）：点击或 Tab 键切换
+    const tabX = W - 150, tabY = 22, tabW = 128, tabH = 34
+    g.fillStyle(UI.panel, 0.85); g.fillRoundedRect(tabX, tabY, tabW, tabH, 8)
+    neon(g, this.shopInfoOpen ? UI.cyanHi : UI.cyanDim,
+      () => { g.strokeRoundedRect(tabX, tabY, tabW, tabH, 8) }, { width: 1.6, bloom: false })
+    this.txt(this.shopInfoOpen ? '收起艇体状态 ▴' : '查看艇体状态 ▾',
+      tabX + tabW / 2, tabY + 9, '13px', TXT.main, FONT, 'center')
 
     if (this.shopCards.length === 0) {
       for (let i = 0; i < 3; i++) {
@@ -3615,6 +3697,10 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
       this.shopBtns.push({ x: W / 2 + 10, y: byy - bh2 / 2, w: bw2, h: bh2, rect: grect })
       this.rerollBtnRect = { x: W / 2 - bw2 - 10, y: byy - bh2 / 2, w: bw2, h: bh2 }
       this.leaveBtnRect = { x: W / 2 + 10, y: byy - bh2 / 2, w: bw2, h: bh2 }
+      // 艇体状态页签热区（点击切换，键盘 Tab 亦可）
+      const trect = this.addHoverHit(tabX + tabW / 2, tabY + tabH / 2, tabW, tabH,
+        () => { this.shopInfoOpen = !this.shopInfoOpen }, () => {})
+      this.shopBtns.push({ x: tabX, y: tabY, w: tabW, h: tabH, rect: trect })
     }
 
     for (let i = 0; i < this.shopCards.length; i++) {
@@ -3652,11 +3738,19 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
         : up.kind === 'relic' ? TXT.bone : TXT.mute
       this.txt(kindLabel, c.x + c.w - 16, c.y + 24, '12px', kindCol, FONT, 'right')
 
+      // —— 立绘框（V6.9）：内嵌深色画框 + 类型色底光，让图示从「贴纸」升级成「立绘」 ——
+      const ax = c.x + 18, ay = c.y + 40, aw = c.w - 36, ah = 76
+      g.fillStyle(UI.abyss, 0.6); g.fillRoundedRect(ax, ay, aw, ah, 9)
+      g.fillStyle(bandCol, 0.08); g.fillRoundedRect(ax, ay, aw, ah, 9)
+      neon(g, bandCol, () => { g.strokeRoundedRect(ax, ay, aw, ah, 9) },
+        { width: 1.2, alpha: 0.4, bloom: false })
+      g.fillStyle(bandCol, 0.10); g.fillEllipse(cx, ay + ah - 9, aw * 0.5, 9)  // 底部反光：立绘「落地」
+
       // —— 中部图示：按类型画不同的东西 ——
       const wid = up.id.startsWith('w_') ? up.id.slice(2) : null
       if (wid === 'gun' || wid === 'torpedo' || wid === 'arc' || wid === 'sonar') {
         // 器械：画真实器械图标（形状差异而非颜色，11px 也分得清）
-        this.drawWeaponIcon(g, wid, cx, c.y + 62, 20)
+        this.drawWeaponIcon(g, wid, cx, c.y + 60, 30)
         // 等级点：画**最高**那台的等级；同款挂了多台时补一个 ×N。
         // 「同款可以挂多台」是 V6.6 的改动，卡面必须把台数也表达出来，
         // 否则玩家会以为重复拿同一把是白拿。
@@ -3673,7 +3767,7 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
         this.drawMountDiagram(g, cx, c.y + 62, up.id)
       } else if (up.kind === 'relic') {
         // 遗物：画一帧专属符号（每个遗物形状不同，不靠颜色区分）
-        this.drawRelicIcon(g, up.relicId ?? 'echo_heart', cx, c.y + 62, 22)
+        this.drawRelicIcon(g, up.relicId ?? 'echo_heart', cx, c.y + 60, 30)
       } else {
         // 属性卡：画一个**进度条**，条里填的是"这个属性现在到哪了"
         // 比抽象圆环有用：玩家能看见"共振强度已经 +24%，再加 12% 就到 36%"
