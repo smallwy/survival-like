@@ -45,3 +45,9 @@ web/src/assets/fish_candidates/
 web/src/assets/sub_candidates/
 web/src/assets/wpn_candidates/
 web/src/assets/weapons_candidates/
+# AI 生成的原始打光图（1024×1024，约 3MB）+ 处理中间件 + 旧版归档。
+# 与 portraits_raw/ 同一约定：源图不入库，仓库只留 clean_* 处理结果。
+web/src/assets/fish/_regen/
+# 潜航器三台的 AI 生成源图（1024×1024 棋盘格底，约 3MB/张）+ 处理中间件。
+# 与 fish/_regen/ 同一约定：源图不入库，仓库只留 clean 后的 sub_*.png。
+web/src/assets/sub/_regen_v2/

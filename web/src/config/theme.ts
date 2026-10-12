@@ -110,7 +110,7 @@ export const TXT = {
  * 之前多次出现"你改了但我这边没变化"，排查全耗在确认代码版本上。
  * 改一次代码就 +1，用户看一眼右下角就知道 pull 生效没有。
  */
-export const BUILD_TAG = 'v6.9'
+export const BUILD_TAG = 'v6.24'
 
 export const FONT = "'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif"
 /** 等宽 numerals —— 数值跳动时整行不会左右抖动 */

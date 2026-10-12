@@ -1,8 +1,9 @@
 import Phaser from 'phaser'
 import { UI, TXT, FONT, MONO, BUILD_TAG } from '../config/theme'
 import { registerUiHit, routeDown, routeMove } from '../ui/hitRouter'
+import { SUBS, SUB_ART, SUB_ART_R, type SubDef } from '../config/subs'
 import {
-  verticalBands, glowPool, lightCone, neonCircle, neonLine, neonPoly
+  verticalBands, glowPool, lightCone, neon, neonCircle, neonLine, neonPoly
 } from '../render/neon'
 
 /**
@@ -32,8 +33,36 @@ export class TitleScene extends Phaser.Scene {
   private beams: { g: Phaser.GameObjects.Graphics; t: number }[] = []
   private scanG!: Phaser.GameObjects.Graphics
   private t = 0
+  /** 潜航器选择的当前下标（V6.19） */
+  private sel = 0
+  /** 选择卡的图形层（选中态变化时整体重绘） */
+  private selG?: Phaser.GameObjects.Graphics
+  /** 每张卡的文字：重绘时只改 alpha，不重建文本对象 */
+  private selLabels: Phaser.GameObjects.Text[][] = []
+  /** 每张卡的立绘（和战斗内机体是同一张贴图） */
+  private selArt: Phaser.GameObjects.Image[] = []
 
   constructor() { super('title') }
+
+  preload(): void {
+    // 三台潜航器的机体贴图：选择界面当**立绘**、战斗内当**机体本体**，同一张图。
+    // 先在标题场景加载，进游戏时 DiveScene 会因缓存已存在而跳过。
+    for (const [id, url] of Object.entries(SUB_ART)) {
+      if (!this.textures.exists('sub_' + id)) {
+        this.load.image('sub_' + id, url as unknown as string)
+      }
+    }
+    // 全局 pixelArt:true 把默认采样设成 NEAREST，会把连续色调的机体贴图
+    // 缩小时抽成"白色碎片"（DiveScene 里踩过同一个坑）。这里补 LINEAR。
+    this.load.once('complete', () => {
+      for (const id of Object.keys(SUB_ART)) {
+        const k = 'sub_' + id
+        if (this.textures.exists(k)) {
+          this.textures.get(k).setFilter(Phaser.Textures.FilterMode.LINEAR)
+        }
+      }
+    })
+  }
 
   create() {
     const W = this.scale.width
@@ -54,6 +83,16 @@ export class TitleScene extends Phaser.Scene {
 
     this.scale.on('resize', () => this.scene.restart())
     this.input.keyboard?.on('keydown-ENTER', () => this.startDive())
+    // 潜航器三选一（V6.19）：1/2/3 直选，←→ 循环切换
+    const pickTo = (i: number) => {
+      this.sel = (i + SUBS.length) % SUBS.length
+      this.refreshSel()
+    }
+    this.input.keyboard?.on('keydown-ONE', () => pickTo(0))
+    this.input.keyboard?.on('keydown-TWO', () => pickTo(1))
+    this.input.keyboard?.on('keydown-THREE', () => pickTo(2))
+    this.input.keyboard?.on('keydown-LEFT', () => pickTo(this.sel - 1))
+    this.input.keyboard?.on('keydown-RIGHT', () => pickTo(this.sel + 1))
   }
 
   // ------------------------------------------------------------ 深渊底色
@@ -272,6 +311,68 @@ export class TitleScene extends Phaser.Scene {
     neonCircle(deco, cx - 300, titleY - 62, 3, UI.cyanHi, { width: 1.5, bloom: false })
     neonCircle(deco, cx + 300, titleY - 62, 3, UI.cyanHi, { width: 1.5, bloom: false })
 
+    // —— 潜航器三选一（V6.19 建立，V6.20 加立绘）——
+    // 计划书 §5.3 的三台：机制差异，不是数值差异。每台都带一条**同轴代价**，
+    // 否则玩家永远只选"最强的那个"。键盘 1/2/3 或 ←→ 切换，Enter 开局。
+    //
+    // 卡面布局 = **左立绘 + 右信息**。立绘用的是**战斗内同一张机体贴图**，
+    // 所以"选的时候看到的就是待会要操控的那一艘"，不会卡面一个样、进游戏另一个样。
+    const cw = 268, chh = 124, cgap = 18
+    // 立绘框：左 10、上 14（124 高里居中），96 见方。
+    // 圆盘按 72px 直径显示 —— 突出比最大的刺鳐（K≈1.55）鳍尖到 55.8px 半宽，
+    // 会**轻微破框** 8px：这是刻意的，破框的立绘比缩在框里更有张力，
+    // 且仍在卡片范围内（左到 x+2、右到 x+114，文字列从 x+118 开始不打架）。
+    const artBox = 96, artLeft = 10, artTop = 14
+    const DISC_IN_CARD = 72
+    const tx = artLeft + artBox + 12          // 文字列起点（相对卡左边缘）
+    const cx0 = cx - (cw * 3 + cgap * 2) / 2
+    // 纵向预算（实测按钮顶边 = H*0.70 − 33 = 491，卡片底不能越过去）：
+    //   装饰线 349 → 卡顶 358 → 卡底 482 → 按钮顶 491
+    const cyy = H * 0.70 - 166
+    this.selG = this.add.graphics()
+    this.selLabels = []
+    this.selArt = []
+    for (let i = 0; i < SUBS.length; i++) {
+      const s = SUBS[i]
+      const x = cx0 + i * (cw + cgap)
+      const labels: Phaser.GameObjects.Text[] = []
+      labels.push(this.add.text(x + tx, cyy + 14, `${i + 1}`, {
+        fontFamily: MONO, fontSize: '13px', color: TXT.dim
+      }))
+      labels.push(this.add.text(x + tx + 22, cyy + 8, s.name, {
+        fontFamily: FONT, fontSize: '20px', color: '#eafcff', fontStyle: 'bold'
+      }))
+      labels.push(this.add.text(x + cw - 14, cyy + 16, s.en, {
+        fontFamily: MONO, fontSize: '11px', color: TXT.dim
+      }).setOrigin(1, 0))
+      labels.push(this.add.text(x + tx, cyy + 38, s.tag, {
+        fontFamily: FONT, fontSize: '11px', color: TXT.main
+      }))
+      this.subFeatLines(s).forEach((f, k) => {
+        labels.push(this.add.text(x + tx, cyy + 58 + k * 16, f.t, {
+          fontFamily: FONT, fontSize: '12px', color: f.c
+        }))
+      })
+      this.selLabels.push(labels)
+
+      // 立绘：战斗内同一张贴图。按**圆盘半径**缩放 ——
+      // 直接用 setDisplaySize 的话三台会因突出件不同而大小不一
+      // （刺鳐的撞角+鳍把画布撑大，圆盘看起来只有一半）。
+      const art = this.add.image(x + artLeft + artBox / 2, cyy + artTop + artBox / 2,
+        'sub_' + s.id)
+      art.setScale(DISC_IN_CARD / (2 * SUB_ART_R))
+      this.selArt.push(art)
+
+      const rect = this.add.rectangle(x + cw / 2, cyy + chh / 2, cw, chh, 0x000000, 0)
+      registerUiHit(this, {
+        obj: rect, w: cw, h: chh,
+        onClick: () => { this.sel = i; this.refreshSel() },
+        onHover: () => { this.sel = i; this.refreshSel() },
+        alive: () => !!rect.scene,
+      })
+    }
+    this.refreshSel()
+
     const btnY = H * 0.70
     this.makeNeonButton(cx, btnY, '开 始 下 潜', true, () => this.startDive())
     this.makeNeonButton(cx, btnY + 78, '装 置 坞', false, () => this.showSettings())
@@ -393,10 +494,68 @@ export class TitleScene extends Phaser.Scene {
   }
 
   /** 进入探索器（V4 主线玩法）。旧的 'game' 割草场景已废弃，不再路由过去。 */
+  /** 重画三张潜航器卡的选中态：形状整体重绘 + 文字改 alpha（不重建文本对象） */
+  private refreshSel(): void {
+    const g = this.selG
+    if (!g) return
+    const W = this.scale.width, H = this.scale.height
+    const cw = 268, chh = 124, cgap = 18
+    const artBox = 96, artLeft = 10, artTop = 14
+    const cx0 = W / 2 - (cw * 3 + cgap * 2) / 2
+    const cyy = H * 0.70 - 166
+    g.clear()
+    for (let i = 0; i < SUBS.length; i++) {
+      const s = SUBS[i]
+      const x = cx0 + i * (cw + cgap), y = cyy
+      const on = i === this.sel
+      // 卡体：选中 = 主题色粗描边 + 提亮底；未选中 = 暗底细边
+      g.fillStyle(on ? UI.panelHi : UI.panel, on ? 0.95 : 0.68)
+      g.fillRoundedRect(x, y, cw, chh, 12)
+      neon(g, on ? s.color : UI.line, () => { g.strokeRoundedRect(x, y, cw, chh, 12) },
+        { width: on ? 2.4 : 1.4, alpha: on ? 1 : 0.5, bloom: on })
+      // 左侧主题竖条（和商店卡同一套"物品卡"语汇）
+      g.fillStyle(s.color, on ? 1 : 0.45)
+      g.fillRoundedRect(x + 2, y + 14, 4, chh - 28, 2)
+      // 选中角标：右上角一个小三角
+      if (on) {
+        g.fillStyle(s.color, 0.85)
+        g.fillTriangle(x + cw - 24, y + 1, x + cw - 1, y + 1, x + cw - 1, y + 24)
+      }
+      // 立绘框：深底 + 主题色描边 + 底部反光，让机体看起来是"摆在台面上"
+      const ax = x + artLeft, ay = y + artTop
+      g.fillStyle(UI.abyss, 0.55); g.fillRoundedRect(ax, ay, artBox, artBox, 10)
+      g.fillStyle(s.color, on ? 0.12 : 0.06); g.fillRoundedRect(ax, ay, artBox, artBox, 10)
+      neon(g, s.color, () => { g.strokeRoundedRect(ax, ay, artBox, artBox, 10) },
+        { width: 1.2, alpha: on ? 0.7 : 0.35, bloom: false })
+      g.fillStyle(s.color, on ? 0.18 : 0.09)
+      g.fillEllipse(ax + artBox / 2, ay + artBox - 12, artBox * 0.5, 10)
+
+      for (const t of this.selLabels[i] ?? []) t.setAlpha(on ? 1 : 0.55)
+      const art = this.selArt[i]
+      if (art) art.setAlpha(on ? 1 : 0.5)
+    }
+  }
+
+  /** 把潜航器特性转成卡片上的文本行（**收益绿、代价橙** —— 代价不能藏起来） */
+  private subFeatLines(s: SubDef): { t: string; c: string }[] {
+    const out: { t: string; c: string }[] = []
+    const pct = (v: number) => `${v > 0 ? '+' : ''}${Math.round(v * 100)}%`
+    if (s.o2Max) out.push({ t: `氧气上限 ${s.o2Max > 0 ? '+' : ''}${s.o2Max}`, c: s.o2Max > 0 ? TXT.jade : TXT.warn })
+    if (s.speed) out.push({ t: `移速 ${pct(s.speed)}`, c: TXT.jade })
+    if (s.dmgMul !== 1) out.push({ t: `伤害 ${pct(s.dmgMul - 1)}`, c: s.dmgMul > 1 ? TXT.jade : TXT.warn })
+    if (s.pickup) out.push({ t: `吸附 ${pct(s.pickup)}`, c: s.pickup > 0 ? TXT.jade : TXT.warn })
+    if (s.slots !== 4) out.push({ t: `装备槽 ${s.slots}`, c: TXT.jade })
+    if (s.killO2Mul !== 1) out.push({ t: `击杀回氧 ×${s.killO2Mul}`, c: TXT.jade })
+    if (s.ram) out.push({ t: `撞击伤害 ${s.ram}`, c: TXT.jade })
+    // 卡面文字列净宽只有约 120px，四行会顶到卡片下缘，压到 3 行
+    return out.slice(0, 3)
+  }
+
   private startDive() {
     // V6：核心玩法改为波次制 Bullet Heaven，入口指向 DiveScene。
     // 'explore' 是 V5 的探索器场景，已被立项书 V6 废弃。
-    this.scene.start('dive')
+    // V6.19：把选中的潜航器带过去，DiveScene 在 startRun 里落地全部加成。
+    this.scene.start('dive', { sub: SUBS[this.sel].id })
   }
 
   update(_time: number, delta: number) {
