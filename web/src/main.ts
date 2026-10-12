@@ -16,7 +16,6 @@ const config: Phaser.Types.Core.GameConfig = {
   // 像素渲染的两个开关（缺了它们，像素图会被 LINEAR 过滤糊成"低分辨率贴图"）
   //   pixelArt    -> 纹理采样改用 NEAREST 并关闭抗锯齿，像素块才是硬边方块
   //   roundPixels -> 顶点位置取整，避免物件落在半像素上被重采样
-  // 之前游戏内单位看起来发虚，根因就是这两项没开 —— 生成器画得再准也白搭。
   // ---------------------------------------------------------------------------
   pixelArt: true,
   roundPixels: true,
@@ -32,23 +31,23 @@ const config: Phaser.Types.Core.GameConfig = {
     arcade: { debug: false }
   },
   // ---------------------------------------------------------------------------
-  // 分辨率对齐设备像素比（本轮「画面糊」的根因修复）。
+  // 高 DPI 清晰度：核心结论（V6.27，源码级验证）
   //
-  // 实测数据（tools/diag_dpr.py，Chromium + --force-device-scale-factor）：
-  //   DPR=1.0  canvas 位图 960×661  → CSS 960×661   1.0 倍  ✓ 清晰
-  //   DPR=1.5  canvas 位图 960×661  → 物理 1440×991  1.5 倍  ✗ 糊
-  //   DPR=2.0  canvas 位图 960×661  → 物理 1920×1322 2.0 倍  ✗ 糊
+  // Phaser 3 WebGL 渲染器的分辨率固定为 1（源码 pushScissor / gl.scissor 直接把
+  // camera.width/height 当设备像素用，没有 resolution 倍率）。因此 framebuffer
+  // 必须等于 gameSize，相机才能铺满画布——任何「gameSize=CSS、framebuffer=物理」
+  // 的解耦方案（曾试过的 logical 模式）都会让相机只覆盖画布左上角 1/DPR²，
+  // 其余露清屏色（黑边）。
   //
-  // RESIZE 模式让 canvas **位图缓冲区 = 逻辑 CSS 尺寸**，在高 DPR 屏幕
-  // （Windows 125%/150% 显示缩放是最常见的）上由浏览器合成阶段放大 1.25~2 倍。
-  // 叠加 pixelArt 的 NEAREST 采样后，像素块大小不均 —— 这就是"糊"的头号来源，
-  // 和选不选像素风无关（《土豆兄弟》本身也是卡通描边风，它清晰是因为原生 App
-  // 的 canvas 与物理像素 1:1）。
+  // 所以正确做法不是去动 gameSize，而是：
+  //   1) gameSize = canvas = CSS（RESIZE 默认行为，UI 按 CSS 像素布局，尺寸永远对）；
+  //   2) 给 canvas 设 imageRendering:'pixelated'，让合成器在高 DPR 屏上用最近邻
+  //      把 CSS 位图放大到物理像素——像素风保持硬边，世界清晰，且零黑边。
   //
-  // Phaser 3 没有顶层 canvas resolution 配置项（Phaser 2 有，3 移除了），
-  // 所以走**手动同步**：见下方 syncCanvasToDpr()，把 canvas 的位图尺寸设为
-  // 「CSS 尺寸 × DPR」，再由 Phaser 的 Game.scale 重新设定 gameSize。
-  // 代价：显存与填充率按 DPR² 增长（DPR2 时 4 倍像素），对 2D 像素游戏可接受。
+  // 旧版「zoom 模式」（gameSize=物理、ScaleManager.zoom=1/DPR）虽能让纹理以物理
+  // 分辨率渲染，但代价是「所有按 gameSize 布局的内容（卡宽 248、字号）按 1/DPR 缩小」
+  // —— 高 DPR 屏上整个商店/世界变成屏幕中央一小团，正是用户反馈的「不适应切图」。
+  // 现保留为 ?dprmode=zoom 的可选开关（追求极限纹理清晰度者自取），默认关闭。
   // ---------------------------------------------------------------------------
   // 关闭 Phaser 的默认抗锯齿：世界像素图必须走 NEAREST 才有硬边（pixelArt 已设）。
   antialias: false,
@@ -63,74 +62,87 @@ const config: Phaser.Types.Core.GameConfig = {
 const game = new Phaser.Game(config)
 
 // ---------------------------------------------------------------------------
-// 高 DPI 画布：让渲染分辨率 = 物理像素，消除浏览器合成期的拉伸。
+// 高 DPI 清晰度（唯一必要的运行时改动）：给画布打上 image-rendering:pixelated。
 //
-// 走过的弯路（重要，别再踩）：
-//   1) 直接在 Phaser 设好 canvas 之后手改 canvas.width/height **不行** ——
-//      渲染器初始化时已按当时 gameSize 定好投影与视口，事后改 canvas 只会重置
-//      2D 上下文，渲染器仍按旧尺寸画 → "内容只在左上角、右侧和底部全黑"。
-//   2) 在拦截的 refresh 里再调 sm.resize() 会**无限递归**
-//      （resize → refresh → resize…），栈溢出，DPR 根本不生效。
+// Phaser 只在 Canvas 渲染器里设过这个属性，WebGL 没设；不设这个属性时，
+// 高 DPR 屏的合成器会用双线性把 CSS 分辨率画布放大到物理像素→像素图发虚。
+// 设了之后合成器改走最近邻→硬边像素块，和游戏本身的 NEAREST 纹理采样一致。
 //
-// 正确做法：用 Phaser 自己的 **zoom** 机制（见 ScaleManager.resize）：
-//   canvas.width       = width          (gameSize，即**渲染分辨率**)
-//   canvas.style.width = width * zoom   (显示尺寸)
-// 所以把「渲染分辨率」设为物理像素、zoom 设为 1/DPR，
-// 就得到「高位图 + 逻辑显示尺寸」，且 gameSize = 物理像素 →
-// 所有按 gameSize 布局的 UI 自动变清晰。
+// 三种模式（?dprmode=，默认 none）：
+//   none  —— 原生 RESIZE：gameSize=canvas=CSS，靠 pixelated 保持清晰。
+//            无黑边、UI 尺寸永远正确、世界清晰。推荐日常使用。
+//   zoom  —— 旧实现：framebuffer=物理、ScaleManager.zoom=1/DPR。纹理/文字以物理
+//            分辨率渲染（最锐），但所有内容按 1/DPR 缩小（高 DPR 屏上偏小）。
+//   （logical 已废弃：gameSize≠framebuffer 必出黑边，见上方说明。）
 //
-// 实现：包一层 refresh，**只做计算、不再回调 resize**（用递归守卫），
-// 直接写 gameSize/baseSize/canvas 属性，复刻 ScaleManager.resize 的核心几行。
+// 「黑边 / 视野遮挡」真根因（V6.27 定论）：早期 zoom 实现把 gameSize 改成物理后，
+//   用 physW 当 resize 事件的 previousWidth 重发，而相机此刻是 CSS 尺寸，
+//   CameraManager.onResize 的 cam._width===previousWidth 不成立→相机停在 CSS、
+//   画布已是物理，世界只画在左上角 1/DPR² 区域。修法：previousWidth 传 CSS 尺寸，
+//   或直接用 none 模式（本就不存在这个错位）。详见 docs/分辨率自适应_V6.27.md。
 // ---------------------------------------------------------------------------
 function installDprScale(game: Phaser.Game): void {
   const sm = game.scale
-  const dpr = Math.min(window.devicePixelRatio || 1, 2)  // 钳到 2，防 4K+DPR2 打爆填充率
-  if (dpr <= 1) return  // DPR=1 无需处理，直接用 Phaser 原生逻辑
+  const mode = new URLSearchParams(location.search).get('dprmode') || 'none'
+  const canvas = sm.canvas
+  // 关键：让合成器最近邻放大（none 模式真正依赖它；zoom 模式纹理已物理渲染，
+  // pixelated 不会让它更差，顺手也设上以防某些浏览器对缩小后的小画布做平滑）。
+  canvas.style.imageRendering = 'pixelated'
+  ;(canvas.style as unknown as Record<string, string>).webkitImageRendering = 'pixelated'
 
   const origRefresh = sm.refresh.bind(sm)
   let inside = false
+
+  const setDisplayScale = () => {
+    sm.updateBounds()
+    if (sm.canvasBounds.width > 0 && sm.canvasBounds.height > 0) {
+      sm.displayScale.set(
+        sm.baseSize.width / sm.canvasBounds.width,
+        sm.baseSize.height / sm.canvasBounds.height
+      )
+    }
+  }
+
   ;(sm as unknown as { refresh: () => void }).refresh = () => {
     origRefresh()
     if (inside) return          // 递归守卫：resize 会回调 refresh，避免死循环
     inside = true
     try {
+      // DPR 每次都现读，不能用安装时的常量：用户改系统显示缩放（"改变分辨率"）后
+      // devicePixelRatio 会变，旧常量会让画布按旧 DPR 出尺寸 → 黑边 / 视野遮挡。
+      const dpr = Math.min(window.devicePixelRatio || 1, 2)  // 钳到 2，防 4K+DPR2 打爆填充率
       const cssW = Math.round(window.innerWidth)
       const cssH = Math.round(window.innerHeight)
+      const prevW = sm.width
+      const prevH = sm.height
+      const emit = () => {
+        sm.emit('resize', sm.gameSize, sm.baseSize, sm.displaySize, prevW, prevH)
+        game.events.emit('resize')
+      }
+
+      if (mode === 'none' || dpr <= 1) {
+        // 原生 RESIZE：gameSize=canvas=CSS，无需改画布尺寸，pixelated 负责清晰。
+        // 默认行为已正确，这里直接返回（origRefresh 已经发过正确的 resize 事件，
+        // 相机也会随之铺满 CSS 尺寸的画布 → 零黑边）。
+        return
+      }
+
+      // zoom（可选）：framebuffer=物理、ScaleManager.zoom=1/DPR。
+      // 注意 previousWidth 必须传 CSS 尺寸（prevW/prevH），否则相机停在 CSS、
+      // 画布已是物理→黑边。这是 V6.27 之前黑边的根因。
       const physW = Math.round(cssW * dpr)
       const physH = Math.round(cssH * dpr)
+      sm.zoom = 1 / dpr
       if (sm.width !== physW || sm.height !== physH) {
-        // 渲染分辨率 = 物理像素；显示尺寸 = CSS 逻辑尺寸（zoom 负责缩回）
-        sm.zoom = 1 / dpr
         sm.gameSize.resize(physW, physH)
         sm.baseSize.resize(physW, physH)
         sm.displaySize.setSize(cssW, cssH)
-        sm.canvas.width = physW
-        sm.canvas.height = physH
-        sm.canvas.style.width = cssW + 'px'
-        sm.canvas.style.height = cssH + 'px'
-        // ---------------------------------------------------------------------
-        // canvasBounds **必须是 canvas 的 CSS 矩形**（1280×720），不是位图尺寸。
-        //
-        // 这里曾经写成 setSize(physW, physH)，后果（2026-10-10 实测，不是推测）：
-        //   ScaleManager.refresh() 里有 displayScale = baseSize / canvasBounds，
-        //   于是 displayScale = 2560 / 2560 = 1。
-        //   而 Phaser 的指针换算是 (pageX - bounds.left) * displayScale：
-        //   鼠标点在 CSS 640，被换算成游戏坐标 640 —— 但按钮在 1280，
-        //   **永远差一半**，所以 DPR>1 的机器上所有按钮点了都没反应。
-        //   （DPR=1 时 physW == cssW，这个 bug 不显现，所以一直没被发现。）
-        // ---------------------------------------------------------------------
-        sm.updateBounds()
-        if (sm.canvasBounds.width > 0 && sm.canvasBounds.height > 0) {
-          sm.displayScale.set(
-            sm.baseSize.width / sm.canvasBounds.width,
-            sm.baseSize.height / sm.canvasBounds.height
-          )
-        }
-        // 通知渲染器与相机同步新的尺寸。
-        // 注意事件必须发在 **scale** 上：GameScene 用的是 this.scale.on('resize')，
-        // 发在 game.events 上没人听（实测 GameScene 不重排，内容只占左上角）。
-        sm.emit('resize', sm.gameSize, sm.baseSize, sm.displaySize, physW, physH)
-        game.events.emit('resize')
+        canvas.width = physW
+        canvas.height = physH
+        canvas.style.width = cssW + 'px'
+        canvas.style.height = cssH + 'px'
+        setDisplayScale()
+        emit()
       }
     } finally {
       inside = false
@@ -151,27 +163,18 @@ requestAnimationFrame(() => {
 window.addEventListener('resize', () => game.scale.refresh())
 
 // ---------------------------------------------------------------------------
-// 文字光栅化倍率（本轮从 2 提到 3）。
-//
-// 为什么是 3 而不是 2：文字发虚有**三重放大**同时作用 ——
-//   1) 面板容器 setScale(fit≤1.25) 整体放大；
-//   2) 高 DPR 屏幕上 canvas 被浏览器拉伸（resolution 修复前最高 2 倍）；
-//   3) 中文字形本身比拉丁字母笔画多，同样的光栅倍率下更早糊。
-// 三者相乘，2x 光栅在高 DPR 屏上仍是被放大采样。提到 3x 后，
-// 即使叠加最坏情况（1.25 面板缩放 × 2 DPR 合成）也变成缩小采样 —— 锐利。
-//
-// 代价：每条文字纹理占 9 倍于 1x 的显存（3² ）。但 UI 文字总量小
-// （HUD + 弹窗，数十条量级），按 128px 字号估算单条 3x 纹理约 0.5MB，
-// 全屏文字合计仍在个位数 MB，对 2D 游戏可忽略。
-//
-// 注意：这只作用于 Text。世界像素图**必须**保持 NEAREST 1x（见上 pixelArt），
-// 像素图放大只会变成色块，用高分光栅没有意义。
+// 文字光栅化倍率：高 DPR 屏上 canvas 会被合成器用最近邻放大 dpr 倍，
+// 文字若只按 3x 光栅，3x 采样再被 2x 最近邻放大→等效 1.5x，会偏「脆」。
+// 所以在 dpr>1 时把光栅倍率提到 2*dpr（钳到 6），让文字在物理屏上仍锐利。
+// 代价是文字纹理显存按倍率平方增长，但 UI 文字总量小，可忽略。
 // ---------------------------------------------------------------------------
 ;(() => {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2)
+  const TXT_RES = Math.min(Math.max(3, Math.round(dpr * 2)), 6)
   const factory = Phaser.GameObjects.GameObjectFactory.prototype as unknown as Record<string, unknown>
   const orig = factory.text as (...args: unknown[]) => Phaser.GameObjects.Text
   factory.text = function (this: unknown, x: number, y: number, text: string, style?: object, padding?: unknown) {
-    return orig.call(this, x, y, text, { resolution: 3, ...(style ?? {}) }, padding)
+    return orig.call(this, x, y, text, { resolution: TXT_RES, ...(style ?? {}) }, padding)
   } as typeof orig
 })()
 
@@ -189,6 +192,7 @@ window.addEventListener('resize', () => game.scale.refresh())
 console.log(
   `[深海回响] ${BUILD_TAG} 启动　` +
   `DPR=${window.devicePixelRatio}　` +
+  `mode=${(new URLSearchParams(location.search).get('dprmode') || 'none')}　` +
   `gameSize=${game.scale.width}x${game.scale.height}　` +
   `displayScale=${game.scale.displayScale.x}`
 )

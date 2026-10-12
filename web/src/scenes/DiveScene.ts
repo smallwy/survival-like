@@ -5304,7 +5304,9 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
     // 操作提示：顶栏正下方一行。
     // ⚠️ 这行**不是**卡内文字，但审计脚本会拿它和卡边界比 ——
     // 所以它的 y 必须落在 y0 之上（实测越界 346px 就是因为它被算进了卡区）。
-    this.txt('点击卡片购买 · 卡片右上角锁定 · 1 / 2 / 3 快捷购买 · Tab 展开状态',
+    // V6.27：键帽已经把 1/2/3 直接画在每张卡上，这行不再重复"1 / 2 / 3"，
+    // 只留三件键帽表达不了的事（点击、锁定位置、Tab）。
+    this.txt('点击卡片或按对应键购买 · 锁定在右上角 · Tab 展开状态',
       W / 2, barY + BAR_H + 5, '13px', TXT.dim, FONT, 'center')
 
     // ---- 侧栏页签：移到顶栏右端，与被它控制的面板同一行（治 ④）----
@@ -5433,16 +5435,55 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
       g.fillStyle(bandCol, isSold ? 0.28 : (afford ? 1 : 0.4))
       g.fillRoundedRect(c.x + 2, c.y + 18, 4, c.h - 36, 2)
 
-      // —— 首行：序号（快捷键提示）+ 类型标签 + 锁定按钮 ——
-      this.txt(`[${i + 1}]`, c.x + 16, c.y + 20, '15px',
-        afford && !isSold ? TXT.cyan : TXT.mute, MONO)
+      // —— 首行：快捷键键帽 + 类型标签 + 锁定按钮 ——
+      //
+      // V6.27 Plan A（用户选定）：把旧的 `[N]` 方括号换成**真正的键帽图形**。
+      // 方括号只说明"这是第 N 项"，而键帽有厚度（2px 底边）+ 描边分状态，
+      // 暗示的是"这个键**可以按**"——这正是"快捷购买"要传达的操作性。
+      //
+      // 键帽三态（与价格行的状态联动，玩家扫一眼就知道哪个键现在能用）：
+      //   可买   → 亮青描边 + 高亮数字（#c8f8ff）
+      //   买不起 → 暗青描边 + 灰数字
+      //   已购入 → 青绿描边 + 对勾（与价格行的"已购入"呼应）
+      //
+      // 尺寸/位置：24×24、圆角 6、卡内左上角 (x+14, y+14)。锁定按钮在 (c.w-76, y+14)
+      // 高 26，两者同一水平带、彼此不碰。类型标签右移到 x+48（键帽占 14+24=38，
+      // 留 10px 间隙）——这样"属性/器械"不会被键帽或锁定按钮压住。
+      {
+        const kcS = 24, kcX = c.x + 14, kcY = c.y + 14
+        const kcEdge = isSold ? UI.jade : (afford ? UI.cyanHi : UI.cyanDim)
+        const kcEdgeA = isSold ? 0.85 : (afford ? 1 : 0.55)
+        // 底边（整体下移 2px 再画一层暗底）= 键帽的"厚度"，让它是个立体的键
+        // 而不是一个贴平的方框。1px 也够，但 2px 在低 DPR 下更读得出立体感。
+        g.fillStyle(0x000000, 0.5)
+        g.fillRoundedRect(kcX, kcY + 2, kcS, kcS, 6)
+        // 帽面：比卡面更深（槽位色），和立绘槽同一套"底比卡深"的关系
+        g.fillStyle(MENU.slot, 1)
+        g.fillRoundedRect(kcX, kcY, kcS, kcS - 2, 6)
+        // 1px 状态描边（画在帽面范围内，留出 2px 底边不被描边吃掉）
+        g.lineStyle(1, kcEdge, kcEdgeA)
+        g.strokeRoundedRect(kcX + 0.5, kcY + 0.5, kcS - 1, kcS - 3, 6)
+        if (isSold) {
+          // 已购入：画对勾而**不**依赖字体字形（✓ 未必在 MONO 字族里，
+          // 缺字形会退化成豆腐块）。用两段线画，和游戏其它图标一致走 Graphics。
+          g.lineStyle(2, UI.jade, 1)
+          g.beginPath()
+          g.moveTo(kcX + 7, kcY + 12)
+          g.lineTo(kcX + 11, kcY + 16)
+          g.lineTo(kcX + 17.5, kcY + 8)
+          g.strokePath()
+        } else {
+          this.txt(`${i + 1}`, kcX + kcS / 2, kcY + kcS / 2 - 1, '13px',
+            afford ? TXT.cyber : TXT.mute, MONO, 'center')
+        }
+      }
       const kindLabel = up.kind === 'weapon' ? '器械'
         : up.kind === 'mount' ? '挂载' : up.kind === 'relic' ? '遗物' : '属性'
       const kindCol = up.kind === 'mount' ? TXT.amber
         : up.kind === 'relic' ? TXT.bone : TXT.dim
-      // 类型标签紧跟序号放在**左上角**。之前右对齐到锁定按钮左侧，
-      // 结果是"属性"两个字被锁定按钮压住（实机截图可见）。
-      this.txt(kindLabel, c.x + 46, c.y + 21, '13px', kindCol, FONT)
+      // 类型标签跟在键帽右侧（x+48），垂直与键帽居中 —— 之前右对齐到锁定按钮
+      // 左侧，"属性"两个字会被锁定按钮压住（实机截图可见）。
+      this.txt(kindLabel, c.x + 48, c.y + 20, '13px', kindCol, FONT)
 
       // —— 立绘位：比卡面**更深**的实底槽 + 1px 细边 ——
       // 深底让亮色立绘"跳"出来（Brotato 的图标位也是这种"底比卡深"的关系）。
@@ -5619,7 +5660,9 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
         // 鱼骨币图标 + 价格 + 状态词：**三段宽度都算出来再排**，
         // 不用"图标位置 + 数字长度 × 系数"这种会随位数漂移的手工偏移。
         const costStr = `${up.cost}`
-        const stateStr = afford ? '点击购买' : '鱼骨不足'
+        // V6.27：可买时的提示改成「按 N 购买」，与左上角键帽上的数字呼应 ——
+        // 把"这个键能买它"这条信息放到价格行本身（就近原则），玩家不用回头找说明。
+        const stateStr = afford ? `按 ${i + 1} 购买` : '鱼骨不足'
         const wIcon = 8, wCost = costStr.length * 13, wState = stateStr.length * 12
         const grpW = wIcon * 2 + 7 + wCost + 10 + wState
         let gx = cx - grpW / 2
@@ -6379,6 +6422,9 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
     this.buildMotes()
     this.buildDrift()
     this.layoutBg()
+    // UI 相机兜底：resize 后把它钉到最新 gameSize（物理像素），
+    // 避免任何 onResize 时序边界导致 UI 只占画布一角（黑边/遮挡同源）。
+    if (this.uiCam) this.uiCam.setSize(this.scale.width, this.scale.height)
   }
 
   /** 背景 cover 铺满：等比缩放直到覆盖画布，再居中裁掉溢出部分 */
