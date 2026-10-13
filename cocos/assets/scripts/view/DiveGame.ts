@@ -92,12 +92,12 @@ import { DiveWorld } from '../shared/dive/world'
 import { applyRun, defaultProfile, depthLabel, recordLabel } from '../shared/dive/profile'
 import type { Profile } from '../shared/dive/profile'
 import {
-  CAM_ZOOM, SEAT_RING_R, TURRET_R, EMITTER_SIZE, SUB_D, MAX_SEATS, SEAT_ANGLES_DEG,
+  CAM_ZOOM, TURRET_R, EMITTER_SIZE, SUB_D, BASE_SEATS, WEAPON_DEF,
 } from '../shared/dive/tables'
 import { UI } from '../shared/theme'
 import { SUBS, SUB_ART_R, getSub } from '../shared/subs'
 import type { SubId } from '../shared/subs'
-import type { SimEvent, InputState, Enemy } from '../shared/dive/types'
+import type { SimEvent, InputState, Enemy, WeaponId } from '../shared/dive/types'
 
 const { ccclass, property } = _decorator
 
@@ -1234,40 +1234,21 @@ export class DiveGame extends Component {
     this.gPlayer.line(UI.cyanHi, 0.45, 1)
     this.gPlayer.strokeCircle(w.px, w.py, R * 0.95)
 
-    // ---- 座圈（装载器）：随艇身朝向一起转 ----
-    this.gPlayer.line(UI.cyanDim, 0.35, 1)
-    this.gPlayer.strokeCircle(w.px, w.py, SEAT_RING_R)
-    const plan = w.mountPlan()
-    const ca = Math.cos(w.aim), sa = Math.sin(w.aim)
-    for (let i = 0; i < MAX_SEATS; i++) {
-      const a = (SEAT_ANGLES_DEG[i] * Math.PI) / 180
-      const sx = SEAT_RING_R * Math.cos(a), sy = SEAT_RING_R * Math.sin(a)
-      const x = w.px + sx * ca - sy * sa
-      const y = w.py + sx * sa + sy * ca
-      const has = i < plan.length
-      this.gPlayer.fill(has ? (plan[i].ext ? UI.amber : UI.panelHi) : UI.panel, has ? 0.95 : 0.35)
-      this.gPlayer.fillCircle(x, y, TURRET_R * 0.8)
-    }
-
     // ---- 艏部探照灯（朝向指示）----
     const hx = w.px + Math.cos(w.aim) * (R * 0.95 + 16)
     const hy = w.py + Math.sin(w.aim) * (R * 0.95 + 16)
     this.gPlayer.fill(UI.cyanHi, 0.95)
     this.gPlayer.fillCircle(hx, hy, EMITTER_SIZE * 0.3)
 
-    // ---- 发射器：每台武器一座，朝向取 sim 的 aimAng（与出弹点同源）----
-    for (let i = 0; i < w.weapons.length; i++) {
-      const pose = w.turretPose(i)
-      if (!pose) continue
-      const fire = w.weapons[i].fireFlash > 0
-      const ang = pose.ang
-      this.gPlayer.line(fire ? 0xffffff : UI.cyanHi, fire ? 1 : 0.85, 3)
-      this.gPlayer.strokeSeg(
-        pose.x, pose.y,
-        pose.x + Math.cos(ang) * EMITTER_SIZE * 1.5,
-        pose.y + Math.sin(ang) * EMITTER_SIZE * 1.5,
-      )
-    }
+    // ---- 发射器总成：每台武器一座（底盘 + 转环 + 镶嵌其上的发射器）----
+    //
+    // ⚠️ **空座与座圈连线一律不画** —— web V6.13 早已删除，用户原话：
+    //    「人家只有特定的镶嵌，其他都内置进去、不显示出来」。
+    //    旧版这里画「座圈整圆 + 一圈空座圆点（UI.panel α.35 的深色小圆）」，
+    //    机体周围就糊出一圈深灰圆点 —— 这正是用户反馈的"装射器和武器没有镶嵌上"
+    //    （看着像六个空洞，而不是装在艇上的炮）。战斗里只画**实际装配的发射器本身**，
+    //    Brotato 的武器也是各自独立挂着的。玩家需要知道"还有空位"的时机是**商店**。
+    for (let i = 0; i < w.weapons.length; i++) this.drawTurret(w, i)
 
     // ---- Boss 血条（画在贴图之上；Boss 复用鱼贴图，没有血条就认不出它是 Boss）----
     for (const e of w.enemies) {
@@ -1284,6 +1265,166 @@ export class DiveGame extends Component {
         this.gPlayer.line(UI.danger, 0.5 + 0.4 * kk, 3)
         this.gPlayer.strokeCircle(e.x, e.y, 220 * (0.6 + 0.4 * kk))
       }
+    }
+  }
+
+  /**
+   * 局部坐标 → 世界坐标的**旋转**（sim 语义：原点左上、y 向下、`ang` 顺时针为正）。
+   *
+   * 为什么手算而不是用引擎的 `translate/rotate`：Cocos 3.8.8 的 `Graphics`
+   * **没有** `save/translate/rotate/restore`（读过 `cocos/2d/components/graphics.ts`）。
+   * 手算还顺带避开一层坑 —— 角度语义与 sim 完全一致，不必再叠一次 y 翻转的心算。
+   */
+  private rot(cx: number, cy: number, ang: number, lx: number, ly: number): { x: number; y: number } {
+    const c = Math.cos(ang), s = Math.sin(ang)
+    return { x: cx + lx * c - ly * s, y: cy + lx * s + ly * c }
+  }
+
+  /**
+   * 发射塔 = **圆形装载器 + 镶嵌其上的发射器**（web `drawTurret` 的逐值移植）。
+   *
+   * 立体感从哪来（俯视角、光源在左上，纯 Graphics、不依赖贴图）：
+   *   ① 底盘两层 —— 外环带（受光，中亮青实底）+ 内凹槽（背光，暗且**向下偏移**）；
+   *      一亮一暗再加一点错位，就读作"一个有厚度的金属盘，中间凹下去"。
+   *   ② 每道环配**上亮下暗两条弧**（画整圆会平，一段弧就足以骗过眼睛）。
+   *   ③ 中心毂：先投暗影 → 再压亮面 → 最后点一个左上高光点。
+   * 科技感来自装填进度环（12 点起顺时针扫满）—— 它同时是"这台武器在施法"的显式信号。
+   *
+   * 塔座用**通用色**（cyanDim）、不带武器色 —— 这是刻意的：座是艇上的固定设施，
+   * 武器是可换的。若塔座也染武器色，"这座塔能换装别的炮"就说不通了。武器色只出现在发射器上。
+   */
+  private drawTurret(w: DiveWorld, i: number): void {
+    const wp = w.weapons[i]
+    const pose = w.turretPose(i)
+    if (!wp || !pose) return
+    const cx = pose.x, cy = pose.y, ang = pose.ang
+    const g = this.gPlayer
+    // ext = 容器扩容解锁出来的第 5、6 座：琥珀外环 + 略大 15%，
+    // 让"我的艇变强了"在**剪影**上直接看得见，而不是只能读 HUD 数字。
+    const ext = i >= BASE_SEATS
+    const R = TURRET_R * (ext ? 1.15 : 1)
+    const hot = wp.fireFlash > 0
+    const P = (lx: number, ly: number) => this.rot(cx, cy, ang, lx, ly)
+
+    // ① 底盘外环带（受光面）：中亮青实底 —— **不填黑**（近黑在明亮水层下就是一块黑斑）
+    g.fill(UI.cyanDim, 0.55); g.fillCircle(cx, cy, R)
+    // 环带上缘亮弧 / 下缘暗弧：一趟弧线就做出"圆柱侧面"的受光。弧角随塔一起转。
+    g.line(UI.cyanHi, 0.34, R * 0.22)
+    g.arc(cx, cy, R * 0.86, ang + Math.PI * 1.08, ang + Math.PI * 1.78); g.stroke()
+    g.line(UI.abyss, 0.30, R * 0.22)
+    g.arc(cx, cy, R * 0.86, ang + Math.PI * 0.08, ang + Math.PI * 0.78); g.stroke()
+
+    // ② 内凹槽（发射器的安装位）：暗面 + 向下偏移 = 凹进去
+    const d1 = P(0, R * 0.10)
+    g.fill(UI.abyss, 0.40); g.fillCircle(d1.x, d1.y, R * 0.72)
+    g.line(UI.cyanHi, 0.45, R * 0.16)   // 凹槽内壁：左上受光
+    g.arc(d1.x, d1.y, R * 0.66, ang + Math.PI * 1.08, ang + Math.PI * 1.72); g.stroke()
+    const d2 = P(0, R * 0.06)
+    g.line(UI.abyss, 0.28, R * 0.16)    // 凹槽外沿投影：右下加深
+    g.arc(d2.x, d2.y, R * 0.78, ang + Math.PI * 0.12, ang + Math.PI * 0.72); g.stroke()
+
+    // ③ 外缘亮环 + 左上金属高光弧
+    neonCircle(g, cx, cy, R, hot ? 0xffffff : UI.cyan, { width: 2.2, alpha: 0.95, bloom: hot })
+    g.line(0xffffff, 0.55, 1.6)
+    g.arc(cx, cy, R * 0.92, ang + Math.PI * 1.12, ang + Math.PI * 1.56); g.stroke()
+
+    // ④ 装填进度环（最外，12 点起顺时针）—— "施法过程可见"的主件。
+    // 分母用**上一发的实际间隔**（含等级/齐射/高压供能）：升级后环的转速仍与真实开火节奏一致。
+    const ivD = wp.ivLast > 0 ? wp.ivLast : wp.iv
+    const charge = Math.max(0, Math.min(1, 1 - wp.timer / Math.max(0.001, ivD)))
+    const a0 = -Math.PI / 2
+    const progCol = hot ? 0xffffff : (charge > 0.985 ? UI.cyanHi : charge > 0.55 ? UI.cyan : UI.amber)
+    neon(g, progCol, () => {
+      g.arc(cx, cy, R * 1.38, a0, a0 + Math.PI * 2 * Math.max(0.001, charge)); g.stroke()
+    }, { width: 2.0, alpha: 0.92, bloom: hot || charge > 0.985 })
+    // 12 点刻度 —— **不随塔转**：圆是旋转对称的，刻度留在正上方才有"表盘"的读感
+    g.fill(UI.cyanDim, 0.85); g.fillRect(cx - 1.0, cy - R * 1.50, 2.0, 4)
+
+    // ⑤ 中心毂（凸起）：暗影 → 亮面 → 左上高光点
+    const h1 = P(0, R * 0.07)
+    g.fill(UI.abyss, 0.45); g.fillCircle(h1.x, h1.y, R * 0.30)
+    g.fill(hot ? 0xffffff : UI.cyanHi, 0.95); g.fillCircle(cx, cy, R * 0.26)
+    const h2 = P(-R * 0.08, -R * 0.08)
+    g.fill(0xffffff, 0.9); g.fillCircle(h2.x, h2.y, R * 0.08)
+
+    // ⑥ 扩容座：琥珀环 + 4 卡榫（和基础座一眼分开）
+    if (ext) {
+      neonCircle(g, cx, cy, R * 1.30, UI.amber, { width: 1.4, alpha: 0.8, bloom: false })
+      g.fill(UI.amber, 0.9)
+      for (let k = 0; k < 4; k++) {
+        const a = (k * Math.PI) / 2 + Math.PI / 4
+        const q = P(Math.cos(a) * R * 1.20, Math.sin(a) * R * 1.20)
+        g.fillCircle(q.x, q.y, 1.4)
+      }
+    }
+
+    // ⑦ 发射器：嵌在凹槽里，随索敌角旋转（子弹与枪口闪光也以它为准）
+    const tip = P(R * 0.9, 0)
+    neonLine(g, cx, cy, tip.x, tip.y, hot ? 0xffffff : UI.cyanHi, { width: 2.0, alpha: 0.95, bloom: false })
+    neonCircle(g, cx, cy, R * 0.46, hot ? 0xffffff : UI.cyanDim, { width: 1.2, alpha: 0.8, bloom: false })
+    this.drawEmitter(wp.id, cx, cy, ang, hot)
+  }
+
+  /**
+   * 发射器（可插拔部件）—— web `drawEmitter` 的逐值移植，只把 `g.save/translate/rotate`
+   * 换成手算旋转（Cocos Graphics 没有变换 API，见 `rot`）。
+   *
+   * 新增武器 = 新增一个分支，装载器那套完全不用动 —— 这就是"通用安装"的落点。
+   */
+  private drawEmitter(id: WeaponId, cx: number, cy: number, ang: number, firing: boolean): void {
+    const g = this.gPlayer
+    const s = EMITTER_SIZE
+    const c = WEAPON_DEF[id].color
+    const P = (lx: number, ly: number) => this.rot(cx, cy, ang, lx, ly)
+
+    if (id === 'sonar') {
+      // 声呐：三层同心弧，开口朝局部 +x（喇叭形辐射面）
+      for (let i = 1; i <= 3; i++) {
+        g.line(c, firing ? 1 : 0.7, 1.8)
+        g.arc(cx, cy, s * 0.26 * i, ang - 1.0, ang + 1.0); g.stroke()
+      }
+      g.fill(c, 0.9); g.fillCircle(cx, cy, s * 0.12)
+    } else if (id === 'gun') {
+      // 机关枪：三根平行枪管
+      for (let i = -1; i <= 1; i++) {
+        const yy = i * s * 0.3
+        const p1 = P(-s * 0.35, yy), p2 = P(s * 0.8, yy)
+        g.line(c, i === 0 ? 1 : 0.65, 2.4)
+        g.strokeSeg(p1.x, p1.y, p2.x, p2.y)
+      }
+      // 枪口亮点：开火瞬间烧白，给"它在射击"的反馈
+      const mz = P(s * 0.8, 0)
+      g.fill(firing ? 0xffffff : c, 0.95); g.fillCircle(mz.x, mz.y, s * 0.11)
+    } else if (id === 'torpedo') {
+      // 鱼雷发射管：本色半透明管身 + 亮描边 + 亮管口环（任何背景下都是"发光炮管"）。
+      // ⚠️ 管身**绝不能填近黑**：web 侧曾用近黑填管身，在明亮水层下就是一块纯黑矩形 ——
+      //    那正是用户反复反馈的"击杀之后有一个黑色方块"的真凶。
+      // 旋转后的圆角矩形没有等价的引擎 API，用四角多边形代替（14px 尺寸下圆角差异不可见）。
+      const q = [P(-s * 0.4, -s * 0.3), P(s * 0.6, -s * 0.3), P(s * 0.6, s * 0.3), P(-s * 0.4, s * 0.3)]
+      const quad = () => {
+        g.moveTo(q[0].x, q[0].y); g.lineTo(q[1].x, q[1].y)
+        g.lineTo(q[2].x, q[2].y); g.lineTo(q[3].x, q[3].y); g.close()
+      }
+      g.fill(c, 0.32); quad(); g.fillPath()
+      g.line(c, 0.95, 1.6); quad(); g.stroke()
+      // 管口环 + 内壁高光（让"这是个管口"有体积感，而不是一块实心色板）
+      const m1 = P(s * 0.55, -s * 0.32), m2 = P(s * 0.55, s * 0.32)
+      g.line(firing ? 0xffffff : c, 0.95, 2)
+      g.strokeSeg(m1.x, m1.y, m2.x, m2.y)
+      const mo = P(s * 0.42, 0)
+      g.fill(0xffffff, firing ? 0.9 : 0.35); g.fillCircle(mo.x, mo.y, s * 0.16)
+    } else {
+      // 电弧：两根电极柱 + 中间跳跃的弧光
+      const e1a = P(-s * 0.2, -s * 0.36), e1b = P(s * 0.5, -s * 0.36)
+      const e2a = P(-s * 0.2, s * 0.36), e2b = P(s * 0.5, s * 0.36)
+      g.line(c, 0.95, 2)
+      g.strokeSeg(e1a.x, e1a.y, e1b.x, e1b.y)
+      g.strokeSeg(e2a.x, e2a.y, e2b.x, e2b.y)
+      const z = [P(s * 0.5, -s * 0.36), P(s * 0.26, -s * 0.06), P(s * 0.62, s * 0.06), P(s * 0.38, s * 0.36)]
+      neon(g, firing ? 0xffffff : c, () => {
+        g.moveTo(z[0].x, z[0].y); g.lineTo(z[1].x, z[1].y)
+        g.lineTo(z[2].x, z[2].y); g.lineTo(z[3].x, z[3].y); g.stroke()
+      }, { width: 1.6, bloom: firing })
     }
   }
 

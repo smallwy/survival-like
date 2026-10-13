@@ -34,17 +34,43 @@
 
 import { Node, Label, Graphics, Sprite, SpriteFrame, UITransform } from 'cc'
 import { Gfx, col } from './Gfx'
+import { neon, neonLine, neonCircle } from './neon'
 import { SpriteBank } from './art'
-import { UI, TXT, MENU } from '../shared/theme'
+import { UI, TXT, MENU, BRIGHT, TXT_LIGHT } from '../shared/theme'
 import {
-  LAYERS, RELIC_SLOTS, STAT_META, STAT_CARD, WEAPON_DEF, CARD_WEAPON_ID,
-  O2, MAX_SEATS, BONE, weaponFamily,
+  LAYERS, RELIC_SLOTS, STAT_META, STAT_CARD, STAT_CAP, WEAPON_DEF, CARD_WEAPON_ID,
+  O2, MAX_SEATS, BONE, weaponFamily, evolutionBase, RELIC_DEF,
+  SEAT_RING_R, SEAT_ANGLES_DEG, TURRET_R, BASE_SEATS,
 } from '../shared/dive/tables'
 import type { DiveWorld } from '../shared/dive/world'
-import type { UpgradeDef, WeaponId, RelicId } from '../shared/dive/types'
+import type { UpgradeDef, WeaponId, RelicId, Stats } from '../shared/dive/types'
 
 /** 夹到 [0,1] —— 氧条比例、冷却进度、下潜进度都用它 */
 const clamp01 = (v: number): number => (v < 0 ? 0 : v > 1 ? 1 : v)
+
+/**
+ * 估算一段文字的像素宽（CJK ≈ 字号，ASCII ≈ 0.6×字号）。
+ *
+ * 用来做卡面文案的**截断**。为什么不用 Label 的真实宽度：`put()` 是池化的、
+ * 每帧重设字符串，取真实宽度要等一帧的 layout，而排版必须在本帧内定下来。
+ * 估算偏保守（宁可早截）—— 溢出会压到邻卡上，那是可见的事故，多截两个字没人看得出来。
+ */
+function estWidth(s: string, size: number): number {
+  let w = 0
+  for (const ch of s) w += /[\u2e80-\u9fff\uff00-\uffef]/.test(ch) ? size : size * 0.6
+  return w
+}
+
+/** 超过 `maxW` 就截断并补省略号 */
+function fitText(s: string, size: number, maxW: number): string {
+  if (estWidth(s, size) <= maxW) return s
+  let out = ''
+  for (const ch of s) {
+    if (estWidth(out + ch + '…', size) > maxW) break
+    out += ch
+  }
+  return out + '…'
+}
 
 interface Btn {
   node: Node
@@ -55,6 +81,51 @@ interface Btn {
 }
 
 type Align = 'left' | 'center' | 'right'
+
+/**
+ * 按钮皮肤。缺省（`BTN_DARK`）＝原来的暗色霓虹按钮，
+ * 亮色弹窗（商店）传 `BTN_BRIGHT_*`，一次调用就把填充/描边/文字三件套一起换掉 ——
+ * **只换底色会得到"白字白底"**，那正是这类改版最常见的事故。
+ */
+interface BtnStyle {
+  /** 填充（启用态）。缺省 = 原暗色 `UI.panelHi` */
+  fill?: number
+  fillA?: number
+  /** 禁用态填充。缺省 = `MENU.slot` */
+  offFill?: number
+  /** 描边（启用态）。缺省 = `UI.cyan` */
+  edge?: number
+  /** 禁用态描边。缺省 = `MENU.edge` */
+  offEdge?: number
+  /** 文字（启用态 / 禁用态）。缺省 = 原暗色的 `#c8f8ff` / `#4d6b7c` */
+  text?: string
+  offText?: string
+  /** 圆角。缺省 0（直角）—— 亮色皮肤一律 ≥9 */
+  r?: number
+  /** 字号。缺省 17 */
+  size?: number
+}
+
+const BTN_DARK: BtnStyle = {}
+const BTN_BRIGHT_PRIMARY: BtnStyle = {
+  fill: BRIGHT.accent, edge: BRIGHT.accentEdge, text: TXT_LIGHT.onAccent,
+  offFill: 0xd7e6ee, offEdge: 0xa9c4d3, offText: '#93aab8', r: 10, size: 17,
+}
+const BTN_BRIGHT_SECONDARY: BtnStyle = {
+  fill: 0xffffff, edge: BRIGHT.edge, text: TXT_LIGHT.dim,
+  offFill: 0xeaf1f5, offEdge: 0xc2d5e0, offText: '#9db2bf', r: 10, size: 16,
+}
+const BTN_BRIGHT_DISABLED: BtnStyle = {
+  fill: 0xe4edf2, edge: 0xc2d5e0, text: '#9db2bf',
+  offFill: 0xe4edf2, offEdge: 0xc2d5e0, offText: '#9db2bf', r: 9, size: 16,
+}
+const BTN_BRIGHT_TINY: BtnStyle = { fill: 0xffffff, edge: BRIGHT.edge, text: TXT_LIGHT.dim, r: 6, size: 12 }
+const BTN_BRIGHT_LOCKED: BtnStyle = { fill: BRIGHT.lockHi, edge: BRIGHT.mount, text: '#8a5a00', r: 6, size: 12 }
+
+/** 购买按钮按**类型色**着色：器械青 / 挂载琥珀 / 属性紫 / 遗物靛 —— 与卡的描边同一色，一眼对上 */
+function lightBuyBtn(accent: number): BtnStyle {
+  return { fill: accent, edge: accent, text: TXT_LIGHT.onAccent, r: 9, size: 16 }
+}
 
 export class Hud {
   private readonly root: Node
@@ -119,6 +190,38 @@ export class Hud {
     this.padH = ch > 0 ? Math.max(0, (ch - this.H) / 2) + 8 : 8
   }
 
+  /**
+   * 半透明底幕。
+   *
+   * 与 `pageFill` 的区别是**语义**：`pageFill` 铺的是不透明页面底（"这是一个界面"），
+   * `scrim` 压的是半透明暗幕（"这是浮在游戏上的一个弹窗"）。用户原话
+   * 「现在是全屏的 太大了」—— 旧商店用不透明 pageFill，视觉上等于把游戏切走了。
+   */
+  private scrim(alpha: number): void {
+    this.g.fill(BRIGHT.scrim, alpha)
+    this.g.fillRect(-this.padW, -this.padH, this.W + this.padW * 2, this.H + this.padH * 2)
+  }
+
+  /**
+   * 亮色面板：实底 + 硬边 + 上缘高光带 + 一层淡投影。
+   *
+   * 三条刻意的取舍：
+   *   · **硬边不发光** —— 发光会把边缘糊掉 2~3px，而"边缘锐利"正是清晰感的来源；
+   *   · 顶栏带用"圆角矩形 + 方角补块"拼（引擎没有"只圆上两角"的 API），
+   *     否则顶栏带的下两个圆角会在面板里抠出两个缺口；
+   *   · 投影很淡（α.28）—— 底幕已经很暗，再重就是一块脏边。
+   */
+  private brightPanel(x: number, y: number, w: number, h: number): void {
+    const g = this.g
+    g.fill(0x000000, 0.28); g.fillRoundRect(x + 5, y + 8, w, h, 16)
+    g.fill(BRIGHT.surface, 1); g.fillRoundRect(x, y, w, h, 16)
+    g.fill(BRIGHT.header, 1)
+    g.fillRoundRect(x, y, w, 48, 16)      // 顶栏带（上圆角）
+    g.fillRect(x, y + 32, w, 16)          // 把顶栏带下缘补成方角
+    g.fill(0xffffff, 0.55); g.fillRoundRect(x + 18, y + 3, w - 36, 2, 1)  // 面板上缘高光
+    g.line(BRIGHT.edge, 0.9, 2); g.strokeRoundRect(x + 1, y + 1, w - 2, h - 2, 15)
+  }
+
   // -------------------------------------------------------------------------
   // 池化工具
   // -------------------------------------------------------------------------
@@ -156,7 +259,8 @@ export class Hud {
    * 一个按钮。Graphics 画在**节点局部坐标**里：`new Gfx(g, 0)` 之后
    * `rect(-w/2, -h/2, w, h)` 就正好落在节点中心（H=0 时 y 翻转退化为取负）。
    */
-  private button(cx: number, cy: number, w: number, h: number, s: string, onTap: () => void, enabled = true): void {
+  private button(cx: number, cy: number, w: number, h: number, s: string, onTap: () => void,
+                 enabled = true, o: BtnStyle = BTN_DARK): void {
     let b = this.btns[this.btnUsed]
     if (!b) {
       const n = this.mk('btn', this.root)
@@ -176,17 +280,21 @@ export class Hud {
     b.onTap = onTap
     b.node.setPosition(cx, this.H - cy)
     b.node.getComponent(UITransform)!.setContentSize(w, h)
+    const size = o.size ?? 17
     b.label.string = s
-    b.label.fontSize = 17
-    b.label.lineHeight = 19
-    b.label.color = col(enabled ? 0xc8f8ff : 0x4d6b7c)
+    b.label.fontSize = size
+    b.label.lineHeight = size + 2
+    b.label.color = col(parseInt((enabled ? (o.text ?? '#c8f8ff') : (o.offText ?? '#4d6b7c')).slice(1), 16))
     b.label.node.setPosition(0, 0)
 
+    const r = o.r ?? 0
     b.gfx.clear()
-    b.gfx.fill(enabled ? UI.panelHi : MENU.slot, 0.95)
-    b.gfx.fillRect(-w / 2, -h / 2, w, h)
-    b.gfx.line(enabled ? UI.cyan : MENU.edge, 0.8, 1)
-    b.gfx.strokeRect(-w / 2, -h / 2, w, h)
+    b.gfx.fill(enabled ? (o.fill ?? UI.panelHi) : (o.offFill ?? MENU.slot), o.fillA ?? 0.95)
+    if (r > 0) b.gfx.fillRoundRect(-w / 2, -h / 2, w, h, r)
+    else b.gfx.fillRect(-w / 2, -h / 2, w, h)
+    b.gfx.line(enabled ? (o.edge ?? UI.cyan) : (o.offEdge ?? MENU.edge), 0.8, r > 0 ? 1.5 : 1)
+    if (r > 0) b.gfx.strokeRoundRect(-w / 2, -h / 2, w, h, r)
+    else b.gfx.strokeRect(-w / 2, -h / 2, w, h)
     this.btnUsed++
   }
 
@@ -241,11 +349,21 @@ export class Hud {
    */
   private cardArtKey(up: UpgradeDef): string | null {
     if (up.kind === 'relic') return up.relicId ? 'item_' + up.relicId : null
+    const wid = this.cardWeaponId(up)
+    return wid ? 'item_' + wid : null
+  }
+
+  /**
+   * 商店卡 → 武器 id（没有则 null）。
+   * 与 `cardArtKey` 同源：立绘 key 与"画哪个形状签名图标"必须走**同一套映射**，
+   * 否则会出现"有立绘的卡用 A 逻辑、没立绘的卡用 B 逻辑"这种两边各对一半的漂移。
+   */
+  private cardWeaponId(up: UpgradeDef): WeaponId | null {
     const fixed = CARD_WEAPON_ID[up.id]
-    if (fixed) return 'item_' + fixed
+    if (fixed) return fixed
     if (up.id.startsWith('w_') || up.id.startsWith('e_')) {
       const raw = up.id.slice(2)
-      if ((WEAPON_DEF as Record<string, unknown>)[raw]) return 'item_' + raw
+      if ((WEAPON_DEF as Record<string, unknown>)[raw]) return raw as WeaponId
     }
     return null
   }
@@ -666,6 +784,215 @@ export class Hud {
   // -------------------------------------------------------------------------
   // 波间商店
   // -------------------------------------------------------------------------
+  /**
+   * 属性卡的**大符号**（web `drawStatGlyph` 的移植，11 种属性各一个形状签名）。
+   *
+   * 为什么必须有：属性卡没有立绘 —— 素材里不可能有"共振强度"这种东西的图。
+   * 旧版这块直接画一个 `—`，整张卡看起来像"资源没加载出来"。
+   * 这里用几何符号补上，且是**形状**签名而不是颜色签名：缩到 20px 也分得清。
+   */
+  private statGlyph(k: keyof Stats, cx: number, cy: number, s: number, col: number): void {
+    const g = this.g
+    const path = (fn: () => void, w = 2.4, a = 1): void =>
+      neon(g, col, () => { fn() }, { width: w, alpha: a, bloom: false })
+    const seg = (x1: number, y1: number, x2: number, y2: number, w = 2.4, a = 1): void =>
+      neonLine(g, x1, y1, x2, y2, col, { width: w, alpha: a, bloom: false })
+    /** 折线 → 收口 → 描边。`neon` 会调它 2~3 次，必须每次重新组路径。 */
+    const poly = (pts: number[]): (() => void) => () => {
+      g.moveTo(pts[0], pts[1])
+      for (let i = 2; i < pts.length; i += 2) g.lineTo(pts[i], pts[i + 1])
+      g.close(); g.stroke()
+    }
+    switch (k) {
+      case 'dmg':      // 向上箭头 = 强度
+        path(poly([cx, cy - s * 0.5, cx + s * 0.42, cy + s * 0.06, cx + s * 0.16, cy + s * 0.06,
+          cx + s * 0.16, cy + s * 0.5, cx - s * 0.16, cy + s * 0.5, cx - s * 0.16, cy + s * 0.06,
+          cx - s * 0.42, cy + s * 0.06]))
+        break
+      case 'rate':     // 三条速度线
+        for (let i = -1; i <= 1; i++) {
+          seg(cx - s * 0.46, cy + i * s * 0.3, cx + s * 0.32, cy + i * s * 0.3, 2.4, i === 0 ? 1 : 0.55)
+        }
+        break
+      case 'crit':     // 准星
+        neonCircle(g, cx, cy, s * 0.4, col, { width: 2.4, bloom: false })
+        seg(cx - s * 0.62, cy, cx - s * 0.2, cy); seg(cx + s * 0.2, cy, cx + s * 0.62, cy)
+        seg(cx, cy - s * 0.62, cx, cy - s * 0.2); seg(cx, cy + s * 0.2, cx, cy + s * 0.62)
+        break
+      case 'range':    // 同心弧
+        for (let i = 0; i < 3; i++) {
+          path(() => { g.arc(cx - s * 0.34, cy, s * (0.3 + i * 0.2), -0.85, 0.85); g.stroke() }, 2.2, 1 - i * 0.28)
+        }
+        break
+      case 'armor':    // 盾形
+        path(poly([cx, cy - s * 0.5, cx + s * 0.42, cy - s * 0.26, cx + s * 0.32, cy + s * 0.3,
+          cx, cy + s * 0.52, cx - s * 0.32, cy + s * 0.3, cx - s * 0.42, cy - s * 0.26]))
+        break
+      case 'dodge':    // 划开的斜线 = 躲开
+        seg(cx - s * 0.5, cy + s * 0.42, cx + s * 0.06, cy - s * 0.14, 2.8)
+        seg(cx + s * 0.3, cy - s * 0.38, cx + s * 0.5, cy - s * 0.5, 2.8, 0.5)
+        seg(cx + s * 0.14, cy - s * 0.52, cx + s * 0.52, cy - s * 0.14, 2.2, 0.55)
+        break
+      case 'speed':    // 双层人字
+        for (let i = 0; i < 2; i++) {
+          path(() => {
+            g.moveTo(cx - s * 0.46 + i * s * 0.34, cy - s * 0.36)
+            g.lineTo(cx - s * 0.08 + i * s * 0.34, cy)
+            g.lineTo(cx - s * 0.46 + i * s * 0.34, cy + s * 0.36); g.stroke()
+          }, 2.8, 1 - i * 0.4)
+        }
+        break
+      case 'pickup':   // 磁吸：中心圆 + 两侧外弧
+        neonCircle(g, cx, cy + s * 0.08, s * 0.26, col, { width: 2.4, bloom: false })
+        path(() => { g.arc(cx, cy + s * 0.08, s * 0.5, -0.75, 0.75); g.stroke() }, 2.4, 0.6)
+        path(() => { g.arc(cx, cy + s * 0.08, s * 0.5, Math.PI - 0.75, Math.PI + 0.75); g.stroke() }, 2.4, 0.6)
+        break
+      case 'luck':     // 四角星
+        path(poly([cx, cy - s * 0.52, cx + s * 0.14, cy - s * 0.14, cx + s * 0.52, cy,
+          cx + s * 0.14, cy + s * 0.14, cx, cy + s * 0.52, cx - s * 0.14, cy + s * 0.14,
+          cx - s * 0.52, cy, cx - s * 0.14, cy - s * 0.14]))
+        break
+      case 'regen':    // 循环箭头
+        path(() => { g.arc(cx, cy, s * 0.38, 0.55, Math.PI * 1.72); g.stroke() }, 2.6)
+        seg(cx + s * 0.18, cy - s * 0.46, cx + s * 0.46, cy - s * 0.24, 2.4)
+        seg(cx + s * 0.46, cy - s * 0.24, cx + s * 0.2, cy - s * 0.16, 2.4)
+        break
+      case 'killO2':   // 环 + 十字（回氧）
+        neonCircle(g, cx, cy, s * 0.44, col, { width: 2.2, bloom: false })
+        seg(cx - s * 0.2, cy, cx + s * 0.2, cy, 2.6)
+        seg(cx, cy - s * 0.2, cx, cy + s * 0.2, 2.6)
+        break
+      default:         // o2Bonus · 扩容气瓶：胶囊 + 加号
+        path(() => { g.strokeRoundRect(cx - s * 0.28, cy - s * 0.46, s * 0.56, s * 0.92, s * 0.28) }, 2.4)
+        seg(cx - s * 0.13, cy, cx + s * 0.13, cy, 2.4)
+        seg(cx, cy - s * 0.13, cx, cy + s * 0.13, 2.4)
+        break
+    }
+  }
+
+  /**
+   * 属性卡的**进度条**（web `drawStatGauge`）：浅色段 = 买完之后到哪、深色段 = 现在到哪。
+   * 两个数字直接可比较，玩家不用心算"再买 3 张是多少"。
+   */
+  private statGauge(cx: number, cy: number, cardId: string, w: DiveWorld): void {
+    const g = this.g
+    const MAP: Record<string, { k: keyof Stats; add: number }> = {
+      speed: { k: 'speed', add: 0.15 },
+      pickup: { k: 'pickup', add: 0.4 },
+      tank: { k: 'o2Bonus', add: 20 },
+      gill: { k: 'killO2', add: 3 },
+      s_dmg: { k: 'dmg', add: 0.12 },
+      s_rate: { k: 'rate', add: 0.10 },
+      s_crit: { k: 'crit', add: 0.08 },
+      s_range: { k: 'range', add: 0.15 },
+      s_armor: { k: 'armor', add: 0.08 },
+      s_dodge: { k: 'dodge', add: 0.06 },
+      s_regen: { k: 'regen', add: 0.4 },
+      s_luck: { k: 'luck', add: 0.15 },
+    }
+    const m = MAP[cardId]
+    if (!m) { neonCircle(g, cx, cy, 20, BRIGHT.stat, { width: 2, bloom: false }); return }
+    // 满值：有上限的用上限，没有的给一个"看起来合理的"参考刻度
+    const full = STAT_CAP[m.k] ?? (m.k === 'o2Bonus' ? 100 : m.k === 'killO2' ? 12 : 1.0)
+    const cur = clamp01(w.st[m.k] / full)
+    const next = clamp01((w.st[m.k] + m.add) / full)
+    const bw = 168, bh = 20
+    const x0 = cx - bw / 2, y0 = cy - bh / 2
+    // 进度条颜色跟**属性本身**走（和上面的大符号同色）：一律用同一种色等于放弃"余光辨色"
+    const gcol = STAT_META.find(x => x.k === m.k)?.col ?? BRIGHT.stat
+    g.fill(BRIGHT.slot, 1); g.fillRoundRect(x0, y0, bw, bh, 7)
+    g.fill(gcol, 0.35); g.fillRoundRect(x0, y0, Math.max(2, bw * next), bh, 5)
+    g.fill(gcol, 0.95); g.fillRoundRect(x0, y0, Math.max(2, bw * cur), bh, 5)
+    g.line(BRIGHT.divider, 1, 1); g.strokeRoundRect(x0 + 0.5, y0 + 0.5, bw - 1, bh - 1, 5)
+    // 增量段上标一个箭头 —— 否则玩家看不出"浅色那段是我要买的"
+    if (next > cur + 0.01) {
+      const mx = x0 + (bw * (cur + next)) / 2
+      g.fill(gcol, 0.95)
+      g.moveTo(mx - 3, y0 - 4); g.lineTo(mx + 3, y0 - 4); g.lineTo(mx, y0 + 1)
+      g.close(); g.fillPath()
+    }
+    const shown = (m.k === 'o2Bonus' || m.k === 'killO2' || m.k === 'regen')
+      ? `${w.st[m.k].toFixed(m.k === 'regen' ? 1 : 0)} → ${(w.st[m.k] + m.add).toFixed(m.k === 'regen' ? 1 : 0)}`
+      : `${Math.round(w.st[m.k] * 100)}% → ${Math.round(Math.min(full, w.st[m.k] + m.add) * 100)}%`
+    this.center(cx, cy + 22, shown, 12, TXT_LIGHT.accent)
+  }
+
+  /**
+   * 挂载位示意图（挂载扩容卡）。与战斗内**同一套角度常量与半径比例** ——
+   * 图上的记号在游戏里对不上，卡的说明就成废纸（所以这里和 `DiveGame.drawTurret`
+   * 共用 `SEAT_ANGLES_DEG` / `SEAT_RING_R` / `TURRET_R`）。
+   *
+   * ⚠️ 椭圆的参数语义反了：web 的 `strokeEllipse(cx,cy,w,h)` 收**直径**，
+   *    Cocos 的 `ellipse` 收**半径** —— web 写 `bodyL*2`，这里必须写 `bodyL`（坑 13）。
+   */
+  private mountDiagram(cx: number, cy: number, id: string, boxH: number, w: DiveWorld): void {
+    const g = this.g
+    const target = id === 't_slot5' ? 5 : id === 't_slot6' ? 6 : w.maxWeapons
+    const n = Math.max(target, w.maxWeapons)
+    // 缩放由**立绘框实际高度**决定，而不是写死系数（写死会在卡高变化时把图示顶出框）
+    const needH = SEAT_RING_R * 2 * 1.15 * 1.7 + 16
+    const k = Math.max(0.30, Math.min(0.72, (boxH - 8) / needH))
+    const R = SEAT_RING_R * k
+    const bodyL = 30 * k, bodyW = 15 * k
+
+    // 艇身（俯视椭圆，与实机 99×52 的长宽比一致）
+    neon(g, UI.cyanDim, () => { g.ellipse(cx, cy, bodyL, bodyW); g.stroke() },
+      { width: 1.2, alpha: 0.45, bloom: false })
+
+    for (let i = 0; i < n; i++) {
+      const a = (SEAT_ANGLES_DEG[i] * Math.PI) / 180
+      const x = cx + R * Math.cos(a)
+      const y = cy + R * Math.sin(a)
+      const occupied = i < w.weapons.length
+      const isNew = i === target - 1
+      const ext = i >= BASE_SEATS
+      const col = occupied ? WEAPON_DEF[w.weapons[i].id].color : UI.cyan
+      const r = TURRET_R * k * (ext ? 1.15 : 1)
+      if (occupied) {
+        g.fill(UI.panel, 0.6); g.fillCircle(x, y, r)
+        neonCircle(g, x, y, r, col, { width: 1.4, alpha: 0.95, bloom: false })
+        g.fill(col, 0.95); g.fillCircle(x, y, r * 0.34)
+      } else {
+        g.line(isNew ? UI.amber : UI.cyanDim, isNew ? 1 : 0.45, isNew ? 1.8 : 1)
+        g.strokeCircle(x, y, r)
+      }
+      // 新解锁位：外面套一圈闪烁提示环（这是"你买的到底是哪一座"的唯一显式信号）
+      if (isNew) {
+        const blink = 0.45 + 0.55 * Math.abs(Math.sin(w.t * 5))
+        neonCircle(g, x, y, r * 1.7, UI.amber, { width: 1.8, alpha: blink, bloom: false })
+      }
+    }
+    this.center(cx, cy + bodyW + 14, `${w.weapons.length} → ${target} 座`, 12, TXT_LIGHT.dim)
+  }
+
+  /** 等级点（web `drawLevelPips`）：5 格，已到的实心、未到的空心描边 */
+  private levelPips(cx: number, cy: number, lvl: number, col: number): void {
+    const g = this.g
+    const n = 5, gap = 11, pw = 7
+    const x0 = cx - ((n - 1) * gap) / 2
+    for (let i = 0; i < n; i++) {
+      const x = x0 + i * gap
+      if (i < lvl) { g.fill(col, 0.95); g.fillRect(x - pw / 2, cy - 2.5, pw, 5) }
+      else { g.line(col, 0.4, 1); g.strokeRect(x - pw / 2, cy - 2.5, pw, 5) }
+    }
+  }
+
+  /**
+   * 波间商店。
+   *
+   * -----------------------------------------------------------------------
+   * V7 重做：全屏暗色实底 → **半透明暗幕 + 居中亮色面板**
+   * -----------------------------------------------------------------------
+   * 用户原话：「商店你最好重新用UI概念图 现在是全屏的 太大了 我需要亮色的 现在画风很暗」。
+   * 三处不合意逐条对应到改动：
+   *   · 「全屏的」   → 旧版 `pageFill(MENU.page, 1)` 是一整块**不透明**近黑，等于把游戏切走。
+   *                    改成 α.58 的暗幕 + 一块只占屏约 54% 宽的面板，深海与机体留在四周 ——
+   *                    "这是浮在游戏上的潜水终端"，不是"另一个界面"。
+   *   · 「太大了」   → 卡片 300×330 → 204×264；面板整体宽 948 → 700、高 442。
+   *   · 「画风很暗」 → 面板走 `BRIGHT` 亮色皮肤（近白水青）+ 深藏青文字。
+   *                    ⚠️ 换底色必须**同时换文字色**（`TXT` → `TXT_LIGHT`），
+   *                    只换底会得到"白字白底"，是这类改版最经典的事故。
+   */
   drawShop(w: DiveWorld, cbs: {
     onBuy: (i: number) => void
     onReroll: () => void
@@ -673,72 +1000,193 @@ export class Hud {
     onLeave: () => void
   }): void {
     const W = this.W, H = this.H
-    this.pageFill(MENU.page, 1)
+    const g = this.g
 
-    this.center(W / 2, 40, `L${w.layerIdx + 1} ${LAYERS[w.layerIdx].name} · 波间补给`, 22, TXT.cyber)
-    this.text(W - 24, 40, `${w.bank} 鱼骨`, 18, TXT.bone, true)
-    this.text(24, 40, `第 ${w.waveInLayer + 1} 波`, 16, TXT.dim)
+    // 底幕：半透明（不是实黑）—— 让深海透出来，弹窗感才立得住
+    this.scrim(0.58)
 
-    const cw = 300, ch = 330, gap = 24
-    const x0 = (W - cw * 3 - gap * 2) / 2
-    const y0 = H / 2 - ch / 2 + 10
+    // 面板几何：宽度跟随卡片总宽（自适应设计分辨率），高度是各分区之和
+    const cw = 204, gap = 18, pad = 26
+    const pw = cw * 3 + gap * 2 + pad * 2
+    const headerH = 56, cardH = 292, footH = 56, vpad = 20
+    const ph = vpad * 2 + headerH + 12 + cardH + 14 + footH
+    const px = (W - pw) / 2
+    const py = (H - ph) / 2
+    this.brightPanel(px, py, pw, ph)
 
-    for (let i = 0; i < 3; i++) {
-      const up: UpgradeDef | undefined = w.offers[i]
-      const x = x0 + i * (cw + gap)
-      const sold = w.sold[i]
-      const afford = up ? w.bank >= up.cost : false
-      const bg = sold ? MENU.slot : (w.locked[i] ? UI.panelHi : MENU.card)
-      this.g.fill(bg, 1)
-      this.g.fillRect(x, y0, cw, ch)
-      const edge = !up ? MENU.edge
-        : up.kind === 'relic' ? UI.violet
-          : up.kind === 'mount' ? UI.amber
-            : up.kind === 'weapon' ? UI.jade : UI.cyan
-      this.g.line(edge, sold ? 0.25 : 0.9, 2)
-      this.g.strokeRect(x, y0, cw, ch)
+    const ix = px + pad
+    const iy = py + vpad
 
-      if (!up) { this.center(x + cw / 2, y0 + ch / 2, sold ? '已购买' : '空', 16, TXT.mute); continue }
+    // ---- 顶栏：标题 + 副标题 + 骨币胶囊（右）----
+    this.text(ix, iy + 18, `L${w.layerIdx + 1} ${LAYERS[w.layerIdx].name} · 波间补给`, 19, TXT_LIGHT.main)
+    this.text(ix, iy + 41, `第 ${w.waveInLayer + 1} 波结束 · 点卡片或按 1 / 2 / 3 购买`, 12, TXT_LIGHT.dim)
 
-      // ---- 立绘框 ----
-      // 卡面唯一的实底深色块（MENU 的明度阶梯是 page < slot < card）：
-      // 亮色立绘要靠"比卡面更深"的底才跳得出来，垫光晕只会把画面弄脏。
-      const ax = x + 14, ay = y0 + 50, aw = cw - 28, ah = 96
-      this.g.fill(MENU.slot, 1); this.g.fillRect(ax, ay, aw, ah)
-      this.g.line(MENU.divider, 0.8, 1); this.g.strokeRect(ax, ay, aw, ah)
-      const artKey = this.cardArtKey(up)
-      const artSf = artKey ? this.art.get(artKey) : undefined
-      this.putArt(x + cw / 2, ay + ah / 2, aw - 8, ah - 8, artSf, sold ? 0.35 : 1)
-      // 没有立绘的（属性卡 / 加装卡）在框里放一个"无图"提示，
-      // 免得玩家以为卡坏了 —— 空框比缺图更含糊。
-      if (!artSf) this.center(x + cw / 2, ay + ah / 2, '—', 20, TXT.mute)
+    const bankStr = `${w.bank}`
+    const pillW = 34 + bankStr.length * 11 + 42
+    const pillX = px + pw - pad - pillW
+    const pillY = iy + 15
+    g.fill(0xffffff, 1); g.fillRoundRect(pillX, pillY, pillW, 28, 14)
+    g.line(BRIGHT.edge, 0.8, 1); g.strokeRoundRect(pillX + 0.5, pillY + 0.5, pillW - 1, 27, 14)
+    g.line(BRIGHT.relic, 0.95, 1.8); g.strokeCircle(pillX + 17, pillY + 14, 7)
+    this.text(pillX + 29, pillY + 14, bankStr, 17, TXT_LIGHT.main)
+    this.text(pillX + pillW - 9, pillY + 15, '鱼骨', 12, TXT_LIGHT.dim, true)
 
-      this.center(x + cw / 2, y0 + 30, up.name, 20, sold ? TXT.mute : TXT.cyber)
-      this.center(x + cw / 2, y0 + 168, up.desc, 14, TXT.dim)
-      if (up.relicId) this.center(x + cw / 2, y0 + 190, `遗物 · 上限 ${RELIC_SLOTS}`, 12, TXT.amber)
+    // ---- 三张卡 ----
+    const cy0 = iy + headerH + 12
+    for (let i = 0; i < 3; i++) this.shopCard(ix + i * (cw + gap), cy0, cw, cardH, i, w, cbs)
 
-      // 属性卡显示"当前值"
-      const statKey = STAT_CARD[up.id]
-      if (statKey) {
-        const meta = STAT_META.find(m => m.k === statKey)
-        if (meta) {
-          const cur = w.st[statKey]
-          const show = meta.pct ? `${(cur * 100).toFixed(0)}%` : cur.toFixed(1)
-          this.center(x + cw / 2, y0 + 214, `${meta.name} 现 ${show}`, 13, TXT.main)
-        }
-      }
-      this.center(x + cw / 2, y0 + 250, sold ? '已购买' : `${up.cost} 鱼骨`, 18,
-        sold ? TXT.mute : (afford ? TXT.bone : TXT.warn))
+    // ---- 底栏：刷新（次）/ 继续（主，最亮的那个）----
+    const fy = py + ph - vpad - footH / 2
+    const bw = 196
+    this.button(W / 2 - bw / 2 - 16, fy, bw, 46, `刷新 ${w.rerollCost}`, cbs.onReroll,
+      w.bank >= w.rerollCost, BTN_BRIGHT_SECONDARY)
+    this.button(W / 2 + bw / 2 + 16, fy, bw, 46, '继续 ▶ 下一波', cbs.onLeave, true, BTN_BRIGHT_PRIMARY)
+  }
 
-      const bw2 = (cw - 44) / 2, bh = 40
-      this.button(x + 16 + bw2 / 2, y0 + ch - 40, bw2, bh, sold ? '已售出' : '购买',
-        () => cbs.onBuy(i), !sold && afford)
-      this.button(x + 16 + bw2 + 12 + bw2 / 2, y0 + ch - 40, bw2, bh, w.locked[i] ? '已锁定' : '锁定',
-        () => cbs.onLock(i), !sold)
+  /**
+   * 商店 · 单张卡（亮色皮肤）。
+   *
+   * 卡内分区自上而下：键帽/类型/锁定 → 立绘槽 → 名称 → 描述 → 价格 → 购买按钮。
+   * 立绘槽**比卡面深**（`BRIGHT.slot` < `BRIGHT.card`）—— 亮色立绘要靠"更深的底"跳出来，
+   * 垫光晕只会把画面弄脏（这是 web 量过亮度方差后定下的，不是审美偏好）。
+   */
+  private shopCard(x: number, y: number, cw: number, ch: number, i: number,
+                   w: DiveWorld, cbs: { onBuy: (i: number) => void; onLock: (i: number) => void }): void {
+    const g = this.g
+    const up: UpgradeDef | undefined = w.offers[i]
+    const sold = w.sold[i]
+    const locked = w.locked[i]
+    const afford = up ? w.bank >= up.cost : false
+
+    // 类型色：器械青 / 挂载琥珀 / 属性紫 / 遗物靛
+    const typeCol = !up ? BRIGHT.edge
+      : up.kind === 'relic' ? BRIGHT.relic
+        : up.kind === 'mount' ? BRIGHT.mount
+          : up.kind === 'weapon' ? BRIGHT.weapon : BRIGHT.stat
+
+    // 卡体：亮色实底。三态靠"卡面压暗 + 描边亮度"分档（买不起整张压一档）
+    g.fill(sold ? BRIGHT.slot : (afford ? BRIGHT.card : BRIGHT.cardOff), 1)
+    g.fillRoundRect(x, y, cw, ch, 12)
+    g.fill(0xffffff, sold ? 0.25 : 0.8); g.fillRoundRect(x + 12, y + 2, cw - 24, 2, 1)
+    g.line(typeCol, sold ? 0.35 : (afford ? 0.95 : 0.45), 2)
+    g.strokeRoundRect(x + 1, y + 1, cw - 2, ch - 2, 11)
+
+    // ---- 键帽 1/2/3（暗示"这个键可以按"）----
+    const kc = 22
+    g.fill(0x000000, 0.06); g.fillRoundRect(x + 12, y + 13, kc, kc, 6)
+    g.fill(0xffffff, 1); g.fillRoundRect(x + 12, y + 12, kc, kc, 6)
+    g.line(afford ? typeCol : BRIGHT.edge, afford ? 0.95 : 0.55, 1)
+    g.strokeRoundRect(x + 12.5, y + 12.5, kc - 1, kc - 1, 6)
+    this.center(x + 12 + kc / 2, y + 12 + kc / 2, `${i + 1}`, 13,
+      afford ? TXT_LIGHT.main : TXT_LIGHT.mute)
+
+    // ---- 类型标签 ----
+    if (up) {
+      const kindLabel = up.kind === 'weapon' ? '器械'
+        : up.kind === 'mount' ? '挂载' : up.kind === 'relic' ? '遗物' : '属性'
+      this.text(x + 42, y + 23, kindLabel, 12, TXT_LIGHT.dim)
     }
 
-    this.button(W / 2 - 130, H - 52, 200, 46, `刷新 ${w.rerollCost}`, cbs.onReroll, w.bank >= w.rerollCost)
-    this.button(W / 2 + 130, H - 52, 200, 46, '继续 ▶ 下一波', cbs.onLeave, true)
+    // ---- 锁定按钮（右上，**独立热区** —— 和购买按钮挤在一起会误点成买卡）----
+    this.button(x + cw - 38, y + 23, 52, 22, locked ? '已锁' : '锁定',
+      () => cbs.onLock(i), !sold, locked ? BTN_BRIGHT_LOCKED : BTN_BRIGHT_TINY)
+
+    if (!up) {
+      this.center(x + cw / 2, y + ch / 2, sold ? '已购买' : '空', 15, TXT_LIGHT.mute)
+      return
+    }
+
+    // ---- 立绘槽（比卡面深）----
+    const cxm = x + cw / 2
+    const ax = x + 14, ay = y + 44, aw = cw - 28, ah = 84
+    g.fill(BRIGHT.slot, 1); g.fillRoundRect(ax, ay, aw, ah, 8)
+    g.line(BRIGHT.divider, 0.9, 1); g.strokeRoundRect(ax + 0.5, ay + 0.5, aw - 1, ah - 1, 8)
+    const artKey = this.cardArtKey(up)
+    const artSf = artKey ? this.art.get(artKey) : undefined
+    this.putArt(cxm, ay + ah / 2, aw - 12, ah - 12, artSf, sold ? 0.4 : 1)
+
+    // 没有立绘的卡**按类型补代码图形** —— 旧版这里一律画一个"—"，
+    // 属性卡 / 挂载卡整张看起来像"资源没加载出来"。这才是"商店资源不对"的实质。
+    const wid = this.cardWeaponId(up)
+    const artCy = ay + ah / 2
+    if (!artSf) {
+      if (up.kind === 'mount') {
+        this.mountDiagram(cxm, artCy - 2, up.id, ah, w)
+      } else if (up.kind === 'relic') {
+        this.relicIcon((up.relicId ?? 'echo_heart') as RelicId, cxm, artCy, 20)
+      } else if (up.kind === 'weapon') {
+        // w_all（弹药改良）没有武器 id，用 gun 的形状签名兜底
+        this.weaponIcon(wid ?? 'gun', cxm, artCy, 24)
+      } else {
+        const sk = STAT_CARD[up.id]
+        if (sk) {
+          const gcol = STAT_META.find(m => m.k === sk)?.col ?? UI.cyan
+          this.statGlyph(sk, cxm, artCy - 13, 42, gcol)
+          this.statGauge(cxm, artCy + 25, up.id, w)
+        }
+      }
+    }
+
+    // 已持有的同款武器：在立绘底缘点出**等级点**（+ 台数），否则玩家会以为重复拿是白拿
+    if (wid) {
+      const heldAll = w.weapons.filter(x2 => x2.id === wid)
+      if (heldAll.length) {
+        const topLvl = Math.max(...heldAll.map(x2 => x2.lvl))
+        this.levelPips(cxm, ay + ah - 10, topLvl, WEAPON_DEF[wid].color)
+        if (heldAll.length > 1) this.text(cxm + 36, ay + ah - 16, `×${heldAll.length}`, 12, TXT_LIGHT.accent)
+      }
+    }
+
+    // ---- 名称 / 描述 ----
+    this.center(cxm, y + 146, up.name, 16, sold ? TXT_LIGHT.mute : TXT_LIGHT.main)
+    this.center(cxm, y + 166, fitText(up.desc, 12, cw - 22), 12, TXT_LIGHT.dim)
+
+    // ---- 状态行：**买了会发生什么**必须写死（玩家不该靠猜是"新武器"还是"强化"）----
+    let foot = ''
+    let footWarn = false
+    const evoBase = wid ? evolutionBase(wid) : null
+    if (wid && evoBase) {
+      // 进化卡要先拦下来：它是"把现役那台改造成新形态"，**不占新座位**
+      foot = `进化现役「${WEAPON_DEF[evoBase].name}」· 不占新座位`
+    } else if (wid) {
+      const held = w.weapons.filter(x2 => x2.id === wid).length
+      const cap = Math.min(w.maxWeapons, MAX_SEATS)
+      if (held === 0) foot = `新装备 · 占 1 座位（共 ${cap}）`
+      else if (w.weapons.length < cap) foot = `加装第 ${held + 1} 台 · 并联开火`
+      else { foot = '座位已满 · 并进现役升级'; footWarn = true }
+    } else if (up.id === 'w_all') {
+      foot = `${w.weapons.length} 台器械同时 +1 级`
+    } else if (up.kind === 'mount') {
+      foot = up.id === 't_twin' ? '扩容座射速 +25%'
+        : `座圈 ${w.maxWeapons} → ${up.id === 't_slot5' ? 5 : 6} 座`
+    } else if (up.kind === 'relic') {
+      foot = w.relics.length < RELIC_SLOTS
+        ? `占用遗物槽 ${w.relics.length + 1} / ${RELIC_SLOTS}` : '遗物槽已满'
+      footWarn = w.relics.length >= RELIC_SLOTS
+    }
+    if (foot) {
+      this.center(cxm, y + 186, fitText(foot, 12, cw - 20), 12,
+        sold ? TXT_LIGHT.mute : (footWarn ? TXT_LIGHT.warn : TXT_LIGHT.dim))
+    }
+
+    // 遗物代价**单独一行、告警色** —— 把它藏在描述里等于骗玩家，他会在第三波才发现氧气少了
+    if (up.kind === 'relic' && up.relicId) {
+      const cost2 = RELIC_DEF[up.relicId]?.cost2
+      if (cost2) {
+        this.center(cxm, y + 204, fitText(cost2, 12, cw - 20), 12,
+          sold ? TXT_LIGHT.mute : TXT_LIGHT.warn)
+      }
+    }
+
+    // ---- 价格 ----
+    this.center(cxm, y + 228, sold ? '已购买' : `${up.cost} 鱼骨`, 15,
+      sold ? TXT_LIGHT.mute : (afford ? TXT_LIGHT.main : TXT_LIGHT.warn))
+
+    // ---- 购买按钮（按类型色着色，与卡描边同色）----
+    this.button(cxm, y + ch - 24, cw - 28, 34,
+      sold ? '已售出' : (afford ? '购买' : '鱼骨不足'),
+      () => cbs.onBuy(i), !sold && afford,
+      (!sold && afford) ? lightBuyBtn(typeCol) : BTN_BRIGHT_DISABLED)
   }
 
   // -------------------------------------------------------------------------

@@ -143,6 +143,56 @@ export const MENU = {
   edge:     0x39455a,   // 中性描边（已售出 / 无类型色时用）
 } as const
 
+/**
+ * 亮色弹窗皮肤（V7「浅海」方向）。
+ *
+ * 与 `MENU`（暗色实底）并列 —— 菜单页有两套皮肤，按场景选：
+ *   · `MENU`   —— 暗色，用于战斗内的层入场卡等"不能跳出画面"的场合；
+ *   · `BRIGHT` —— 亮色，用于**商店**这种"玩家要停下来做决策"的整幅弹窗。
+ *
+ * ⚠️ 名字不能叫 `LIGHT`：`gameData.ts` 已有一个 `LIGHT`（关卡光照定义），
+ *    而 `shared/index.ts` 是 `export *` 重导出，同名会直接编译报 TS2308。
+ *
+ * 为什么商店要亮（用户原话：「我需要亮色的 现在画风很暗」）：
+ *   暗色实底面板在**明亮水层**（L1/L2）本来就吃亏 —— 一整块近黑把背景切走，
+ *   既是"全屏感"的来源，也让卡上的立绘失去参照。亮色面板则是"深海里的潜水终端"
+ *   这个直觉：面板自己发光、浮在水里，背景的海还在四周露出来。
+ *
+ * 明度阶梯（**卡内凹槽必须比卡面暗**，否则亮色立绘跳不出来）：
+ *   surface > card > slot      （header 介于 surface 与 card 之间）
+ * 对比由"实底 + 硬边"给，不靠发光 —— 发光会把边缘糊掉 2~3px，而那正是清晰感的来源。
+ */
+export const BRIGHT = {
+  scrim:   0x06121c,   // 底幕：**半透明**压暗（不是实黑），让深海透出来
+  surface: 0xeef7fb,   // 面板底（近白的水青）
+  header:  0xd8ecf6,   // 顶栏带
+  card:    0xffffff,   // 卡面实底
+  cardOff: 0xf2f7fa,   // 买不起的卡面（压一档，但仍亮）
+  slot:    0xdceaf2,   // 立绘 / 图标位（**比卡面深**）
+  lockHi:  0xfff3d9,   // 已锁定：琥珀浅底
+  edge:    0x8fb9cd,   // 中性描边
+  divider: 0xc2dbe7,   // 卡内分隔
+  // 类型色（亮底上要压深才够对比 —— 直接拿霓虹色会在白底上"化开"）
+  weapon:  0x0e8fb5,   // 器械
+  mount:   0xc47a00,   // 挂载
+  stat:    0x7048cf,   // 属性
+  relic:   0x0e9b8e,   // 遗物
+  // 主操作色（"继续"这种主按钮），比 weapon 再亮一档以便承载白字
+  accent:     0x0fa8cf,
+  accentEdge: 0x0b7a97,
+} as const
+
+/** 亮色弹窗的文字色（对应 `BRIGHT`） */
+export const TXT_LIGHT = {
+  main:   '#0d2b3a',   // 主文字（深藏青，12px 以下也清楚）
+  dim:    '#43647a',   // 次要
+  mute:   '#7d97a8',   // 禁用
+  accent: '#0a7d9e',   // 强调（比 LIGHT.weapon 再深一档，用于数字）
+  warn:   '#cd3f66',   // 买不起 / 危险
+  good:   '#0e8f7a',   // 成功
+  onAccent: '#ffffff', // 主按钮上的文字
+} as const
+
 export const FONT = "'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif"
 /** 等宽 numerals —— 数值跳动时整行不会左右抖动 */
 export const MONO = "'DIN Alternate', 'Roboto Mono', ui-monospace, monospace"
