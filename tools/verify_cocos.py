@@ -2,14 +2,17 @@
 # -*- coding: utf-8 -*-
 """Cocos 侧**离线**验证（不需要 GUI 编辑器）。
 
-一条命令跑六件事：
+一条命令跑七件事：
   1. 真源漂移检查 —— `shared/` 与 `cocos/assets/scripts/shared/` 是否一致；
-  2. 模拟核心无头冒烟 —— 编译 `shared/dive` 为 CJS 真跑，21 条不变量断言；
+  2. 模拟核心无头冒烟 —— 编译 `shared/dive` 为 CJS 真跑，31 条不变量断言；
   3. 视图层类型检查 —— 把 `cocos/assets/scripts/**` 全量过 tsc；
   4. 美术完整性 —— 源图与 cocos 副本是否一致，以及**代码会去要的每个 key
      在磁盘上是否真有对应文件**（反向也查残留）；
   5. 工程资源完整性 —— 场景/prefab 的 `__id__` 引用、`_id` 唯一性，以及
-     **脚本类 id ↔ .ts.meta uuid** 是否对得上（压缩 uuid 算法错了就红在这）。
+     **脚本类 id ↔ .ts.meta uuid** 是否对得上（压缩 uuid 算法错了就红在这）；
+  6. 模块图自检 —— 源码里每条相对 import 都能命中磁盘上的真实模块，且**编辑器
+     增量编译的解析表里没有未解析项**。最后这条专门堵"源码全对、编辑器里却全黑"
+     这种假绿（2026-10-13 真的踩到过，见 check_module_graph 的注释）。
 
 ------------------------------------------------------------------------------
 第 3 步用哪份 `cc` 声明：优先用**引擎自带的那份**
@@ -45,6 +48,7 @@
 import glob
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -361,6 +365,132 @@ def check_art():
     return 0
 
 
+COCOS_DIR = os.path.join(ROOT, 'cocos')
+_RESOLUTION_MAP = os.path.join(
+    COCOS_DIR, 'temp', 'programming', 'packer-driver', 'targets', 'editor',
+    'resolution-detail-map.json')
+
+# 相对模块说明符：`import … from 'x'` / `export … from 'x'`。本项目不用裸说明符
+# （除了 'cc' 与 'cc/env'），所以只查相对路径。
+_FROM_RE = re.compile(r"""\bfrom\s*['"]([^'"]+)['"]""")
+# 扫描前必须剥掉注释 —— 否则**文档里的示例代码**会被当成真 import（实测踩到：
+# itemArt.ts / subs.ts 的注释里各写了一句 `import X from '...png'` 做对照说明）。
+_BLOCK_COMMENT_RE = re.compile(r'/\*.*?\*/', re.S)
+_LINE_COMMENT_RE = re.compile(r'^\s*//.*$', re.M)
+
+
+def _strip_comments(text):
+    """只剥"块注释"和"整行以 // 开头"的行注释。
+
+    为什么不像语法分析那样剥掉所有 `//`：`https://…` 这类字符串会被砍成半截。
+    代价是"代码行尾的注释"里如果正好写了 `from 'x'` 仍会误报 —— 本项目没有这种写法，
+    真出现了也会立刻红在这一阶段，不会静默。
+    """
+    text = _BLOCK_COMMENT_RE.sub('', text)
+    return _LINE_COMMENT_RE.sub('', text)
+
+
+def _resolve_spec(base_dir, spec):
+    """把相对说明符解析到一个真实存在的 .ts 文件；解析不到返回 None。
+
+    候选顺序照 Cocos/TS 的惯例：原样 → 补 `.ts` → 当目录取 `index.ts`。
+    源码里写 `.js`（ESM 风格）时要先把后缀摘掉再试 —— Creator 的 packer 也是这么做的。
+    """
+    p = os.path.normpath(os.path.join(base_dir, spec))
+    if spec.endswith('.js'):
+        p = p[:-3]
+    for c in (p, p + '.ts', os.path.join(p, 'index.ts')):
+        if os.path.isfile(c):
+            return c
+    return None
+
+
+def check_module_graph():
+    """模块图自检。
+
+    两条独立检查，射程不同、缺一不可：
+      ① **静态**：`assets/scripts/**/*.ts` 里每条相对 import 都能在磁盘上命中。
+         抓的是"引用了还没建/没同步过来的文件"。
+      ② **产物**：编辑器增量编译留下的解析表里 **不允许有 `__unresolved_*` 条目**。
+         抓的是"文件后来出现了，但增量编译没有回头重解析"。
+
+    --------------------------------------------------------------------------
+    为什么必须加这一阶段（2026-10-13 真实事故，前 5 个阶段**全是绿的**）
+    --------------------------------------------------------------------------
+    在 Creator 已经打开工程时新增了一个被 import 的模块（`shared/dive/profile.ts`），
+    而 importer（`view/save.ts`）在模块还不存在时**已经被编译过一次** —— 那次解析
+    失败，于是 importer 没被登记成 `profile.ts` 的依赖方。5 分钟后模块出现在磁盘上，
+    但**没有任何东西会去触发 importer 重编译**，它就带着那条失败的 import 一直躺在缓存里。
+
+    后果不是"少个特效"，而是整条链断掉：`save.ts` 加载失败 → `DiveGame.ts` 的
+    import 链断 → 场景里挂的 `DiveGame` 组件变成 `Missing class` →
+    **编辑器里一片全黑，且控制台只说是"脚本缺失"**。而本脚本当时报 6/6 全绿。
+
+    也就是说：**这一阶段补的是一个"假绿"缺口**，不是一个新的功能检查。
+    注意第 ② 条要求编辑器至少编译过一次本工程（`temp/` 存在）；没跑过就只能查第 ① 条。
+    """
+    problems = []
+
+    # ---- ① 静态：源码 vs 磁盘 ----
+    scripts_dir = os.path.join(COCOS_ASSETS, 'scripts')
+    n_checked = 0
+    for dirpath, _dirs, files in os.walk(scripts_dir):
+        for name in files:
+            if not name.endswith('.ts'):
+                continue
+            path = os.path.join(dirpath, name)
+            with open(path, encoding='utf-8') as fh:
+                text = _strip_comments(fh.read())
+            for spec in _FROM_RE.findall(text):
+                if not spec.startswith('.'):
+                    continue          # 'cc' 之类的内置模块，不归我们管
+                n_checked += 1
+                if not _resolve_spec(dirpath, spec):
+                    rel = os.path.relpath(path, COCOS_DIR)
+                    problems.append(f'{rel} 里的 import "{spec}" 在磁盘上找不到对应文件')
+
+    # ---- ② 产物：编辑器的解析表 ----
+    artifact_note = ''
+    if os.path.isfile(_RESOLUTION_MAP):
+        try:
+            with open(_RESOLUTION_MAP, encoding='utf-8') as fh:
+                table = json.load(fh)
+        except Exception as e:                                  # noqa: BLE001
+            artifact_note = f'解析表读不动（{e}），产物检查跳过'
+        else:
+            for chunk, recs in table.items():
+                if not isinstance(recs, dict):
+                    continue
+                for key, rec in recs.items():
+                    if '__unresolved' not in str(key):
+                        continue
+                    msg = rec.get('error', '') if isinstance(rec, dict) else str(rec)
+                    problems.append(
+                        f'编辑器编译产物里仍有未解析的 import（chunk {chunk}）：{msg.splitlines()[0]}')
+    else:
+        artifact_note = '未找到 packer-driver 解析表（编辑器还没编译过本工程），产物检查跳过'
+
+    if problems:
+        for p in problems:
+            print(f'  ✗ {p}')
+        if any('未解析' in p for p in problems):
+            print('    → 这一类是**增量编译的旧账**：该 importer 在模块还不存在时被编译过一次，'
+                  '失败的那条边没登记依赖，于是永远不会自动重编译。')
+            print('      解法：改动一下那个 importer 文件（或删掉 cocos/temp/programming 让它全量重建），'
+                  '让编辑器重新解析。')
+        if artifact_note:
+            print(f'    （{artifact_note}）')
+        steps.append(('模块图自检', 1))
+        return 1
+
+    if artifact_note:
+        print(f'  ! {artifact_note}')
+    print(f'\n  ✓ 模块图自洽：{n_checked} 条相对 import 全部命中磁盘上的真实模块，'
+          '且编辑器产物里没有未解析项')
+    steps.append(('模块图自检', 0))
+    return 0
+
+
 def main():
     print(f'使用 node：{NODE}')
 
@@ -409,6 +539,10 @@ def main():
 
     # 5) 工程资源：场景引用、脚本类 id、压缩 uuid
     check_assets()
+
+    # 6) 模块图：源码里的相对 import 是否都能命中，以及编辑器产物里有没有未解析项
+    #    这一阶段补的是"假绿"缺口 —— 详见函数注释里记的那次真实事故。
+    check_module_graph()
 
     print('\n' + '=' * 72)
     bad = 0

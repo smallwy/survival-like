@@ -30,12 +30,12 @@
  *     ├ bg        Sprite   环境背景图（cover 铺满世界，按层换图）
  *     ├ gBg       Graphics 底色 + 海雪
  *     ├ gVeil     Graphics 环境色调 + 压暗 + 暗角 + 屏幕边框（**必须低于实体**）
- *     ├ gBack     Graphics 酸液 / 鱼骨 / 声呐波前 / 回声标记 / 爆炸环
- *     ├ gEnt      Graphics 敌人矢量 + 子弹
+ *     ├ gBack     Graphics 酸液 / 鱼骨 / 声呐波前 / 回声标记 / 爆炸环（**鱼之下**）
  *     ├ fishLayer Node     敌人贴图池
+ *     ├ gEnt      Graphics 敌人矢量 + 子弹 + 发光核心（**必须鱼之上**，见 buildNodes 的注释）
  *     ├ subNode   Sprite   潜航器机体
  *     ├ gPlayer   Graphics 玩家矢量件（座圈/炮塔/探照灯）+ Boss 血条
- *     └ gFront    Graphics 打击特效 / 火花 / 电弧
+ *     └ gFront    Graphics 受击白闪 / 打击特效 / 火花 / 电弧
  *   Canvas
  *     ├ Hud                   战斗 HUD 与三个弹窗（见 Hud.ts）
  *     └ Title                 主界面（见 Title.ts；战斗期间整根隐藏）
@@ -111,6 +111,15 @@ interface FloatFx { x: number; y: number; vy: number; life: number; text: string
 interface Mote { x: number; y: number; r: number; vy: number }
 /** 贴图池里的一条：`key` 让它能被同种敌人复用（与 web 的 fishPool 同构） */
 interface Fish { sp: Sprite; key: string }
+/**
+ * 受击白闪的覆盖层标记（本帧）。
+ *
+ * 为什么需要一个中间结构：白闪要**盖在鱼身之上**才看得见，而敌人自己画在 `gEnt`
+ * —— 那一层在 `fishLayer`（鱼贴图）**之下**，画上去会被鱼身挡住。
+ * 所以 `drawEnemies` 只登记位置与透明度，真正绘制挪到 `drawFx`（`gFront`，全场最高层）
+ * 的**开头**，与 web 的层序一致：鱼的白色剪影 < 冲击波 < 击打痕 < 火花。
+ */
+interface FlashMark { x: number; y: number; r: number; alpha: number }
 
 const SHOCK_CAP = 64
 const SLASH_CAP = 48
@@ -191,6 +200,8 @@ export class DiveGame extends Component {
   private blasts: BlastFx[] = []
   private floatSlots: Array<FloatFx | null> = new Array(FLOAT_CAP).fill(null)
   private motes: Mote[] = []
+  /** 本帧的受击白闪（drawEnemies 登记 → drawFx 消费，见 FlashMark 的注释） */
+  private flashMarks: FlashMark[] = []
 
   // ---- 输入 ----
   private keys: Record<string, boolean> = {}
@@ -347,10 +358,19 @@ export class DiveGame extends Component {
 
     this.gBg = this.mkWrapped('gBg', this.worldRoot)
     this.gVeil = this.mkWrapped('gVeil', this.worldRoot)
+    // gBack：地面性质的东西（酸液云 / 鱼骨 / 声呐波前 / 爆炸环）—— 画在鱼**之下**。
+    // web 的原话："声呐波前画在敌人之下，避免一圈圈环把鱼群剪影盖住"。
     this.gBack = this.mkWrapped('gBack', this.worldRoot)
-    this.gEnt = this.mkWrapped('gEnt', this.worldRoot)
 
     this.fishLayer = this.mkNode('fishLayer', this.worldRoot)
+
+    // ⚠️ gEnt 必须排在 fishLayer **之后**。
+    //    它装的是敌人矢量剪影、子弹，以及每条约鱼那枚 2px 发光核心 ——
+    //    核心是"每条鱼都能被定位"的铁律（远距离只剩一个点时全靠它），**必须压在贴图之上**；
+    //    子弹同理（web 的规矩："玩家的攻击必须看得见"）。
+    //    放在 fishLayer 之前不会报任何错，只会让每条大鱼的贴图精准地盖住自己的定位核心 ——
+    //    在 L3-L5 那种深色层里最要命（鱼和背景本来就糊成一片）。
+    this.gEnt = this.mkWrapped('gEnt', this.worldRoot)
 
     this.subNode = this.mkNode('sub', this.worldRoot).addComponent(Sprite)
     this.subNode.trim = false
@@ -644,8 +664,10 @@ export class DiveGame extends Component {
    *   ② 体型太小（显示尺寸 < 26px）：**水母贴图 60% 面积是细触须**，
    *      缩到 14px 后触须和伞盖糊成一团白，屏幕上就是"一颗白色小飞虫" ——
    *      贴图的优势是细节，细节在小尺寸上反而变成噪声；
-   *   ③ 命中闪白：贴图是乘色混合，白不了。web 用 `setTintFill` 烧成纯白剪影，
-   *      Cocos 的 Sprite 没有等价的 tintFill，所以闪白这一帧退回矢量白色剪影。
+   *   ③ 命中闪白：贴图是乘色混合，白不了 —— web 用 `setTintFill` 把贴图整个烧成纯白剪影，
+   *      Cocos 的 Sprite 没有等价的 tintFill。**但补救办法不是把贴图换成矢量三角**
+   *      （那会得到一颗白色实心三角，见 drawEnemies 里的注释），
+   *      而是照 web 矢量路径的做法：贴图留着，另外叠一层白色椭圆闪光（见 flashMarks）。
    */
   private fishSprite(e: Enemy): Sprite | null {
     if (!this.artLoaded) return null
@@ -1042,6 +1064,7 @@ export class DiveGame extends Component {
    */
   private drawEnemies(w: DiveWorld): void {
     this.hideFish()
+    this.flashMarks.length = 0        // 本帧重新登记（上一帧的已由 drawFx 消费掉）
     const n = w.enemies.length
     const lod = n > 80 ? 2 : n > 40 ? 1 : 0
     const darkLayer = w.layer().vis < 0.5
@@ -1053,7 +1076,13 @@ export class DiveGame extends Component {
       // ⚠️ 本地变量不要叫 `col` —— 会遮蔽从 Gfx 导入的同名颜色构造函数。
       const body = charging ? UI.danger : (e.flash > 0 ? 0xffffff : e.color)
       const face = Math.atan2(w.py - e.y, w.px - e.x)
-      const sp = e.flash > 0 ? null : this.fishSprite(e)
+      // ⚠️ 闪白**绝不能**把贴图置空。曾经写成 `e.flash > 0 ? null : this.fishSprite(e)`，
+      //    于是命中那一瞬间掉进下面的矢量兜底 → `fillTri` → 屏幕上变成一颗**白色实心三角**，
+      //    既认不出是鱼、也读不出"打中了哪一条"。
+      //    Cocos 的 Sprite 是乘色混合、没有 web 的 `setTintFill`（能把贴图烧成纯白剪影），
+      //    但那不该以"换成三角"为代价 —— 现在与 web 的矢量路径同构：
+      //    **鱼身照常留着，另外在它上面叠一层白色椭圆闪光**。
+      const sp = this.fishSprite(e)
 
       if (sp) {
         sp.node.setPosition(e.x, this.H - e.y)
@@ -1063,7 +1092,9 @@ export class DiveGame extends Component {
         // web 明确否掉了"暗色实心椭圆衬底"那版 —— 衬底比小鱼还大，把鱼盖成亮斑。
         if (darkLayer && lod < 2) {
           this.gEnt.line(charging ? UI.danger : e.color, 0.62, 1.4)
-          this.gEnt.strokeEllipse(e.x, e.y, e.r * 2.05, e.r * 1.5)
+          // ⚠️ `Gfx.ellipse` 收的是**半轴**，而 web 的 `strokeEllipse` 收的是**直径** ——
+          //    照抄 web 数值必须 ÷2。曾漏掉这一步，这个环一直比设计值大一倍。
+          this.gEnt.strokeEllipse(e.x, e.y, (e.r * 2.05) / 2, (e.r * 1.5) / 2)
         }
       } else {
         // 矢量兜底（美术未就绪 / 太小 / 太多 / 闪白那一帧）
@@ -1081,6 +1112,12 @@ export class DiveGame extends Component {
       // 发光核心：铁律，必须画在贴图之上
       this.gEnt.fill(body, 1)
       this.gEnt.fillCircle(e.x, e.y, 2)
+
+      // 受击白闪：只登记，绘制在 drawFx 开头（那才在鱼身之上）。
+      // 透明度公式与 web 逐字一致：Clamp(flash / 0.09, 0, 1) * 0.62
+      if (e.flash > 0) {
+        this.flashMarks.push({ x: e.x, y: e.y, r: e.r, alpha: Math.min(1, e.flash / 0.09) * 0.62 })
+      }
     }
   }
 
@@ -1152,6 +1189,20 @@ export class DiveGame extends Component {
   }
 
   private drawFx(): void {
+    // ---- 受击白闪最先画 ----
+    // web 的层序是「鱼的白色剪影 < 冲击波 < 击打痕 < 火花」，闪白属于敌人那一层，
+    // 所以它必须排在冲击波之前 —— 被冲击波压住就看不出"是这条鱼挨打了"。
+    for (const m of this.flashMarks) {
+      this.gFront.fill(0xffffff, m.alpha)
+      // ⚠️ 半轴：web 的 `fillEllipse` 收直径（e.r*2.3 × e.r*1.7），这里必须 ÷2。
+      this.gFront.ellipse(m.x, m.y, (m.r * 2.3) / 2, (m.r * 1.7) / 2)
+      this.gFront.fillPath()
+    }
+    // 消费掉：下一帧由 drawEnemies 重新登记。放在这里而不是 clearFx，
+    // 是因为非战斗相位（商店/结算）不会调 drawEnemies —— 靠"消费"而不是"清理"
+    // 才能保证这一帧画的一定是这一帧登记的那批，不留幻影。
+    this.flashMarks.length = 0
+
     for (const s of this.shocks) {
       const k = Math.max(0, s.life / s.maxLife)
       const wdt = s.width * (0.4 + 0.6 * k)

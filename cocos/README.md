@@ -277,7 +277,7 @@ HUD 挂在 Canvas 下、是世界根节点的**兄弟**，天然不跟着缩。
 ## 验证：能证明什么、不能证明什么
 
 ```bash
-python tools/verify_cocos.py      # 一条命令，6 个阶段
+python tools/verify_cocos.py      # 一条命令，7 个阶段
 ```
 
 | 阶段 | 内容 |
@@ -288,6 +288,10 @@ python tools/verify_cocos.py      # 一条命令，6 个阶段
 | 视图层类型检查 | `cocos/assets/scripts/**` 全量过 `tsc --strict`，**优先用引擎自带的 `cc.d.ts`** |
 | 美术完整性 | 源↔副本哈希一致；代码会去要的每个 key 在磁盘上都有（反向也查残留） |
 | 工程资源完整性 | 场景 `__id__` 引用、`_id` 唯一性、**脚本类 id ↔ `.ts.meta` uuid 是否对得上**、压缩 uuid 算法往返自检 |
+| 模块图自检 | 源码里每条相对 import 都能命中磁盘上的真实模块；且**编辑器增量编译的解析表里没有 `__unresolved_*`** |
+
+最后这一条是**专门堵假绿**的：它抓的正是"源码全对、编辑器里却全黑"（见「已知坑」第 16 条）。
+其中"产物那一半"要求编辑器至少编译过一次本工程（`temp/` 存在），没跑过就只能查静态那一半。
 
 ### 类型检查优先用**引擎真声明**，这件事很关键
 
@@ -423,6 +427,35 @@ python tools/verify_cocos.py      # 一条命令，6 个阶段
     （`view/neon.ts` 的 `neon()` 就是这么做的）；反过来，不 `clear()` 就画下一帧，
     上一帧的图形会原地留着 —— 这是切界面时"上一局的画面没消失"的原因
     （`DiveGame.update` 的标题分支必须照样 `clear()` 各层）。
+16. **在编辑器运行时"新增一个被 import 的模块"，会留下一个死结：编辑器里全黑，
+    而上面 7 个阶段全是绿的。**（2026-10-13 真实踩到）
+    机制：Creator 的增量编译在**解析失败时不登记依赖边**。于是那个 importer 永远
+    不会因为新模块出现而被重编译，它带着那条失败的 import 一直躺在缓存里。
+    链式后果：`view/save.ts` 加载失败 → `DiveGame.ts` 的 import 链断 → 场景里挂的
+    组件变成 `Missing class` → **一片全黑**（控制台只说"脚本缺失"，不说是哪条 import 断的）。
+    实际经过：`save.ts` 于 12:44 编译，**当时 `shared/dive/profile.ts` 还没同步到磁盘**；
+    12:45 文件到位，但 `save.ts` 的 chunk 一直停在 12:44 那一版。
+    · **判据**：`cocos/temp/programming/packer-driver/targets/editor/resolution-detail-map.json`
+      里的 `__unresolved_*` 条目 —— 这是那个死结**唯一的留痕**，
+      现在 `verify_cocos.py` 的「模块图自检」阶段会直接红在这。
+    · **解法**：改一下那个 importer 文件的**内容**（不是 `touch`），或删掉
+      `cocos/temp/programming` 让它全量重建。
+    · **不对称性**：**修改**一个已存在的文件总会触发重编译（依赖边是完整的），
+      所以这个坑只出现在"**新**文件"上 —— 顺序务必"先落文件、再写引用"。
+17. **椭圆半径/直径的坑会复发**（第 13 条的具体案例）。2026-10-13 又抓到两处
+    照抄 web 数值没 `÷2` 的：`drawEnemies` 的深层描边环、以及受击白闪椭圆。
+    根因是 `Gfx.ellipse` 把参数命名成 `rx/ry` 也**拦不住**"照着 web 的数字搬"。
+    规则：从 `web/src/` 抄任何 `*Ellipse(w, h)` 的数值，**落地时必须 `÷2`**。
+18. **兄弟节点的顺序就是绘制顺序**（文件头那张节点树图就是设计）。调整顺序时
+    **同步改文件头**，否则注释会开始撒谎。2026-10-13 抓到一次：注释写着
+    "发光核心必须画在贴图之上"，而 `gEnt`（发光核心所在层）却排在 `fishLayer`
+    **之前** —— 每条鱼的定位核心被自己的贴图精准盖住。**放反了不报错**，
+    只在 L3-L5 深色层里表现为"小鱼看不见"。
+19. **Creator 打开工程时会"规范化重写" `Dive.scene`**：补全 `_lpos/_lrot/_lscale/
+    _mobility/_layer/_euler/__editorExtras__` 等默认字段并重排 `__id__`
+    （本次 +142/−69 行）。这是预期行为，**直接入库**即可，入库后再次打开就不会再抖。
+    但由此 `tools/gen_cocos_scene.py` 只用于**新建**场景 —— 它是脚手架，
+    不再等于仓库里这份（别拿它去"重新生成"已有场景）。
 
 ---
 
@@ -436,7 +469,7 @@ python tools/verify_cocos.py      # 一条命令，6 个阶段
 | `tools/sync_shared.py` | 逻辑真源 → Cocos 副本同步 + 漂移检查 |
 | `tools/sync_art.py` | 美术真源 → `cocos/assets/resources` 同步（含 webp→PNG、立绘降采样） |
 | `tools/art_manifest.json` | 美术同步清单（源/目标双哈希，供 `--check` 双向核对） |
-| `tools/verify_cocos.py` | Cocos 侧离线验证总入口（6 阶段，含真 `cc.d.ts` 类型检查） |
+| `tools/verify_cocos.py` | Cocos 侧离线验证总入口（7 阶段，含真 `cc.d.ts` 类型检查 + 模块图自检） |
 | `tools/dive_sim_smoke.js` | 模拟核心无头冒烟（31 条断言） |
 | `tools/cocos_cc_stub.d.ts` | `cc` 最小声明桩（**仅在找不到引擎安装时兜底**，非引擎类型） |
 | `tools/cocos_uuid.py` | Cocos 压缩 uuid 算法（与编辑器严格互逆，带自检） |

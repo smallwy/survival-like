@@ -22,9 +22,22 @@ import type { Profile } from '../shared/dive/profile'
 /** 带版本号的 key：将来结构大改时可以并存 key，而不是原地覆盖旧档 */
 const KEY = 'sgr.profile.v1'
 
+/**
+ * 取本地存储。Web 上就是 `window.localStorage`，原生平台落到各平台实现。
+ *
+ * 但**它不一定可用**：隐私模式 / 原生平台未初始化时可能是 undefined，个别平台
+ * 取属性本身就会抛。所以这里统一收口成一个可空返回值 —— 拿不到就整体降级为
+ * "没有存档"，而不是让开局的读档把整个游戏带崩。
+ */
+function store(): Storage | null {
+  try { return sys.localStorage || null } catch { return null }
+}
+
 export function loadProfile(): Profile {
   try {
-    const raw = sys.localStorage.getItem(KEY)
+    const ls = store()
+    if (!ls) return defaultProfile()
+    const raw = ls.getItem(KEY)
     if (!raw) return defaultProfile()
     return normalizeProfile(JSON.parse(raw))
   } catch (e) {
@@ -36,7 +49,9 @@ export function loadProfile(): Profile {
 /** @returns 是否真的写进去了（写失败只影响"纪录没留下"，调用方无需特殊处理） */
 export function saveProfile(p: Profile): boolean {
   try {
-    sys.localStorage.setItem(KEY, JSON.stringify(p))
+    const ls = store()
+    if (!ls) return false
+    ls.setItem(KEY, JSON.stringify(p))
     return true
   } catch (e) {
     console.warn('[save] 存档失败（本局纪录未留下）：', e)
