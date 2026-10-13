@@ -27,8 +27,9 @@
  * 节点树与绘制顺序（顺序本身就是设计，别随手调）
  * ---------------------------------------------------------------------------
  *   WorldRoot                       ← 锚点(0,0)、尺寸 W×H、位置 (-W/2,-H/2)
+ *     ├ gBase     Graphics 不透明底色（外扩铺满）—— **必须在背景图之下**
  *     ├ bg        Sprite   环境背景图（cover 铺满世界，按层换图）
- *     ├ gBg       Graphics 底色 + 海雪
+ *     ├ gBg       Graphics 海雪（**在背景图之上**）
  *     ├ gVeil     Graphics 环境色调 + 压暗 + 暗角 + 屏幕边框（**必须低于实体**）
  *     ├ gBack     Graphics 酸液 / 鱼骨 / 声呐波前 / 回声标记 / 爆炸环（**鱼之下**）
  *     ├ fishLayer Node     敌人贴图池
@@ -82,6 +83,7 @@ import {
   input, Input, EventKeyboard, KeyCode,
 } from 'cc'
 import { Gfx, col } from './Gfx'
+import { neon, neonLine, neonCircle } from './neon'
 import { Hud } from './Hud'
 import { Title } from './Title'
 import { SpriteBank, frameAspect } from './art'
@@ -104,7 +106,11 @@ const { ccclass, property } = _decorator
 // ---------------------------------------------------------------------------
 interface Shock { x: number; y: number; r: number; rMax: number; life: number; maxLife: number; color: number; width: number; core: number; rings: number; ringDelay: number }
 interface Slash { x: number; y: number; ang: number; len: number; life: number; maxLife: number; color: number; width: number }
-interface Spark { x: number; y: number; vx: number; vy: number; life: number; maxLife: number; color: number; size: number; kind: 'hit' | 'flash' }
+/**
+ * 火星。`ang` 是**自己的飞行方向** —— 命中火星要沿它拉成短条（"溅"不是"点"），
+ * 枪口闪光要用它画朝弹道方向的锥形亮弧。缺了它这两个都退化成"圆点"，看不出方向。
+ */
+interface Spark { x: number; y: number; vx: number; vy: number; life: number; maxLife: number; color: number; size: number; ang: number; kind: 'hit' | 'flash' }
 interface ArcFx { pts: Array<{ x: number; y: number }>; life: number }
 interface BlastFx { x: number; y: number; r: number; life: number }
 interface FloatFx { x: number; y: number; vy: number; life: number; text: string; color: number; size: number; delay: number; label: Label }
@@ -168,6 +174,8 @@ export class DiveGame extends Component {
   // ---- 节点 ----
   private worldRoot!: Node
   private bgNode!: Sprite
+  /** 不透明底色（最底层）。**不能并进 gBg** —— gBg 在背景图之上，会把它盖死 */
+  private gBase!: Gfx
   private gBg!: Gfx
   private gVeil!: Gfx
   private gBack!: Gfx
@@ -200,6 +208,8 @@ export class DiveGame extends Component {
   private blasts: BlastFx[] = []
   private floatSlots: Array<FloatFx | null> = new Array(FLOAT_CAP).fill(null)
   private motes: Mote[] = []
+  /** 表现层计时器（鱼雷气泡尾迹的正弦摆动等用；与 sim 的时间无关） */
+  private fxT = 0
   /** 本帧的受击白闪（drawEnemies 登记 → drawFx 消费，见 FlashMark 的注释） */
   private flashMarks: FlashMark[] = []
 
@@ -351,11 +361,19 @@ export class DiveGame extends Component {
     this.worldRoot.setPosition(-this.W / 2, -this.H / 2)
 
     // 顺序即绘制顺序（见文件头节点树）
+    // ⚠️ gBase（不透明底色）**必须排在 bg 之前**。它等价于 web 的 `main.ts`
+    //    里 `backgroundColor:'#04070d'`（画布清屏色）—— 在所有东西之下。
+    //    曾经把"铺满全屏的 UI.abyss 纯色"并进 gBg 画：而 gBg 排在背景图**之后**，
+    //    于是那层不透明色正好把 env 背景图整个盖死，屏幕上只剩纯深蓝 + 星星。
+    this.gBase = this.mkWrapped('gBase', this.worldRoot)
+
     this.bgNode = this.mkNode('bg', this.worldRoot).addComponent(Sprite)
     this.bgNode.trim = false                         // 保留透明边，cover 计算才准
     this.bgNode.sizeMode = Sprite.SizeMode.CUSTOM    // 尺寸由 cover 计算显式给
     this.bgNode.node.active = false                  // 没图就不参与渲染
 
+    // gBg：海雪。**在背景图之上**才是对的（雪是"我在水里"的近景证据，
+    // 压在背景图下面等于看不见），但绝不能在这里画不透明底色。
     this.gBg = this.mkWrapped('gBg', this.worldRoot)
     this.gVeil = this.mkWrapped('gVeil', this.worldRoot)
     // gBack：地面性质的东西（酸液云 / 鱼骨 / 声呐波前 / 爆炸环）—— 画在鱼**之下**。
@@ -450,7 +468,7 @@ export class DiveGame extends Component {
     // （Graphics 是累积顶点，不 clear 就一直画）。
     if (!this.started) {
       this.title.update(dt)
-      this.gBg.clear(); this.gVeil.clear(); this.gBack.clear()
+      this.gBase.clear(); this.gBg.clear(); this.gVeil.clear(); this.gBack.clear()
       this.gEnt.clear(); this.gPlayer.clear(); this.gFront.clear()
       this.hud.begin()
       return
@@ -466,7 +484,7 @@ export class DiveGame extends Component {
     this.syncBg(w)               // 换层换背景（只在 layerIdx 变化时真正干活）
     this.updateCamera(dt)
 
-    this.gBg.clear(); this.gVeil.clear(); this.gBack.clear()
+    this.gBase.clear(); this.gBg.clear(); this.gVeil.clear(); this.gBack.clear()
     this.gEnt.clear(); this.gPlayer.clear(); this.gFront.clear()
 
     this.drawBg(w, dt)
@@ -801,6 +819,7 @@ export class DiveGame extends Component {
     if (this.slashes.length > SLASH_CAP) this.slashes.splice(0, this.slashes.length - SLASH_CAP)
   }
 
+  /** 命中火星：沿弹道方向的反向**扇形迸溅 ±43°**（不是全向散，全向散读不出打击方向） */
   private pushSparks(x: number, y: number, baseAng: number, color: number, n: number): void {
     for (let i = 0; i < n; i++) {
       const a = baseAng + (Math.random() - 0.5) * 1.5
@@ -808,7 +827,7 @@ export class DiveGame extends Component {
       this.sparks.push({
         x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
         life: 0.14 + Math.random() * 0.1, maxLife: 0.24,
-        color, size: 1.3 + Math.random() * 1.5, kind: 'hit',
+        color, size: 1.3 + Math.random() * 1.5, ang: a, kind: 'hit',
       })
     }
     this.trimSparks()
@@ -821,19 +840,28 @@ export class DiveGame extends Component {
       this.sparks.push({
         x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
         life: 0.2 + Math.random() * 0.22, maxLife: 0.42,
-        color: i % 3 === 0 ? 0xffffff : color, size: size + Math.random() * 1.6, kind: 'hit',
+        color: i % 3 === 0 ? 0xffffff : color, size: size + Math.random() * 1.6, ang: a, kind: 'hit',
       })
     }
     this.trimSparks()
   }
 
+  /**
+   * 枪口闪光（web 的 `spawnMuzzleFlash`）：**锥形亮弧 + 中心白核**，
+   * 喷在**炮口位置**而不是机体中心 —— 中心喷会看不出是哪台武器开的火。
+   * 再加 3 颗朝弹道方向的小火星，让"火力从这出去"更实。
+   */
   private pushMuzzle(x: number, y: number, ang: number, color: number): void {
+    this.sparks.push({
+      x, y, vx: 0, vy: 0,
+      life: 0.11, maxLife: 0.11, color, size: 7, ang, kind: 'flash',
+    })
     for (let i = 0; i < 3; i++) {
-      const a = ang + (Math.random() - 0.5) * 0.5
-      const sp = 120 + Math.random() * 120
+      const a = ang + (Math.random() - 0.5) * 0.7
+      const sp = 70 + Math.random() * 90
       this.sparks.push({
         x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
-        life: 0.08, maxLife: 0.08, color, size: 1.6 + Math.random(), kind: 'flash',
+        life: 0.16, maxLife: 0.16, color, size: 1.4 + Math.random() * 1.2, ang: a, kind: 'hit',
       })
     }
     this.trimSparks()
@@ -886,6 +914,7 @@ export class DiveGame extends Component {
   }
 
   private stepFx(dt: number): void {
+    this.fxT += dt
     for (const s of this.shocks) { s.life -= dt; s.r = s.rMax * (1 - Math.max(0, s.life / s.maxLife)) }
     this.shocks = this.shocks.filter(s => s.life > 0)
 
@@ -900,10 +929,12 @@ export class DiveGame extends Component {
 
     for (const s of this.sparks) {
       s.life -= dt
+      if (s.kind !== 'hit') continue        // 枪口闪光原地不动
       s.x += s.vx * dt
       s.y += s.vy * dt
-      s.vx *= 0.90
-      s.vy *= 0.90
+      // 水的阻尼：火星在水里很快就停（web 的 1 - 3.4*dt）。dt 上限 0.05 → 系数 ≥0.83，不会翻号。
+      s.vx *= 1 - 3.4 * dt
+      s.vy *= 1 - 3.4 * dt
     }
     this.sparks = this.sparks.filter(s => s.life > 0)
 
@@ -921,15 +952,21 @@ export class DiveGame extends Component {
   // =========================================================================
   // 绘制
   // =========================================================================
-  /** 底色 + 海雪。（背景图与压暗各由一个节点负责，见节点树） */
+  /**
+   * 不透明底色（gBase）+ 海雪（gBg）。
+   *
+   * ⚠️ 两件事必须分两层：底色进 `gBase`（在背景图之下），海雪进 `gBg`（在背景图之上）。
+   *    早期把两者都塞进 `gBg`，而 `gBg` 排在背景图之后 —— 那层不透明的
+   *    `UI.abyss` 就把 env 背景图整体盖住了，"背景图不显示"就是这么来的。
+   */
   private drawBg(w: DiveWorld, dt: number): void {
     // 底 + 外扩：设计分辨率宽高比与 W×H 不一致时，屏幕边缘会露出清屏色的一条
     // 细带（只在某些机型上出现，最难查的那类 bug）。所以按可视区外扩。
     const view = this.viewWorld()
     const pw = Math.max(0, (view.w - this.W) / 2) + 8
     const ph = Math.max(0, (view.h - this.H) / 2) + 8
-    this.gBg.fill(UI.abyss, 1)
-    this.gBg.fillRect(-pw, -ph, this.W + pw * 2, this.H + ph * 2)
+    this.gBase.fill(UI.abyss, 1)
+    this.gBase.fillRect(-pw, -ph, this.W + pw * 2, this.H + ph * 2)
 
     // 海雪（纯表现）。越深越密是 web 的做法，这里密度固定 60，够用。
     if (this.motes.length === 0) {
@@ -1045,14 +1082,66 @@ export class DiveGame extends Component {
 
     this.drawEnemies(w)
 
-    // ---- 子弹 ----
+    // ---- 子弹（三段式；见 docs/美术资源计划.md §15.4）----
+    // 旧版是"一条单色线 + 一个白点"，在满屏特效里完全没有存在感。重写成：
+    //   ① 多层递减拖尾 —— 速度感来自**长度梯度**，不是长度本身
+    //   ② 外发光晕     —— 双层同色大半径圆，保证深色层也发光
+    //   ③ 亮核 + 本色环 —— 弹头必须是全屏最亮的东西之一
+    // 鱼雷/鱼叉额外画**弹体轮廓**（尖头 + 圆柱身 + 尾翼），尾迹改**气泡**
+    // （水里跑的不是焰火）。
     for (const b of w.bullets) {
       if (!b.alive) continue
-      const a = Math.atan2(b.vy, b.vx)
-      const len = b.kind === 'torpedo' ? 14 : b.kind === 'harpoon' ? 18 : 9
-      const c = b.kind === 'torpedo' ? UI.danger : b.kind === 'harpoon' ? UI.jade : UI.amber
-      this.gEnt.line(c, 1, b.kind === 'gun' ? 2 : 3)
-      this.gEnt.strokeSeg(b.x - Math.cos(a) * len, b.y - Math.sin(a) * len, b.x, b.y)
+      const sp = Math.max(1, Math.hypot(b.vx, b.vy))
+      const ux = b.vx / sp, uy = b.vy / sp
+      const px2 = -uy, py2 = ux          // 垂直弹道方向（画弹体宽度用）
+
+      if (b.kind === 'gun') {
+        const c = UI.amber
+        // ① 四层递减拖尾
+        for (let i = 0; i < 4; i++) {
+          const L0 = 10 + i * 7, L1 = L0 + 8
+          neonLine(this.gEnt,
+            b.x - ux * L0, b.y - uy * L0, b.x - ux * L1, b.y - uy * L1,
+            c, { width: 3.4 - i * 0.7, alpha: 0.9 / (i + 1.4), bloom: false })
+        }
+        // ② 外发光晕（两层同心低透明圆）
+        this.gEnt.fill(c, 0.22); this.gEnt.fillCircle(b.x, b.y, 6.5)
+        this.gEnt.fill(c, 0.40); this.gEnt.fillCircle(b.x, b.y, 3.6)
+        // ③ 亮核 + 本色环
+        neonCircle(this.gEnt, b.x, b.y, 2.6, c, { width: 1.6, alpha: 0.9, bloom: false })
+        this.gEnt.fill(0xffffff, 1); this.gEnt.fillCircle(b.x, b.y, 1.7)
+      } else {
+        // 鱼叉走同一套弹体轮廓，只是配色偏玉（jade）；鱼叉更快更细，观感对得上
+        const c = b.kind === 'harpoon' ? UI.jade : UI.danger
+        // ① 气泡尾迹：横向正弦摆动，越往后越淡越小
+        for (let i = 1; i <= 5; i++) {
+          const bx = b.x - ux * i * 7, by = b.y - uy * i * 7
+          const wob = Math.sin(this.fxT * 9 + i * 1.7) * (1.6 + i * 0.5)
+          this.gEnt.fill(c, 0.5 / i)
+          this.gEnt.fillCircle(bx + px2 * wob, by + py2 * wob, 3.2 - i * 0.42)
+        }
+        // ② 外发光晕
+        this.gEnt.fill(c, 0.20); this.gEnt.fillCircle(b.x, b.y, 9)
+        // ③ 弹体轮廓（沿弹道的局部坐标）：尖头 → 身尾 → 尾翼 → 身尾，收口
+        const Nose = 7, Tail = 8, Half = 3.4
+        const body = () => {
+          this.gEnt.moveTo(b.x + ux * Nose, b.y + uy * Nose)                              // 弹头尖
+          this.gEnt.lineTo(b.x - ux * Tail + px2 * Half, b.y - uy * Tail + py2 * Half)    // 身尾·右
+          this.gEnt.lineTo(b.x - ux * (Tail + 3) + px2 * (Half + 2.6),
+            b.y - uy * (Tail + 3) + py2 * (Half + 2.6))                                   // 尾翼·右
+          this.gEnt.lineTo(b.x - ux * (Tail + 3) - px2 * (Half + 2.6),
+            b.y - uy * (Tail + 3) - py2 * (Half + 2.6))                                   // 尾翼·左
+          this.gEnt.lineTo(b.x - ux * Tail - px2 * Half, b.y - uy * Tail - py2 * Half)    // 身尾·左
+          this.gEnt.close()
+        }
+        // 描边 ← 注意 `neon` 会连画两层，每层都必须**重新组一遍路径**
+        neon(this.gEnt, c, () => { body(); this.gEnt.stroke() },
+          { width: 1.8, alpha: 1, bloom: false })
+        // 弹体填色（暗色实心，让它有"实体"而不是线框）
+        this.gEnt.fill(c, 0.55); body(); this.gEnt.fillPath()
+        // ④ 头部亮点
+        this.gEnt.fill(0xffffff, 1); this.gEnt.fillCircle(b.x + ux * 4, b.y + uy * 4, 2.3)
+      }
     }
 
     this.drawPlayer(w)
@@ -1238,15 +1327,26 @@ export class DiveGame extends Component {
     }
 
     for (const s of this.sparks) {
-      const k = Math.max(0, s.life / s.maxLife)
+      const k = Math.max(0, s.life / s.maxLife)   // 1 → 0
       if (s.kind === 'flash') {
-        this.gFront.fill(s.color, Math.min(1, k))
-        this.gFront.fillCircle(s.x, s.y, s.size * 1.6)
+        // 枪口闪光：朝弹道方向的**锥形亮弧 + 中心白核**（不是一圈圆点）
+        const L = s.size * (1.6 - k * 0.6)
+        const ca = Math.cos(s.ang), sa = Math.sin(s.ang)
+        const pa = -sa, pb = ca
+        this.gFront.fill(0xffffff, k * 0.85)
+        this.gFront.moveTo(s.x + ca * L * 1.25, s.y + sa * L * 1.25)
+        this.gFront.lineTo(s.x + pa * s.size * 0.62, s.y + pb * s.size * 0.62)
+        this.gFront.lineTo(s.x - pa * s.size * 0.62, s.y - pb * s.size * 0.62)
+        this.gFront.close()
+        this.gFront.fillPath()
+        this.gFront.fill(s.color, k * 0.55)
+        this.gFront.fillCircle(s.x, s.y, s.size * 0.5)
       } else {
-        const a = Math.atan2(s.vy, s.vx)
-        const L = 6 * k + 2
-        this.gFront.line(s.color, Math.min(1, k), s.size * 0.7)
-        this.gFront.strokeSeg(s.x, s.y, s.x - Math.cos(a) * L, s.y - Math.sin(a) * L)
+        // 命中火星：沿飞行方向拉成**短条**（"溅"不是"点"），越老越细越淡
+        const L = 4 + s.size * 2.2
+        const ca = Math.cos(s.ang), sa = Math.sin(s.ang)
+        neonLine(this.gFront, s.x, s.y, s.x - ca * L * k, s.y - sa * L * k, s.color,
+          { width: Math.max(0.5, s.size * k), alpha: k, bloom: false })
       }
     }
   }
