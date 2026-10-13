@@ -6,23 +6,34 @@
 
 ---
 
-## 在编辑器里跑起来（三步）
+## 打开就能跑
 
-1. **设计分辨率设成 `1304 × 749`**（项目设置 → 项目数据 → 设计分辨率）。
-   这个数是原 Phaser 版的调参基准视口（相机钳位、刷怪边距都按它调的）。
-2. 在场景的 **Canvas** 下新建空节点 `Game`，position `(0, 0)`，
-   挂上组件 **`DiveGame`**。
-3. **运行。** 不需要导入任何美术资源 —— 本切片用 `Graphics` 画几何剪影。
+工程骨架已经生成好了（场景、设计分辨率、2D 模块集都在），**不需要手动建节点**。
 
-组件上的可调项：`designW / designH`（默认 1304 / 749）、`seed`（同 seed ⇒ 同世界线）、
-`subIndex`（0 灯艇 / 1 刺鳐 / 2 深潜者）、`cam`（留空则自动找场景相机）。
+1. **Cocos Dashboard → 项目 → 添加**，选中本目录 **`cocos/`** 本身
+   （不是仓库根目录 `survivors-game/`）。
+2. 用 **3.8.8** 打开。首次会导入资源，约 1–2 分钟，同时生成 `library/ temp/ local/`
+   （都在 `.gitignore` 里，不会污染 git）。
+3. 场景 **`Dive`** 会自动打开（`settings/v2/packages/scene.json` 里记了当前场景）。
+   若没自动打开：资源管理器里双击 `assets/scenes/Dive.scene`。
+4. **点 ▶ 运行。** 不需要导入任何美术资源。
 
-操作：**WASD / 方向键**移动，**空格或 Shift** 排气爆发（边沿触发，按住不连发），
-**Esc** 重开一局。
+画面结构是：`Canvas` → `Game`（挂着 `DiveGame` 组件）+ `Camera`。
 
-> 组件挂在 Canvas 上、或挂在 Canvas 的**子节点**上都可以（会自动往上找带
-> `UITransform` 的那一层）。挂载节点被拖到哪都不影响画面 —— 世界容器挂在
-> UI 宿主下，位置只由它自己决定。
+> **万一场景没生成成功**（或你想从头搭）——手动三步：
+> ① 项目设置 → 项目数据 → 设计分辨率设成 `1304 × 749`；
+> ② Canvas 下建空节点 `Game`，position `(0,0)`，挂上组件 `DiveGame`；
+> ③ 运行。
+> 组件挂在 Canvas 上或它的**子节点**上都可以（会自动往上找带 `UITransform` 的那层）。
+
+**操作**：`WASD` / 方向键移动，`空格` 或 `Shift` 排气爆发（边沿触发，按住不连发），
+`Esc` 重开一局。
+
+**组件可调项**：`designW / designH`（1304 / 749）、`seed`（同 seed ⇒ 同世界线）、
+`subIndex`（0 灯艇 / 1 刺鳐 / 2 深潜者）、`cam`（默认已指向场景相机）。
+
+> 设计分辨率用 **fitWidth**（`settings/v2/packages/project.json`）。
+> 想改成 fitHeight 就在项目设置里调，组件按 Canvas **实际**尺寸自适应，不会错位。
 
 ---
 
@@ -30,9 +41,16 @@
 
 ```
 cocos/
-├─ package.json                  # 工程清单
+├─ package.json                  # 工程清单（creator.version = 3.8.8）
 ├─ tsconfig.json                 # extends ./temp/tsconfig.cocos.json（编辑器生成）
+├─ .creator/                     # ★ 工程配置，**要入库**
+│  └─ default-meta.json          #   图片默认按 sprite-frame 导入
+├─ settings/v2/packages/         # ★ 工程设置，**要入库**
+│  ├─ project.json               #   设计分辨率 1304×749（fitWidth）
+│  ├─ scene.json                 #   记住当前场景 = Dive
+│  └─ engine.json                #   引擎模块集（2D：关 3D/物理/骨骼动画…）
 ├─ assets/                       # ★ 唯一会被 Cocos 编译的目录
+│  ├─ scenes/Dive.scene          #   预挂好 DiveGame 的场景
 │  └─ scripts/
 │     ├─ shared/                 # ⚠️ 自动生成，不要手改（见下）
 │     │  ├─ theme.ts  subs.ts  gameData.ts  itemArt.ts  index.ts
@@ -43,9 +61,10 @@ cocos/
 │        ├─ Hud.ts               # 战斗 HUD + 商店/决策/结算弹窗（只读 world）
 │        ├─ Gfx.ts               # y 轴翻转的 Graphics 包装 + 颜色工具
 │        └─ art.ts               # 可选美术加载（**尚未接线**，见下）
-├─ settings/                     # project.json 由编辑器生成，不手写
-└─ extensions/                   # 编辑器扩展
+└─ extensions/                   # 编辑器扩展（空）
 ```
+
+`library/ temp/ local/ build/ profiles/ native/ node_modules/` 都是生成物或本机态，已忽略。
 
 > 早期骨架里的 `cocos/src/logic/` **已删除**：Cocos 只编译 `assets/` 下的脚本，
 > 那个目录永远不会进构建产物，而且已经和真源漂移（它内联了 `0x4fe8ff`，
@@ -97,7 +116,7 @@ python tools/sync_shared.py --check    # 只检查漂移（漂移则 exit 1，�
 ## 验证：能证明什么、不能证明什么
 
 ```bash
-python tools/verify_cocos.py      # 一条命令，4 个阶段
+python tools/verify_cocos.py      # 一条命令，5 个阶段
 ```
 
 | 阶段 | 内容 |
@@ -106,21 +125,23 @@ python tools/verify_cocos.py      # 一条命令，4 个阶段
 | 编译模拟核心 | `shared/dive` → CJS（`tsc --strict`） |
 | 无头冒烟 | 真跑 120s 模拟 + 21 条不变量断言（见下） |
 | 视图层类型检查 | 用 `tools/cocos_cc_stub.d.ts` 顶上 `cc`，把 `cocos/assets/scripts/**` 全量过 `tsc --strict` |
+| 工程资源完整性 | 场景 `__id__` 引用、`_id` 唯一性、**脚本类 id ↔ `.ts.meta` uuid 是否对得上**、压缩 uuid 算法往返自检 |
 
 **✅ 能证明**
 - 模拟核心与 `web/src/scenes/DiveScene.ts` 的行为一致：5 层波次推进、清波 → 商店 →
   决策 → 结算、氧气收支、死亡路径、**同 seed 得到完全相同的世界线**（确定性）；
 - 视图层**没有用错模拟层 API**（字段名拼错、参数个数不对、类型不匹配）——
   这是移植里最容易出的错，而且只有 `tsc` 抓得住；
-- 真源与 Cocos 副本零漂移。
+- 真源与 Cocos 副本零漂移；
+- **工程骨架自洽**：打开编辑器不会遇到 Missing Script / 悬空引用。
 
 **❌ 不能证明**
 - 引擎 API 的**真实行为**。`cc` 声明桩只有签名、没有实现 ——
   `Graphics.circle` 画出来什么样、`Node.layer` 默认值、相机 zoom 与 UI 相机的配合，
   这些都在桩的外面。
-- **画面是否真的画对了。这一条只能由你在 Creator 里打开工程、点运行目视确认。**
+- **画面是否真的画对了。这一条只能由你打开 Creator 点运行目视确认。**
 
-所以：`verify_cocos.py` 全绿 ≠ 能跑；它绿了只说明"进编辑器之前，代码本身该对的都对上了"。
+所以：`verify_cocos.py` 全绿 ≠ 能跑；它绿了只说明"进编辑器之前，代码与工程骨架该对的都对上了"。
 
 ### 无头冒烟的 21 条断言（当前全通过）
 
@@ -164,7 +185,8 @@ python tools/verify_cocos.py      # 一条命令，4 个阶段
 
 1. **运行时 `new Node()` 的 layer 是 `DEFAULT`，而 Canvas 的 UI 相机只渲染 `UI_2D`**
    → 漏一处就是"画面上什么都没有"。所以 `view/` 里所有建节点都走
-   `mkNode()` / `mk()`，它强制继承父节点 layer。
+   `mkNode()` / `mk()`，它强制继承父节点 layer。**场景里手写的节点同理**：
+   `Dive.scene` 里 `Game` 节点的 `_layer` 必须是 `33554432`（UI_2D）。
 2. **Label 的锚点要跟着对齐方式走。** 在 `overflow = NONE` 下 Label 内容尺寸自适应
    文本，锚点 `(0.5, 0.5)` 意味着"文本中心落在节点位置" —— 于是右对齐的数字
    右边缘会随位数漂移（`10` 和 `100` 右边不一样齐）。锚点设 `0 / 0.5 / 1` 才是真贴边。
@@ -177,6 +199,13 @@ python tools/verify_cocos.py      # 一条命令，4 个阶段
 5. **`cocos/tsconfig.json` 不要用于 CI**：它 `extends ./temp/tsconfig.cocos.json`，
    而 `temp/` 由编辑器首次打开时生成，沙箱里不存在。离线检查走
    `tools/cocos_check.tsconfig.json`（自带 `cc` 声明桩）。
+6. **`.creator/` 不能加进 `.gitignore`**：里面的 `default-meta.json` 是**工程配置**
+   （图片按 sprite-frame 导入），官方 `empty-2d` 模板就是入库的。
+   （本目录的 `.gitignore` 里有注释专门标注这一点。）
+7. **场景里引用用户脚本用的是脚本资源的压缩 uuid**，不是完整 uuid。
+   所以"用文本生成一个预挂组件的场景"这件事，成败全看压缩算法对不对；
+   算错的症状是编辑器显示 **Missing Script**（画面还能跑，但组件不生效）。
+   算法在 `tools/cocos_uuid.py`，`verify_cocos.py` 每次都会跑往返自检 + 引用比对。
 
 ---
 
@@ -186,7 +215,9 @@ python tools/verify_cocos.py      # 一条命令，4 个阶段
 |------|------|
 | `shared/` | ★ 引擎无关真源（数值表 + 模拟核心），改这里 |
 | `tools/sync_shared.py` | 真源 → Cocos 副本同步 + 漂移检查 |
-| `tools/verify_cocos.py` | Cocos 侧离线验证总入口 |
+| `tools/verify_cocos.py` | Cocos 侧离线验证总入口（5 阶段） |
 | `tools/dive_sim_smoke.js` | 模拟核心无头冒烟（21 条断言） |
 | `tools/cocos_cc_stub.d.ts` | `cc` 最小声明桩（**只为离线类型检查**，非引擎类型） |
+| `tools/cocos_uuid.py` | Cocos 压缩 uuid 算法（与编辑器严格互逆，带自检） |
+| `tools/gen_cocos_scene.py` | 工程骨架生成器（脚手架；默认拒绝覆盖已有场景） |
 | `web/src/scenes/DiveScene.ts` | 移植对照的原始实现（6530 行 Phaser 场景） |

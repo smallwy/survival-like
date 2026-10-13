@@ -1,3 +1,0 @@
-# 占位：Cocos 工程设置目录。
-# settings/project.json 等由 Cocos Creator 在首次打开时生成/补全，不手写
-# （手写错 schema 会导致工程打不开）。本目录保留以便 git 跟踪结构。
