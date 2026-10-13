@@ -54,3 +54,11 @@ web/src/assets/fish/_regen/
 # 潜航器三台的 AI 生成源图（1024×1024 棋盘格底，约 3MB/张）+ 处理中间件。
 # 与 fish/_regen/ 同一约定：源图不入库，仓库只留 clean 后的 sub_*.png。
 web/src/assets/sub/_regen_v2/
+# 道具卡立绘的 AI 生成源图（1024 级原始产出，约 1.5MB/张）。
+# 与 fish/_regen/、sub/_regen_v2/ 同一约定：源图不入库，只留处理后的 item_*.png。
+# 注：本目录早期已有部分文件被误入库（见提交说明），此处仅阻止继续增长。
+web/src/assets/items/_regen/
+
+# WorkBuddy 会话产出图（诊断图 _diag_*/iso*/turret_*、设计对照图）；
+# 可随时重新生成，且体积大。仓库只留 overview.md 与 memory。
+.workbuddy/artifacts/*.png
