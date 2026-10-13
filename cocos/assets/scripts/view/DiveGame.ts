@@ -4,15 +4,24 @@
  * ---------------------------------------------------------------------------
  * 它做什么
  * ---------------------------------------------------------------------------
- * 把 `shared/dive` 的模拟世界接到 Cocos 的渲染/输入上：
+ * 一个组件管**两个状态**，由 `started` 切换：
  *
+ *   ① 标题界面（started = false）——
+ *      世界不 update、HUD 不画、只转发输入给 `Title`。
+ *      为什么不是独立的 Cocos 场景：见 `Title.ts` 头部（核心是"打开工程点 ▶
+ *      跑的是当前打开的场景"，加第二个 .scene 会把已经做好的「打开就能跑」弄没）。
+ *
+ *   ② 战斗（started = true）——
  *   update(dt) →
  *     ① 采样输入（WASD / 方向键 + 空格排气，空格是**边沿**）
  *     ② world.update(dt, input)            ← 模拟，引擎无关
- *     ③ world.drainEvents() → 生成表现（冲击波/击打痕/火花/飘字/电弧/爆炸环）
+ *     ③ world.drainEvents() → 生成表现（冲击波/击打痕/火花/飘字/电弧/爆炸环/震屏）
  *     ④ 把 world 的字段画出来（背景/敌人/玩家/炮塔/弹/鱼骨/波前/酸液）
- *     ⑤ 镜头跟随（zoom 1.25 + 边界钳位；弹窗相位归位 1×）
+ *     ⑤ 镜头跟随（zoom 1.25 + 边界钳位 + 震屏；弹窗相位归位 1×）
  *     ⑥ 按 world.phase 分派 HUD 与弹窗
+ *
+ * 跨局纪录（最深层/最佳带出生物质/上次用的艇）走 `view/save.ts` → `sys.localStorage`，
+ * 算纪录的纯函数在 `shared/dive/profile.ts`（被无头冒烟测试覆盖）。
  *
  * ---------------------------------------------------------------------------
  * 节点树与绘制顺序（顺序本身就是设计，别随手调）
@@ -28,7 +37,8 @@
  *     ├ gPlayer   Graphics 玩家矢量件（座圈/炮塔/探照灯）+ Boss 血条
  *     └ gFront    Graphics 打击特效 / 火花 / 电弧
  *   Canvas
- *     └ Hud                   战斗 HUD 与三个弹窗（见 Hud.ts）
+ *     ├ Hud                   战斗 HUD 与三个弹窗（见 Hud.ts）
+ *     └ Title                 主界面（见 Title.ts；战斗期间整根隐藏）
  *
  * 为什么压暗层（gVeil）在**世界坐标**里而不是做成全屏节点 —— 因为 web 侧有一条
  * 铁律："暗幕只能压暗地形，敌人/气泡/玩家必须画在它之上，否则深渊层（可见度
@@ -37,13 +47,18 @@
  *   · 可视矩形 = 相机中心 ± (画布尺寸 / zoom / 2)
  *   · 带宽用 `屏幕带宽 / zoom`，所以放大后屏幕上的视觉宽度不变
  *
+ * 震屏只抖 WorldRoot（HUD 是 Canvas 下的另一支，天然不跟着抖）——
+ * 这比 web 好一点：Phaser 的相机震屏会把 scrollFactor=0 的 HUD 一起晃。
+ *
  * ---------------------------------------------------------------------------
  * 编辑器里怎么用
  * ---------------------------------------------------------------------------
  * 场景 `assets/scenes/Dive.scene` 已经预挂好本组件（Canvas → Game → 本组件），
- * 设计分辨率也已在 settings/ 里设为 1304 × 749 —— **打开工程点运行即可**。
+ * 设计分辨率也已在 settings/ 里设为 1304 × 749 —— **打开工程点运行即可**：
+ * 先进主界面，选潜航器（1/2/3 或 ←→ 或鼠标点），Enter 或点「开始下潜」下潜。
  *
- * 美术**不需要导入**也能跑：`resources` 下没有图就退回 Graphics 画几何剪影。
+ * 美术**不需要导入**也能跑：`resources` 下没有图就退回 Graphics 画几何剪影
+ * （主界面的三张潜航器立绘那时是空框，其余全是矢量）。
  * 带美术跑：先 `python tools/sync_art.py`（见 `art.ts` 头部说明）。
  *
  * 若从零搭场景，只需两步：
@@ -68,13 +83,18 @@ import {
 } from 'cc'
 import { Gfx, col } from './Gfx'
 import { Hud } from './Hud'
+import { Title } from './Title'
 import { SpriteBank, frameAspect } from './art'
+import { loadProfile, saveProfile } from './save'
 import { DiveWorld } from '../shared/dive/world'
+import { applyRun, defaultProfile, depthLabel, recordLabel } from '../shared/dive/profile'
+import type { Profile } from '../shared/dive/profile'
 import {
   CAM_ZOOM, SEAT_RING_R, TURRET_R, EMITTER_SIZE, SUB_D, MAX_SEATS, SEAT_ANGLES_DEG,
 } from '../shared/dive/tables'
 import { UI } from '../shared/theme'
-import { SUBS, SUB_ART_R } from '../shared/subs'
+import { SUBS, SUB_ART_R, getSub } from '../shared/subs'
+import type { SubId } from '../shared/subs'
 import type { SimEvent, InputState, Enemy } from '../shared/dive/types'
 
 const { ccclass, property } = _decorator
@@ -112,13 +132,24 @@ function clamp1(v: number, lo: number, hi: number): number {
 export class DiveGame extends Component {
   @property({ tooltip: '逻辑画布宽（sim 坐标）' }) designW = 1304
   @property({ tooltip: '逻辑画布高（sim 坐标）' }) designH = 749
-  @property({ tooltip: '随机种子（同 seed ⇒ 同世界线）' }) seed = 20261013
-  @property({ tooltip: '潜航器：0 灯艇 / 1 刺鳐 / 2 深潜者' }) subIndex = 0
+  @property({ tooltip: '随机种子（同 seed ⇒ 同世界线）。第 n 局用 seed+n，所以世界线固定可复现' }) seed = 20261013
+  @property({ tooltip: '没有存档时的默认潜航器：0 灯艇 / 1 刺鳐 / 2 深潜者' }) subIndex = 0
 
   // ---- 世界 ----
   private world!: DiveWorld
   private W = 1304
   private H = 749
+  /** 是否已开局。false = 停在标题界面（世界不跑、HUD 不画） */
+  private started = false
+  /** 本局的 seed。每开一局 +1：世界线可复现，但不会每局都一模一样 */
+  private runSeed = 20261013
+
+  // ---- 跨局档案（见 shared/dive/profile.ts）----
+  private profile: Profile = defaultProfile()
+  /** 本次结算是否刷新了纪录（结算屏用来画"新纪录"那一行） */
+  private runRecord: string | null = null
+  /** 本局是否已经记过档（防"多记一局"，见 finishRun） */
+  private runSaved = false
 
   // ---- 美术 ----
   private readonly art = new SpriteBank()
@@ -137,6 +168,7 @@ export class DiveGame extends Component {
   private fishLayer!: Node
   private subNode!: Sprite
   private hud!: Hud
+  private title!: Title
 
   // ---- 敌人贴图池 ----
   private readonly fishPool: Fish[] = []
@@ -145,6 +177,11 @@ export class DiveGame extends Component {
   private camX = 0
   private camY = 0
   private zoom = 1
+
+  // ---- 震屏（接 sim 抛的 shake 事件，语义照抄 Phaser，见 shake()）----
+  private shakeT = 0
+  private shakeDur = 0
+  private shakeIntensity = 0
 
   // ---- 表现池 ----
   private shocks: Shock[] = []
@@ -165,14 +202,20 @@ export class DiveGame extends Component {
   onLoad(): void {
     this.W = this.designW
     this.H = this.designH
+    this.runSeed = this.seed
+
+    // 先读档再建节点：标题屏要立刻显示纪录、并默认选中上次用的那台潜航器。
+    // 读档失败只会得到一份默认档案（save.ts 里不抛异常）。
+    this.profile = loadProfile()
+    this.subIndex = this.profile.runs > 0
+      ? Math.max(0, SUBS.findIndex(s => s.id === this.profile.lastSub))
+      : Math.max(0, Math.min(SUBS.length - 1, this.subIndex))
+
     this.buildNodes()
 
-    this.world = new DiveWorld({
-      w: this.W,
-      h: this.H,
-      seed: this.seed,
-      sub: SUBS[Math.max(0, Math.min(SUBS.length - 1, this.subIndex))],
-    })
+    // 占位世界：标题期间不 update，但字段要存在（避免每个绘制函数都判空）。
+    // 真正开跑时 startRun() 会按选中的潜航器重建一份。
+    this.world = this.mkWorld()
     this.world.drainEvents()      // 丢掉开局那批事件（没有表现需要补播）
 
     input.on(Input.EventType.KEY_DOWN, this.onKeyDown, this)
@@ -181,6 +224,79 @@ export class DiveGame extends Component {
     // 美术异步加载：**不阻塞开局**。加载完成前先跑几何剪影，
     // 拿到图之后下一帧自动换成贴图（不需要重建世界）。
     void this.loadArt()
+
+    // 初始就停在标题界面：世界那几层先藏好，把纪录与"上次用的艇"摆上
+    this.hideWorld()
+    this.title.setRecords(depthLabel(this.profile), this.profile.runs > 0)
+    this.title.pick(this.subIndex)
+  }
+
+  /** 按当前 runSeed + 当前潜航器建一份新世界。开新局、以及"没有存档时"都走它。 */
+  private mkWorld(): DiveWorld {
+    return new DiveWorld({
+      w: this.W,
+      h: this.H,
+      seed: this.runSeed,
+      sub: SUBS[Math.max(0, Math.min(SUBS.length - 1, this.subIndex))],
+    })
+  }
+
+  /**
+   * 开一局新的。
+   *
+   * 为什么是**重建世界**而不是 `world.restart()`：潜航器是在构造时注入的
+   * （`opts.sub`），换艇只能重建 —— 而"标题界面能换艇"正是这轮加的东西。
+   * seed 每局 +1：世界线仍然完全可复现（`seed`、`seed+1`、`seed+2`…），
+   * 但不会每局都是同一张图；出问题时按 `数字 = seed + 局数` 就能复现那一局。
+   */
+  private startRun(sub: SubId): void {
+    const idx = SUBS.findIndex(s => s.id === sub)
+    this.subIndex = idx >= 0 ? idx : 0
+    this.runSeed = this.seed + this.profile.runs
+
+    this.world = this.mkWorld()
+    this.world.drainEvents()
+
+    this.started = true
+    this.runRecord = null
+    this.runSaved = false
+    this.clearFx()
+    this.bgLayer = -1              // 强制重设背景（换层/重开都可能换了图）
+    this.shakeT = 0                // 别把上一局的余震带进新局
+    this.title.setVisible(false)
+    this.hideWorld()
+
+    // 选中即记住：不用等一局结束，下次打开工程就默认是它
+    this.profile = { ...this.profile, lastSub: SUBS[this.subIndex].id }
+    saveProfile(this.profile)
+  }
+
+  /** 回标题界面（结算屏的「返回主界面」，以及开局前的初始状态） */
+  private toTitle(): void {
+    this.started = false
+    this.clearFx()
+    this.hideWorld()
+    this.title.setRecords(depthLabel(this.profile), this.profile.runs > 0)
+    this.title.pick(this.subIndex)
+    this.title.setVisible(true)
+  }
+
+  /** 开一局新的（同一个潜航器）。ESC 与结算屏的「再来一次」都走它。 */
+  private restartRun(): void {
+    this.startRun(getSub(this.world.sub.id).id)
+  }
+
+  /**
+   * 把世界那几层藏起来。
+   *
+   * 必须逐个关节点，不能只靠"这一帧不画"：Graphics 每帧 clear 所以不画就没了，
+   * 但 **Sprite（背景图、机体贴图）是持久节点** —— 不显式关掉的话，
+   * 回标题时上一局的背景图和潜航器会一直挂在那儿。
+   */
+  private hideWorld(): void {
+    this.hideFish()
+    this.subNode.node.active = false
+    this.bgNode.node.active = false
   }
 
   onDestroy(): void {
@@ -245,6 +361,11 @@ export class DiveGame extends Component {
     this.gFront = this.mkWrapped('gFront', this.worldRoot)
 
     this.hud = new Hud(host, this.W, this.H, this.art)
+    // Title 建在 Hud 之后 = 在它之上。两者不会同时有内容：
+    // 标题期间 HUD 每个 label/button 都被 begin() 关掉，战斗期间 Title 整根隐藏。
+    this.title = new Title(host, this.W, this.H, this.art, {
+      onStart: (sub) => this.startRun(sub),
+    })
   }
 
   // =========================================================================
@@ -252,6 +373,19 @@ export class DiveGame extends Component {
   // =========================================================================
   private onKeyDown(e: EventKeyboard): void {
     const k = e.keyCode
+
+    // ---- 标题界面：数字直选 / 左右循环 / Enter 开局 ----
+    // 这里必须**整体接管并 return**：否则 ←→ 会被记成移动键（下一局开局时
+    // 玩家会"莫名其妙一直在往左漂"），ESC 会直接开局。
+    if (!this.started) {
+      if (k >= KeyCode.DIGIT_1 && k <= KeyCode.DIGIT_3) this.title.pick(k - KeyCode.DIGIT_1)
+      else if (k >= KeyCode.NUM_1 && k <= KeyCode.NUM_3) this.title.pick(k - KeyCode.NUM_1)
+      else if (k === KeyCode.ARROW_LEFT) this.title.move(-1)
+      else if (k === KeyCode.ARROW_RIGHT) this.title.move(1)
+      else if (k === KeyCode.ENTER || k === KeyCode.SPACE) this.title.confirm()
+      return
+    }
+
     if (this.isBurstKey(k) && !this.keys['burst']) this.burstEdge = true
     this.keys[this.keyName(k)] = true
     if (k === KeyCode.ESCAPE) this.restartRun()
@@ -290,6 +424,18 @@ export class DiveGame extends Component {
   // =========================================================================
   update(dtSec: number): void {
     const dt = Math.min(dtSec, MAX_DT)
+
+    // ---- 标题界面：世界不跑、HUD 不画，只更新主界面自己 ----
+    // 注意**照样要清 Graphics**：不清的话上一局最后一帧的图形会原地留在屏幕上
+    // （Graphics 是累积顶点，不 clear 就一直画）。
+    if (!this.started) {
+      this.title.update(dt)
+      this.gBg.clear(); this.gVeil.clear(); this.gBack.clear()
+      this.gEnt.clear(); this.gPlayer.clear(); this.gFront.clear()
+      this.hud.begin()
+      return
+    }
+
     const w = this.world
     const combat = w.phase === 'wave' || w.phase === 'descending'
 
@@ -298,7 +444,7 @@ export class DiveGame extends Component {
 
     this.stepFx(dt)
     this.syncBg(w)               // 换层换背景（只在 layerIdx 变化时真正干活）
-    this.updateCamera()
+    this.updateCamera(dt)
 
     this.gBg.clear(); this.gVeil.clear(); this.gBack.clear()
     this.gEnt.clear(); this.gPlayer.clear(); this.gFront.clear()
@@ -308,8 +454,7 @@ export class DiveGame extends Component {
       this.syncSub(w)
       this.drawWorld(w)
     } else {
-      this.hideFish()
-      this.subNode.node.active = false
+      this.hideWorld()
     }
     this.drawVeil(w)
     this.drawFx()
@@ -327,14 +472,9 @@ export class DiveGame extends Component {
     } else if (w.phase === 'decide') {
       this.hud.drawDecide(w, { onDive: () => w.diveDeeper(), onSurface: () => w.surface() })
     } else if (w.phase === 'result') {
-      this.hud.drawResult(w, { onRestart: () => this.restartRun(), onTitle: () => this.restartRun() })
+      this.hud.drawResult(w, { onRestart: () => this.restartRun(), onTitle: () => this.toTitle() },
+        this.runRecord)
     }
-  }
-
-  /** 重开一局。标题场景尚未移植 —— 迁完 TitleScene 后这里改成 `director.loadScene('title')`。 */
-  private restartRun(): void {
-    this.world.restart()
-    this.clearFx()
   }
 
   /**
@@ -386,7 +526,7 @@ export class DiveGame extends Component {
    *     P + zoom × (camX, H − camY) = 0
    * 即 P = (−zoom·camX, zoom·(camY − H))。zoom = 1 时退化为原来的 (−camX, camY − H)。
    */
-  private updateCamera(): void {
+  private updateCamera(dt: number): void {
     const view = this.viewWorld()
     const w = this.world
     const popup = w.phase === 'shop' || w.phase === 'decide' || w.phase === 'result'
@@ -406,8 +546,46 @@ export class DiveGame extends Component {
       this.camY = this.H <= hh * 2 ? this.H / 2 : clamp1(w.py, hh, this.H - hh)
     }
 
+    if (this.shakeT > 0) this.shakeT = Math.max(0, this.shakeT - dt)
+
     this.worldRoot.setScale(this.zoom, this.zoom, 1)
-    this.worldRoot.setPosition(-this.zoom * this.camX, this.zoom * (this.camY - this.H))
+    // 震屏偏移加在**屏幕空间**：WorldRoot 的父节点是 Canvas，所以 setPosition
+    // 直接就是画布像素。世界所有层（背景/敌人/玩家/特效）一起抖，
+    // 而 HUD 是 Canvas 下的另一支、天然不跟着抖 —— 正好是我们要的。
+    // （web 的 Phaser 震屏会把 scrollFactor=0 的 HUD 一起晃，GameScene 里有专门
+    //   注释吐槽过这件事；这里是 Cocos 版顺手修掉的一个体验问题。）
+    const jitter = (px: number) => {
+      if (this.shakeT <= 0) return 0
+      return this.shakeIntensity * px * (Math.random() * 2 - 1)
+    }
+    this.worldRoot.setPosition(
+      -this.zoom * this.camX + jitter(view.w),
+      this.zoom * (this.camY - this.H) + jitter(view.h),
+    )
+  }
+
+  /**
+   * 震屏。语义**照抄 Phaser**（实现见
+   * `web/node_modules/phaser/src/cameras/2d/effects/Shake.js`）：
+   *
+   *   · 幅度 = `intensity × 视口宽/高`，**整段时长内不衰减**，到点直接归零。
+   *     它不是"逐渐平息"，就是一段定幅随机抖动然后戛然而止 —— 看着很"脆"，
+   *     但那是原版手感，改凉了会跟 web 对不上，所以照搬。
+   *   · 已经在震的时候**忽略**新来的（Phaser 的 `force=false` 语义）。
+   *     这条是刻意设计的："每秒几十次"的暴击震屏不会叠成持续抖动 ——
+   *     别改成取最大值或累加，那会把"只给暴击"的取舍（见 world.ts 的命中医治）
+   *     直接废掉。
+   *
+   * 一处已知的近似：Phaser 还会再乘一次 `camera.zoom`（而世界相机 zoom=1.25），
+   * 即它实际位移比 `intensity × 宽` 更大一点。这里按**屏幕像素**直接给
+   * `intensity × 宽`（1304 宽时 0.008 ≈ ±10px）。若目视觉得比 web 震得轻，
+   * 就在这里补一个 `× CAM_ZOOM` —— 那是唯一需要动的地方。
+   */
+  private shake(ms: number, intensity: number): void {
+    if (this.shakeT > 0) return
+    this.shakeDur = Math.max(1, ms) / 1000
+    this.shakeT = this.shakeDur
+    this.shakeIntensity = intensity
   }
 
   /** 当前可视区在 **sim 坐标**下的矩形（已含 zoom） */
@@ -551,12 +729,44 @@ export class DiveGame extends Component {
       case 'descend':
         this.clearFx()
         break
+      case 'shake':
+        this.shake(ev.ms, ev.intensity)
+        break
+      // 一局结束（上浮成功 / 溺水）：把成绩并进档案并落盘。
+      // 两个事件都由 `world.showResult()` 抛出，而它是幂等的（见 world.ts 的注释），
+      // 所以这里天然只会执行一次 —— 再兜一层 runSaved 是因为"多记一局"这种错
+      // 在存档里会一直在，属于宁可贵一点的防御。
+      case 'runCleared':
+      case 'dead':
+        this.finishRun()
+        break
       // 以下事件本切片不产生额外表现（相位可直接读 world 字段）：
-      //   shake（Cocos 要移动相机节点，见 docs）、playerHurt、dodge、
-      //   wave / waveCleared / layerCleared / runCleared / dead
+      //   playerHurt、dodge、wave / waveCleared / layerCleared
       default:
         break
     }
+  }
+
+  /**
+   * 一局结束：把成绩并进档案并落盘。
+   *
+   * 「带出生物质」的口径必须与结算屏一致（见 Hud.drawResult）：溺水一局全损失，
+   * 所以 `win=false` 时按 0 记 —— 否则"死得越深纪录越高"，档案会变成反向激励。
+   */
+  private finishRun(): void {
+    if (this.runSaved) return
+    this.runSaved = true
+    const w = this.world
+    const out = applyRun(this.profile, {
+      biomass: w.win ? Math.floor(w.biomass * w.mult) : 0,
+      layer: w.layerIdx,
+      wave: w.waveInLayer,
+      bossDown: w.bossDown,
+      sub: w.sub.id,
+    })
+    this.profile = out.profile
+    this.runRecord = recordLabel(out)
+    saveProfile(this.profile)
   }
 
   private pushShock(x: number, y: number, rMax: number, dur: number, color: number, width: number, core: number, rings: number): void {

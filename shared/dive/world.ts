@@ -719,6 +719,12 @@ export class DiveWorld implements ShopTarget {
       this.biomass += e.kind === 'boss' ? 20 : 1
       if (e.kind === 'boss') this.bossDown = true
       this.emit({ t: 'kill', x: e.x, y: e.y, r: e.r, color: e.color, kind: e.kind })
+      // 击杀震屏：按体型分三档，**频率越高的震得越轻**。
+      //   普通小鱼（swarm/dash）不震 —— 每秒可能死十几只，全震就是持续抖动；
+      //   大水母（drift，r=27）轻震一记 —— 它是"值得打的大目标"，死了该有反馈；
+      //   Boss 重震 —— 一局一次，必须有分量。DiveScene.ts:2226-2231
+      if (e.kind === 'boss') this.emit({ t: 'shake', ms: 320, intensity: 0.012 })
+      else if (e.kind === 'drift') this.emit({ t: 'shake', ms: 120, intensity: 0.0035 })
       this.dropBone(e)
       // 击杀回氧（深潜者 ×1.5 与「骨殖转化」×2 相乘）
       const kO2 = this.st.killO2 * this.sub.killO2Mul * (this.hasRelic('osteoblast') ? 2 : 1)
@@ -1267,6 +1273,9 @@ export class DiveWorld implements ShopTarget {
     this.phase = 'descending'
     this.layerCardT = 2.6
     this.emit({ t: 'descend', layer: this.layerIdx })
+    // 换层震屏：压力舱推进的闷响。放在 descend 之后 —— 渲染层处理 descend 时会
+    // clearFx() 清表现池，震屏状态不在表现池里，但顺序上"先换层再震"更自然。
+    this.emit({ t: 'shake', ms: 260, intensity: 0.004 })
   }
 
   /** 上浮兑现：结算，带走 100%。DiveScene.ts:6216-6219 */
@@ -1275,8 +1284,17 @@ export class DiveWorld implements ShopTarget {
     this.showResult(true)
   }
 
-  /** DiveScene.ts:6305-6309 */
+  /**
+   * 结算。DiveScene.ts:6305-6309
+   *
+   * ⚠️ **必须幂等**：`drainOxygen()` 判定溺水后当帧 `updateWave()` 仍会跑完
+   * （`update()` 的分支在本帧开头就选定了），于是"最后一波最后一个敌人打死的那一刻
+   * 氧气刚好归零"会**同帧**再走一次 `advance() → showResult(true)`。
+   * 那会让一局同时抛出 `dead` 与 `runCleared`，并把 `win` 覆盖成 true ——
+   * 结算屏显示"上浮成功"，而这一局实际上是淹死的。所以这里挡住第二次调用。
+   */
   showResult(win: boolean): void {
+    if (this.phase === 'result') return
     this.win = win
     this.phase = 'result'
     this.emit(win ? { t: 'runCleared' } : { t: 'dead' })

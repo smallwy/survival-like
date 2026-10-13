@@ -418,7 +418,8 @@ export class Hud {
   // -------------------------------------------------------------------------
   // 结算
   // -------------------------------------------------------------------------
-  drawResult(w: DiveWorld, cbs: { onRestart: () => void; onTitle: () => void }): void {
+  drawResult(w: DiveWorld, cbs: { onRestart: () => void; onTitle: () => void },
+             record: string | null = null): void {
     const W = this.W, H = this.H
     this.pageFill(MENU.page, 0.92)
     const finalBio = w.win ? Math.floor(w.biomass * w.mult) : 0
@@ -430,6 +431,8 @@ export class Hud {
       ? `${w.biomass} × ${w.mult.toFixed(1)}（下潜 ${w.layerIdx} 层）`
       : `沉没的 ${Math.floor(w.biomass * w.mult)} 生物质全部损失`, 15, w.win ? TXT.amber : TXT.warn)
     this.center(W / 2, H / 2 + 32, `L${w.layerIdx + 1} ${LAYERS[w.layerIdx].name} · 第 ${w.waveInLayer + 1} 波`, 14, TXT.dim)
+    // 新纪录（由 DiveGame 用 shared 的 applyRun 算出来，没有就不画这一行）
+    if (record) this.center(W / 2, H / 2 + 60, record, 16, TXT.cyan)
     this.button(W / 2 - 115, H / 2 + 100, 210, 52, '再来一次', cbs.onRestart, true)
     this.button(W / 2 + 115, H / 2 + 100, 210, 52, '返回主界面', cbs.onTitle, true)
   }

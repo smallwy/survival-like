@@ -26,7 +26,9 @@ if (!buildDir) {
   process.exit(2)
 }
 
-const { DiveWorld } = require(path.join(path.resolve(buildDir), 'dive', 'index.js'))
+const {
+  DiveWorld, defaultProfile, normalizeProfile, applyRun, depthLabel, recordLabel,
+} = require(path.join(path.resolve(buildDir), 'dive', 'index.js'))
 
 const W = 1304
 const H = 749
@@ -212,6 +214,103 @@ console.log('\n[5] 死亡路径（氧气归零 ⇒ 结算屏 + dead 事件）')
     assert.strictEqual(w.win, false)
   })
   check('抛出了 dead 事件', () => assert.ok(evs.includes('dead'), `events=${evs.join(',')}`))
+}
+
+// ---------------------------------------------------------------------------
+console.log('\n[6] 跨局档案（shared/dive/profile.ts —— 纯函数，所以能在这里真跑）')
+{
+  check('空档案：没跑过就说没跑过', () => {
+    const p = defaultProfile()
+    assert.strictEqual(p.runs, 0)
+    assert.strictEqual(p.lastSub, 'lumen')
+    assert.strictEqual(depthLabel(p), '尚无下潜记录')
+  })
+
+  check('洗数据：垃圾字段逐项回退，不整体丢弃', () => {
+    const p = normalizeProfile({
+      bestBiomass: -5,          // 负数 → 0
+      bestLayer: 3.7,           // 小数 → 3
+      bestWave: 2,
+      runs: 'x',                // 字符串 → 0
+      cleared: 'yes',           // 非 true → false
+      lastSub: 'sub_999',       // 非法 id → 默认艇
+    })
+    assert.strictEqual(p.bestBiomass, 0)
+    assert.strictEqual(p.bestLayer, 3)
+    assert.strictEqual(p.runs, 0)
+    assert.strictEqual(p.cleared, false)
+    assert.strictEqual(p.lastSub, 'lumen')
+    assert.strictEqual(p.bestWave, 0, 'runs=0 时波次必须归 0（否则会显示从没发生过的组合）')
+  })
+
+  check('洗数据：null / 数组 / 字符串都不炸', () => {
+    for (const bad of [null, undefined, 42, 'x', [], { v: 0 }]) {
+      const p = normalizeProfile(bad)
+      assert.strictEqual(p.runs, 0)
+      assert.strictEqual(p.bestLayer, 0)
+    }
+  })
+
+  check('合法档案原样保留', () => {
+    const src = {
+      v: 1, bestBiomass: 320, bestLayer: 2, bestWave: 1,
+      runs: 7, cleared: true, lastSub: 'raia',
+    }
+    assert.deepStrictEqual(normalizeProfile(src), src)
+  })
+
+  check('applyRun 是纯函数：不改入参', () => {
+    const p = defaultProfile()
+    const before = JSON.stringify(p)
+    applyRun(p, { biomass: 100, layer: 1, wave: 2, bossDown: false, sub: 'raia' })
+    assert.strictEqual(JSON.stringify(p), before)
+  })
+
+  check('溺水一局：带出 0，但层/波纪录照样更新、局数 +1', () => {
+    const p = defaultProfile()
+    const o = applyRun(p, { biomass: 0, layer: 1, wave: 2, bossDown: false, sub: 'bathy' })
+    assert.strictEqual(o.profile.runs, 1)
+    assert.strictEqual(o.profile.bestBiomass, 0)
+    assert.strictEqual(o.profile.bestLayer, 1)
+    assert.strictEqual(o.profile.bestWave, 2)
+    assert.strictEqual(o.profile.lastSub, 'bathy')
+    assert.strictEqual(o.newBiomassRecord, false, '带出 0 不该算"刷新了生物质纪录"')
+    assert.strictEqual(o.newDepthRecord, true)
+  })
+
+  check('层与波次成对比较：浅层的高波次不能顶掉深层', () => {
+    const deep = applyRun(defaultProfile(),
+      { biomass: 0, layer: 2, wave: 0, bossDown: false, sub: 'lumen' }).profile
+    const o = applyRun(deep, { biomass: 0, layer: 1, wave: 3, bossDown: false, sub: 'lumen' })
+    assert.strictEqual(o.profile.bestLayer, 2, 'L1 不该覆盖 L2')
+    assert.strictEqual(o.profile.bestWave, 0)
+    assert.strictEqual(o.newDepthRecord, false)
+  })
+
+  check('同层更深的波次算新纪录', () => {
+    const a = applyRun(defaultProfile(),
+      { biomass: 0, layer: 2, wave: 1, bossDown: false, sub: 'lumen' }).profile
+    const o = applyRun(a, { biomass: 0, layer: 2, wave: 2, bossDown: false, sub: 'lumen' })
+    assert.strictEqual(o.newDepthRecord, true)
+    assert.strictEqual(o.profile.bestWave, 2)
+  })
+
+  check('击杀守望者 ⇒ cleared 永久为真', () => {
+    const o = applyRun(defaultProfile(),
+      { biomass: 800, layer: 4, wave: 3, bossDown: true, sub: 'raia' })
+    assert.strictEqual(o.profile.cleared, true)
+    assert.strictEqual(o.profile.bestBiomass, 800)
+  })
+
+  check('结算屏文案：有新纪录才提示', () => {
+    const none = applyRun({ ...defaultProfile(), bestBiomass: 999, bestLayer: 4, bestWave: 3 },
+      { biomass: 10, layer: 0, wave: 0, bossDown: false, sub: 'lumen' })
+    assert.strictEqual(recordLabel(none), null)
+    const both = applyRun(defaultProfile(),
+      { biomass: 500, layer: 3, wave: 2, bossDown: false, sub: 'lumen' })
+    assert.ok(recordLabel(both).includes('带出生物质'))
+    assert.ok(recordLabel(both).includes('最深层'))
+  })
 }
 
 // ---------------------------------------------------------------------------

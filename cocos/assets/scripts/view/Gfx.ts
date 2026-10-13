@@ -57,6 +57,8 @@ export class Gfx {
   /** 起始一个新的子路径（避免上一条折线被再次描边） */
   moveTo(x: number, y: number): this { this.g.moveTo(x, this.y(y)); return this }
   lineTo(x: number, y: number): this { this.g.lineTo(x, this.y(y)); return this }
+  /** 闭合当前子路径（多边形要收口，否则描边的最后一条边不会画出来） */
+  close(): this { this.g.close(); return this }
 
   // ---- 图元（一律收 **sim 坐标**）----
 
@@ -92,6 +94,24 @@ export class Gfx {
   }
   fillRect(x: number, y: number, w: number, h: number): this { this.rect(x, y, w, h); this.g.fill(); return this }
   strokeRect(x: number, y: number, w: number, h: number): this { this.rect(x, y, w, h); this.g.stroke(); return this }
+
+  /**
+   * 圆角矩形，(x,y) 同样是**左上角**。
+   *
+   * 引擎的 `Graphics.roundRect(x, y, w, h, r)` 收的是**最小角**（y 向上的左下角），
+   * 所以这里跟 `rect()` 一样要把 y 翻到"下边缘"。漏了这一步会得到一个上下镜像、
+   * 位置差一个 h 的圆角框 —— 单看一张卡"好像也对"，只有跟坐标一起看才发现错位。
+   */
+  roundRect(x: number, y: number, w: number, h: number, r: number): this {
+    this.g.roundRect(x, this.y(y + h), w, h, r)
+    return this
+  }
+  fillRoundRect(x: number, y: number, w: number, h: number, r: number): this {
+    this.roundRect(x, y, w, h, r); this.g.fill(); return this
+  }
+  strokeRoundRect(x: number, y: number, w: number, h: number, r: number): this {
+    this.roundRect(x, y, w, h, r); this.g.stroke(); return this
+  }
 
   /** 线段 */
   seg(x1: number, y1: number, x2: number, y2: number): this {
