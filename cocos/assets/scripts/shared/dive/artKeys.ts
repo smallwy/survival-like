@@ -31,6 +31,7 @@
  */
 import { ENEMY_TEX, LAYERS, WEAPON_DEF, RELIC_DEF } from './tables'
 import { SUB_ART_PATH } from '../subs'
+import { UI_ICON_PATH, UI_BG_PATH, FX_TEX_PATH } from '../uiArt'
 
 export function artPaths(): Record<string, string> {
   const out: Record<string, string> = {}
@@ -61,6 +62,22 @@ export function artPaths(): Record<string, string> {
   // V6.33：遗物同样支持**临时立绘回退**（新遗物未出图时先复用语义相近的已有图）
   for (const id of Object.keys(RELIC_DEF)) {
     out['item_' + id] = 'items/item_' + (RELIC_ART_FALLBACK[id] ?? id)
+  }
+
+  // 主界面功能图标（V6.38 新增）。**唯一一份手写来源是 `shared/uiArt.ts`** ——
+  // 它没有可推导的上游表（图标不属于模拟层），所以只能手写；手写就必须只有一份。
+  // 进这张表的好处：`tools/verify_cocos.py` 的"代码会要的每一张图在磁盘上都有"
+  // 自动覆盖图标，**漏同步会红**，而不是运行时安静地出现一个空槽位。
+  for (const [id, p] of Object.entries(UI_ICON_PATH)) {
+    out['icon_' + id] = p.replace(/\.png$/, '')
+  }
+
+  // 主界面背景整图（V6.40）。key 固定 `title_bg` —— 主界面只有一张，不需要按 id 取。
+  out.title_bg = UI_BG_PATH.title.replace(/\.png$/, '')
+
+  // 击杀特效（V6.40）。key 是 `fx_<id>`，与 `FX_TEX_PATH` 的 id 字面一致。
+  for (const [id, p] of Object.entries(FX_TEX_PATH)) {
+    out['fx_' + id] = p.replace(/\.png$/, '')
   }
 
   return out

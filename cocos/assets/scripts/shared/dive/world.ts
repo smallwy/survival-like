@@ -51,6 +51,9 @@ import {
 } from './tables'
 import { CARD_POOL } from './pool'
 import { Rng, clamp, dist, wrapAngle } from './rng'
+// 开局武器缺省值（`WorldOptions.weapon` 不传时用）。刻意与 `START_WEAPONS`
+// 放同一个文件 —— "开局候选"与"默认开局"是同一件事的两面，分开放迟早会不一致。
+import { DEFAULT_START_WEAPON } from './loadout'
 
 export interface WorldOptions {
   /** 逻辑画布宽（Phaser 用 this.scale.width；Cocos 用设计分辨率宽） */
@@ -61,6 +64,11 @@ export interface WorldOptions {
   seed?: number
   /** 本局潜航器（默认灯艇） */
   sub?: SubDef
+  /**
+   * 开局第一个武器（V6.41）。缺省 = `DEFAULT_START_WEAPON`（机关枪）。
+   * 由「出击准备」面板选定，见 `loadout.ts` 的 `START_WEAPONS`。
+   */
+  weapon?: WeaponId
   /** 商店卡池（默认完整卡池；测试里可传 `[]` 跳过商店） */
   pool?: UpgradeDef[]
   /**
@@ -181,6 +189,15 @@ export class DiveWorld implements ShopTarget {
   private readonly perkO2: number
   private readonly perkPickup: number
 
+  /**
+   * 本局的开局武器（`WorldOptions.weapon` 或默认值）。
+   *
+   * 为什么存成字段而不是直接塞给 `startRun()`：`startRun()` 也会被重开路径
+   * （`restart()`，本文件 1559 行附近）调用 —— 那时作用域里没有 `opts`。
+   * 存成字段才能让"新局"与"同一局重开"两条路用同一把开局武器。
+   */
+  private readonly startWeapon: WeaponId
+
   constructor(opts: WorldOptions) {
     this.W = opts.w
     this.H = opts.h
@@ -190,6 +207,8 @@ export class DiveWorld implements ShopTarget {
     this.perkRate = opts.perk?.rate ?? 0
     this.perkO2 = opts.perk?.o2Bonus ?? 0
     this.perkPickup = opts.perk?.pickup ?? 0
+    // ⚠️ 必须在 `startRun()` 之前赋值 —— 它内部就靠这个字段装第一把武器。
+    this.startWeapon = opts.weapon ?? DEFAULT_START_WEAPON
     this.px = this.W / 2
     this.py = this.H / 2
     this.o2 = O2.max
@@ -247,8 +266,11 @@ export class DiveWorld implements ShopTarget {
     this.layerCardT = 2.6
     this.weapons = []
     this.bullets = []; this.echoes = []; this.acids = []
-    // 开局武器：机关枪（声呐之后仍然可以在商店买到）
-    this.addWeapon('gun')
+    // 开局武器：由「出击准备」面板选定（V6.41）；不传则回落到机关枪
+    // —— 这是原版一直用的开局武器，缺省值保持它以免改变老存档玩家的第一局手感。
+    // 其余三把基础武器（声呐 / 鱼雷 / 电弧）在商店里都能买到，所以选谁都不锁死 build。
+    // 走 `startWeapon` 字段而不是 `opts`：`startRun()` 也被重开路径调用，那里没有 `opts`。
+    this.addWeapon(this.startWeapon)
     this.startWave()
   }
 

@@ -105,6 +105,16 @@ def _item_rules() -> list[tuple[str, str, str]]:
     return [(p, p, "item") for _, p in pairs]
 
 
+# ---------------------------------------------------------------------------
+# ⚠️ 主界面功能图标**不走本脚本**（2026-10-13 晚改「只做 cocos 单端」）
+# ---------------------------------------------------------------------------
+# `tools/process_ui_icon.py` 现在**直接写入** `cocos/assets/resources/ui/icons/`，
+# 不再经 web 中转 —— web 原型已冻结（用户当日决定，原 `web/src/assets/ui/` 与
+# `web/src/config/uiArt.ts` 已删）。
+# 保留此注记只为解释：规则表里为什么没有 `ui/icons`（以前有）。
+# 本脚本此后只负责**立绘 / 道具**那批（仍为 web → cocos 的老约定）。
+
+
 RULES: list[tuple[str, str, str]] = _ASSET_RULES + _item_rules()
 
 

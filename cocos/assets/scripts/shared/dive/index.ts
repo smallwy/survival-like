@@ -40,3 +40,5 @@ export * from './artKeys'
 export * from './profile'
 export * from './unlocks'
 export * from './codex'
+// 「出击准备」的开局武器候选（V6.41）。纯数据 + 一个查下标的纯函数。
+export * from './loadout'

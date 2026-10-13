@@ -395,7 +395,7 @@ export class Hud {
   // -------------------------------------------------------------------------
   // 战斗 HUD
   // -------------------------------------------------------------------------
-  drawCombat(w: DiveWorld): void {
+  drawCombat(w: DiveWorld, cbs: { onPause?: () => void } = {}): void {
     const W = this.W, H = this.H
     const L = LAYERS[w.layerIdx]
     const t = w.t
@@ -498,14 +498,34 @@ export class Hud {
       this.text(dx2 + dw + 8, dy2 - 2, `${Math.round(k * 100)}%`, 12, TXT.dim)
     }
 
-    // ===== ④ 生物质（层末才显示）/ 鱼骨（常驻）=====
+    // ===== ④ 生物质（层末才显示）/ 鱼骨（常驻）/ 暂停按钮（常驻·右上角）=====
     // 鱼骨必须**常驻**：玩家要在战斗中就看见数字在涨，才会把"捡鱼骨"和"待会儿能买什么"连起来。
+    //
+    // 2026-10-13：右上角腾出来常驻一个暂停按钮 —— 此前局内**只有键盘**能退出，
+    // 触屏玩家一个出口都没有。代价是鱼骨与生物质整组左移（从贴边 W-106/W-24
+    // 挪到 W-150/W-64），让出 56px 的角。两处仍是左/右对齐，位数变化不会左右抖。
     const bY = by + (w.mult > 1 ? 48 : 26)
-    g.line(BONE, 0.9, 1.4); g.strokeCircle(W - 106, bY + 8, 7)
-    this.text(W - 88, bY, `${w.bank}`, 17, TXT.cyber)
+    g.line(BONE, 0.9, 1.4); g.strokeCircle(W - 150, bY + 8, 7)
+    this.text(W - 132, bY, `${w.bank}`, 17, TXT.cyber)
     if (w.phase !== 'wave') {
-      this.text(W - 24, by + 2, `生物质 ${w.biomass}`, 18, TXT.jade, true)
-      if (w.mult > 1) this.text(W - 24, by + 26, `上浮可得 ${Math.floor(w.biomass * w.mult)}`, 13, TXT.amber, true)
+      this.text(W - 64, by + 2, `生物质 ${w.biomass}`, 18, TXT.jade, true)
+      if (w.mult > 1) this.text(W - 64, by + 26, `上浮可得 ${Math.floor(w.biomass * w.mult)}`, 13, TXT.amber, true)
+    }
+
+    // 暂停按钮：**视觉 38×38，热区 64×64**（视觉尺寸与点击区分离 ——
+    // 38px 在触屏上够不着，但画大了会压住鱼骨）。图标是矢量两条圆角竖杠：
+    // 纯 UI 符号、要随状态换色，走位图反而多一层，与"沉淀货币留矢量"同一条分工线。
+    if (cbs.onPause) {
+      const pbx = W - 32, pby = 30
+      g.fill(UI.panel, 0.72)
+      g.fillRoundRect(pbx - 19, pby - 19, 38, 38, 9)
+      g.line(UI.cyanDim, 0.85, 1.2)
+      g.strokeRoundRect(pbx - 19, pby - 19, 38, 38, 9)
+      g.fill(UI.cyan, 0.92)
+      g.fillRect(pbx - 7.5, pby - 9, 5.5, 18)
+      g.fillRect(pbx + 2, pby - 9, 5.5, 18)
+      // 只吃点击、不画任何东西的空按钮（fillA / edgeA = 0）
+      this.button(pbx, pby, 64, 64, '', cbs.onPause, true, { fillA: 0, edgeA: 0 })
     }
 
     // ===== ⑤ 装备槽（底部左）=====
@@ -1310,6 +1330,62 @@ export class Hud {
   // -------------------------------------------------------------------------
   // 层末：补给站决策
   // -------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
+  // 暂停（2026-10-13 新增）
+  // -------------------------------------------------------------------------
+  /**
+   * 战斗内暂停菜单。
+   *
+   * 为什么必须补：此前战斗中按 ESC 走的是 `restartRun()` —— 局内**没有任何**
+   * 回到主界面的路径（`toTitle()` 只被结算屏调用），玩家想退出只能自杀，
+   * 按 ESC 还会白打一局重开。这是可用性缺陷，不是"少个功能"。
+   *
+   * `opts.confirm` = 二次确认态（点过「返回主界面」之后才出现）：
+   * 一局可能已经打了几分钟，误点一脚回标题 = 白打，所以退到主界面必须再确认一次。
+   *
+   * 面板语汇沿用商店 / 结算那一套（`MENU.page` 实底 + 描边 + 标题栏分隔线），
+   * 不是新开一套皮肤 —— 同一个游戏里的弹窗长得一样，玩家才不用重新学。
+   */
+  drawPause(w: DiveWorld, cbs: {
+    onResume: () => void
+    onRestart: () => void
+    onAskTitle: () => void
+    onConfirmTitle: () => void
+    onCancelConfirm: () => void
+  }, opts: { confirm: boolean } = { confirm: false }): void {
+    const W = this.W, H = this.H
+    const cx = W / 2, cy = H / 2
+    const g = this.g
+
+    // 半透明压暗（不是实黑）：暂停时背后的战场要看得见，玩家才知道自己停在哪
+    this.scrim(0.74)
+
+    const pw = 440, ph = opts.confirm ? 292 : 344
+    const px = cx - pw / 2, py = cy - ph / 2
+    g.fill(MENU.page, 0.96); g.fillRoundRect(px, py, pw, ph, 16)
+    g.line(MENU.edge, 0.95, 1.5); g.strokeRoundRect(px, py, pw, ph, 16)
+    // 标题栏分隔线：与商店 / 结算面板同一套语汇（不是新皮肤）
+    g.line(UI.cyanDim, 0.7, 1)
+    g.strokeSeg(px + 1, py + 62, px + pw - 1, py + 62)
+
+    if (!opts.confirm) {
+      this.center(cx, py + 32, '已暂停', 26, TXT.cyber)
+      this.center(cx, py + 84, `氧气 ${Math.ceil(w.o2)} / ${w.o2Max} · 敌人与计时已冻结`, 14, TXT.dim)
+      const bw = 288, bh = 50
+      this.button(cx, cy - 14, bw, bh, '继续游戏', cbs.onResume, true)
+      this.button(cx, cy + 56, bw, bh, '重新开始', cbs.onRestart, true)
+      this.button(cx, cy + 126, bw, bh, '返回主界面', cbs.onAskTitle, true)
+      this.center(cx, py + ph + 28, 'ESC 继续游戏', 13, TXT.mute)
+    } else {
+      this.center(cx, py + 32, '返回主界面？', 24, TXT.warn)
+      this.center(cx, py + 84, '本局进度将丢失', 16, TXT.main)
+      this.center(cx, py + 112, '本局带出的生物质按 0 计 · 已沉淀的部分不受影响', 13, TXT.dim)
+      const bw = 188, bh = 50
+      this.button(cx - 104, cy + 58, bw, bh, '取消', cbs.onCancelConfirm, true)
+      this.button(cx + 104, cy + 58, bw, bh, '确认返回', cbs.onConfirmTitle, true)
+    }
+  }
+
   drawDecide(w: DiveWorld, cbs: { onDive: () => void; onSurface: () => void }): void {
     const W = this.W, H = this.H
     this.pageFill(MENU.page, 0.88)

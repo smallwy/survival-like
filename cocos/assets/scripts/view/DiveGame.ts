@@ -56,7 +56,10 @@
  * ---------------------------------------------------------------------------
  * 场景 `assets/scenes/Dive.scene` 已经预挂好本组件（Canvas → Game → 本组件），
  * 设计分辨率也已在 settings/ 里设为 1304 × 749 —— **打开工程点运行即可**：
- * 先进主界面，选潜航器（1/2/3 或 ←→ 或鼠标点），Enter 或点「开始下潜」下潜。
+ * 先进主界面 → 点右下角「开始游戏」或按 Enter 打开**「出击准备」**（选潜航器 + 选开局武器）
+ * → 再按 Enter / 点「确认出击」下潜。
+ *   · 面板里：↑↓ 换行、←→ 在行内循环、1/2/3 直选潜航器、Esc 或点面板外返回主界面。
+ *   · 主界面（面板关着）：1/2/3 或 ←→ 换潜航器（只影响船坞里的机体）。
  *
  * 美术**不需要导入**也能跑：`resources` 下没有图就退回 Graphics 画几何剪影
  * （主界面的三张潜航器立绘那时是空框，其余全是矢量）。
@@ -79,7 +82,7 @@
  */
 
 import {
-  _decorator, Component, Node, Graphics, Label, Sprite, SpriteFrame, UITransform,
+  _decorator, Component, Node, Graphics, Label, Sprite, SpriteFrame, UITransform, UIOpacity,
   input, Input, EventKeyboard, KeyCode,
 } from 'cc'
 import { Gfx, col } from './Gfx'
@@ -106,6 +109,8 @@ import { UI } from '../shared/theme'
 import { SUBS, getSub } from '../shared/subs'
 import type { SubId } from '../shared/subs'
 import type { SimEvent, InputState, Enemy, WeaponId } from '../shared/dive/types'
+// 开局武器的默认值 & 候选清单（V6.41）。清单只有一份，在 shared 里 —— 见 loadout.ts 头注
+import { DEFAULT_START_WEAPON } from '../shared/dive/loadout'
 
 const { ccclass, property } = _decorator
 
@@ -135,12 +140,42 @@ interface Fish { sp: Sprite; key: string }
  */
 interface FlashMark { x: number; y: number; r: number; alpha: number }
 
+/**
+ * 位图击杀特效（V6.40）。与 `Shock` 等矢量特效**并存**，不是替代：
+ *   矢量负责"环 + 火花"这类**每帧重画**的几何（便宜、能连续动画）；
+ *   位图负责"晶体碎片 / 水泡"这类**手绘质感**（Graphics 画不出锐利的多面碎片）。
+ *
+ * 三张贴图在 `shared/uiArt.ts` 的 `FX_TEX_PATH` 里登记；选哪张由**敌人类型**决定：
+ *   swarm / dash → 环（干净利落）
+ *   drift（水母类） → 水泡（呼应"半透明胶质"）
+ *   boss / 精英 → 爆散（最大最重的那个）
+ */
+interface FxBit {
+  sp: Sprite
+  key: string
+  x: number; y: number
+  r0: number; r1: number      // 起始 / 结束显示半径（px）
+  rot0: number; rot1: number  // 起始 / 结束角度（度）—— 轻微旋转让它"活"
+  life: number; maxLife: number
+}
+
+/** 从击杀事件挑一张特效贴图。返回 null = 该敌人不配位图特效（走纯矢量）。 */
+function fxKeyFor(kind: string, r: number): string | null {
+  if (kind === 'drift') return 'fx_bubble'
+  if (kind === 'boss') return 'fx_burst'
+  // 小怪：体量够大才给（每只都爆一张图 = 十几只同屏时纯浪费，且糊成一片）
+  if (r >= 12) return 'fx_ring'
+  return null
+}
+
 const SHOCK_CAP = 64
 const SLASH_CAP = 48
 const SPARK_CAP = 260
 const FLOAT_CAP = 32
 /** 敌人贴图池上限。web 侧的阈值是"同屏 >120 条就整体退回矢量" */
 const FISH_CAP = 140
+/** 位图击杀特效同屏上限。一帧十几只同屏死是常事，超了就丢最早的。 */
+const FXBIT_CAP = 28
 /** 单帧最大步长（与模拟层的 MAX_DT 同源，防止后台切回来时世界瞬移） */
 const MAX_DT = 0.05
 
@@ -204,6 +239,13 @@ export class DiveGame extends Component {
   private started = false
   /** 本局的 seed。每开一局 +1：世界线可复现，但不会每局都一模一样 */
   private runSeed = 20261013
+  /**
+   * 本局的开局武器（V6.41）。由「出击准备」面板选定。
+   *
+   * 为什么要存一份：暂停菜单 / 结算屏的「再来一次」走的是 `restartRun()` ——
+   * 它没机会再问一次面板，只能沿用本局开局时选的那把。不存就会静默退回默认值。
+   */
+  private lastWeapon: WeaponId = DEFAULT_START_WEAPON
 
   // ---- 跨局档案（见 shared/dive/profile.ts）----
   private profile: Profile = defaultProfile()
@@ -233,6 +275,8 @@ export class DiveGame extends Component {
   private gPlayer!: Gfx
   private gFront!: Gfx
   private fishLayer!: Node
+  /** 位图击杀特效层。排在 `gFront` **之下**：矢量火花是"最上层的高光"，不该被碎片盖住。 */
+  private fxBitLayer!: Node
   private subNode!: Sprite
   private hud!: Hud
   private title!: Title
@@ -257,6 +301,8 @@ export class DiveGame extends Component {
   private sparks: Spark[] = []
   private arcs: ArcFx[] = []
   private blasts: BlastFx[] = []
+  private readonly fxBits: FxBit[] = []
+  private readonly fxBitPool: Fish[] = []
   private floatSlots: Array<FloatFx | null> = new Array(FLOAT_CAP).fill(null)
   private motes: Mote[] = []
   /** 表现层计时器（鱼雷气泡尾迹的正弦摆动等用；与 sim 的时间无关） */
@@ -267,6 +313,19 @@ export class DiveGame extends Component {
   // ---- 输入 ----
   private keys: Record<string, boolean> = {}
   private burstEdge = false
+
+  // ---- 暂停（2026-10-13）----
+  /**
+   * 战斗中暂停：`world` 完全不推进（敌人不动、氧气不掉、技能不走），
+   * 画面保持静止，HUD 上盖一层暂停菜单。
+   *
+   * 为什么必须补它：此前战斗中按 ESC 走的是 `restartRun()` ——
+   * 也就是说**局内根本没有"退出"这条路**，玩家想退出只能自杀，
+   * 而按 ESC 反而会白打一局重开（`toTitle()` 只被结算屏调用）。
+   */
+  private paused = false
+  /** 暂停菜单的二次确认态（点了「返回主界面」之后）—— 防误点丢一局 */
+  private pauseConfirm = false
 
   // =========================================================================
   // 生命周期
@@ -304,7 +363,7 @@ export class DiveGame extends Component {
   }
 
   /** 按当前 runSeed + 当前潜航器建一份新世界。开新局、以及"没有存档时"都走它。 */
-  private mkWorld(): DiveWorld {
+  private mkWorld(weapon: WeaponId = DEFAULT_START_WEAPON): DiveWorld {
     return new DiveWorld({
       w: this.W,
       h: this.H,
@@ -314,26 +373,35 @@ export class DiveGame extends Component {
       pool: filterPool(this.profile),
       // 永久强化：满级总增幅被红线锁在"两个遗物"量级（见 unlocks.ts PERKS）
       perk: perkBonus(this.profile),
+      // 开局武器（V6.41）：面板选定；缺省 = 机关枪
+      weapon,
     })
   }
 
   /**
    * 开一局新的。
    *
-   * 为什么是**重建世界**而不是 `world.restart()`：潜航器是在构造时注入的
-   * （`opts.sub`），换艇只能重建 —— 而"标题界面能换艇"正是这轮加的东西。
+   * 为什么是**重建世界**而不是 `world.restart()`：潜航器与开局武器都是在构造时
+   * 注入的（`opts.sub` / `opts.weapon`），换艇换枪只能重建 —— 而"标题界面能选
+   * 艇和枪"正是这轮加的东西。
    * seed 每局 +1：世界线仍然完全可复现（`seed`、`seed+1`、`seed+2`…），
    * 但不会每局都是同一张图；出问题时按 `数字 = seed + 局数` 就能复现那一局。
+   *
+   * `weapon` 缺省 = `DEFAULT_START_WEAPON`（机关枪），供 `restartRun()` 之外的
+   * 无参调用（如构造期的占位世界）使用。
    */
-  private startRun(sub: SubId): void {
+  private startRun(sub: SubId, weapon: WeaponId = DEFAULT_START_WEAPON): void {
     const idx = SUBS.findIndex(s => s.id === sub)
     this.subIndex = idx >= 0 ? idx : 0
+    this.lastWeapon = weapon
     this.runSeed = this.seed + this.profile.runs
 
-    this.world = this.mkWorld()
+    this.world = this.mkWorld(weapon)
     this.world.drainEvents()
 
     this.started = true
+    this.paused = false
+    this.pauseConfirm = false
     this.runRecord = null
     this.runBanked = 0
     this.runUnlocked = []
@@ -349,9 +417,11 @@ export class DiveGame extends Component {
     saveProfile(this.profile)
   }
 
-  /** 回标题界面（结算屏的「返回主界面」，以及开局前的初始状态） */
+  /** 回标题界面（结算屏的「返回主界面」、暂停菜单的「返回主界面」，以及开局前的初始状态） */
   private toTitle(): void {
     this.started = false
+    this.paused = false
+    this.pauseConfirm = false
     this.clearFx()
     this.hideWorld()
     this.title.setRecords(depthLabel(this.profile), this.profile.runs > 0)
@@ -360,9 +430,41 @@ export class DiveGame extends Component {
     this.title.setVisible(true)
   }
 
-  /** 开一局新的（同一个潜航器）。ESC 与结算屏的「再来一次」都走它。 */
+  /**
+   * 开一局新的（同一个潜航器）。暂停菜单与结算屏的「再来一次」都走它。
+   *
+   * 开局武器沿用 `lastWeapon` —— 这条路径不会再弹一次「出击准备」，
+   * 所以"再来一次"必须保持上一局的枪，否则玩家会莫名其妙被换武器。
+   */
   private restartRun(): void {
-    this.startRun(getSub(this.world.sub.id).id)
+    this.paused = false
+    this.pauseConfirm = false
+    this.keys = {}
+    this.burstEdge = false
+    this.startRun(getSub(this.world.sub.id).id, this.lastWeapon)
+  }
+
+  // -------------------------------------------------------------------------
+  // 暂停（2026-10-13 新增）
+  // -------------------------------------------------------------------------
+  /**
+   * 开关暂停。**必须同时清空按键状态** —— 否则暂停期间按住的
+   * W/A/S/D 会留在 `keys` 里，恢复后机体自己一直往那个方向漂。
+   * （同一个坑在标题界面的注释里记过：ESC 曾被记成移动键。）
+   */
+  private togglePause(v: boolean = !this.paused): void {
+    this.paused = v
+    this.pauseConfirm = false
+    if (v) {
+      for (const k of ['left', 'right', 'up', 'down', 'burst']) this.keys[k] = false
+      this.burstEdge = false
+    }
+  }
+
+  /** 暂停菜单里的 ESC：确认态 → 退回菜单；菜单态 → 继续游戏 */
+  private pauseBack(): void {
+    if (this.pauseConfirm) this.pauseConfirm = false
+    else this.togglePause(false)
   }
 
   /**
@@ -376,6 +478,10 @@ export class DiveGame extends Component {
     this.hideFish()
     this.subNode.node.active = false
     this.bgNode.node.active = false
+    // 位图特效是常驻节点（池化），必须一起关 —— 否则退回标题屏时
+    // 上一波击杀的碎片会**留在屏幕上**（Graphics 那几层都被 clear 了，只有它不会自动清）。
+    for (const f of this.fxBitPool) f.sp.node.active = false
+    this.fxBits.length = 0
   }
 
   onDestroy(): void {
@@ -453,6 +559,11 @@ export class DiveGame extends Component {
     this.subNode.sizeMode = Sprite.SizeMode.CUSTOM
     this.subNode.node.active = false
 
+    // 位图击杀特效层：排在 `gEnt` 之后、`gPlayer`/`gFront` 之前。
+    // 为什么在 `gFront` 之下：`gFront` 装的是冲击波 / 火花 / 飘字 —— 那是"最后的高光"，
+    // 碎片压在上面会让命中瞬间变浑浊。
+    this.fxBitLayer = this.mkNode('fxBits', this.worldRoot)
+
     this.gPlayer = this.mkWrapped('gPlayer', this.worldRoot)
     this.gFront = this.mkWrapped('gFront', this.worldRoot)
 
@@ -460,7 +571,7 @@ export class DiveGame extends Component {
     // Title 建在 Hud 之后 = 在它之上。两者不会同时有内容：
     // 标题期间 HUD 每个 label/button 都被 begin() 关掉，战斗期间 Title 整根隐藏。
     this.title = new Title(host, this.W, this.H, this.art, {
-      onStart: (sub) => this.startRun(sub),
+      onStart: (sub, weapon) => this.startRun(sub, weapon),
       getMeta: () => this.profile,
       onBuyPerk: (id) => this.buyPerk(id),
       onOpenCodex: () => this.codex.show(),
@@ -498,6 +609,20 @@ export class DiveGame extends Component {
         if (k === KeyCode.ESCAPE) this.codex.hide()
         return
       }
+      // 「出击准备」面板开着时整体接管（V6.41）。**必须 return** ——
+      // 否则面板里的 ↑↓ 会漏到下面被记成移动键，下一局开局时角色自己漂。
+      //   Esc 关面板（不是退出游戏）/ ↑↓ 换行 / ←→ 行内循环 / Enter 确认出击
+      if (this.title.loadoutOpen) {
+        if (k === KeyCode.ESCAPE) this.title.back()
+        else if (k === KeyCode.ARROW_UP) this.title.focusRow(-1)
+        else if (k === KeyCode.ARROW_DOWN) this.title.focusRow(1)
+        else if (k >= KeyCode.DIGIT_1 && k <= KeyCode.DIGIT_3) this.title.pick(k - KeyCode.DIGIT_1)
+        else if (k >= KeyCode.NUM_1 && k <= KeyCode.NUM_3) this.title.pick(k - KeyCode.NUM_1)
+        else if (k === KeyCode.ARROW_LEFT) this.title.move(-1)
+        else if (k === KeyCode.ARROW_RIGHT) this.title.move(1)
+        else if (k === KeyCode.ENTER || k === KeyCode.SPACE) this.title.confirm()
+        return
+      }
       if (k >= KeyCode.DIGIT_1 && k <= KeyCode.DIGIT_3) this.title.pick(k - KeyCode.DIGIT_1)
       else if (k >= KeyCode.NUM_1 && k <= KeyCode.NUM_3) this.title.pick(k - KeyCode.NUM_1)
       else if (k === KeyCode.ARROW_LEFT) this.title.move(-1)
@@ -506,9 +631,26 @@ export class DiveGame extends Component {
       return
     }
 
+    // ---- 暂停中：整体接管，只认 ESC ----
+    // 和标题界面同一个理由：不透传就不会把按键记进 `keys`。
+    // 漏了这层的话，暂停时按住的 ←→ 会在恢复后继续生效（角色自己漂）。
+    if (this.paused) {
+      if (k === KeyCode.ESCAPE) this.pauseBack()
+      return
+    }
+
+    // ---- 战斗中 ESC = 暂停（2026-10-13 改）----
+    // 原先是 `restartRun()` —— 那是把"退出"写成了"重开"，
+    // 局内没有任何路径能回到主界面，玩家只能自杀。现在 ESC 开暂停菜单，
+    // "重新开始"收进菜单里当第二个选项（多一次确认，也少一次误触丢局）。
+    if (k === KeyCode.ESCAPE) {
+      // 结算屏已经结束，没有"暂停"可言；战斗 / 商店 / 补给站都能叫出菜单
+      if (this.world.phase !== 'result') this.togglePause(true)
+      return
+    }
+
     if (this.isBurstKey(k) && !this.keys['burst']) this.burstEdge = true
     this.keys[this.keyName(k)] = true
-    if (k === KeyCode.ESCAPE) this.restartRun()
 
     // ---- 商店：数字直购 ----
     // 2026-10-13 补：DIGIT_1..3 此前**只在标题界面**有分支，商店阶段的副标题却写着
@@ -569,12 +711,19 @@ export class DiveGame extends Component {
     const w = this.world
     const combat = w.phase === 'wave' || w.phase === 'descending'
 
-    w.update(dt, combat ? this.sampleInput() : { dx: 0, dy: 0, burst: false })
-    for (const ev of w.drainEvents()) this.handleEvent(ev)
-
-    this.stepFx(dt)
+    // ---- 暂停：只跳过"推进"，不跳过绘制 ----
+    // 跳过推进 ⇒ 敌人不动、氧气不掉、技能冷却不走、特效不衰减；
+    // 保留绘制 ⇒ 画面停在上一帧的样子，而不是被清成黑屏。
+    // （标题界面那段注释解释过为什么"不推进也必须清 Graphics"：
+    //   Graphics 是累积顶点，不 clear 就会一直留在屏幕上。）
+    if (!this.paused) {
+      w.update(dt, combat ? this.sampleInput() : { dx: 0, dy: 0, burst: false })
+      for (const ev of w.drainEvents()) this.handleEvent(ev)
+      this.stepFx(dt)
+      this.stepFxBits(dt)
+      this.updateCamera(dt)
+    }
     this.syncBg(w)               // 换层换背景（只在 layerIdx 变化时真正干活）
-    this.updateCamera(dt)
 
     this.gBase.clear(); this.gBg.clear(); this.gVeil.clear(); this.gBack.clear()
     this.gEnt.clear(); this.gPlayer.clear(); this.gFront.clear()
@@ -588,10 +737,11 @@ export class DiveGame extends Component {
     }
     this.drawVeil(w)
     this.drawFx()
+    this.drawFxBits()
 
     this.hud.begin()
     if (combat) {
-      this.hud.drawCombat(w)
+      this.hud.drawCombat(w, { onPause: () => this.togglePause(true) })
     } else if (w.phase === 'shop') {
       this.hud.drawShop(w, {
         onBuy: i => w.buyCard(i),
@@ -608,6 +758,18 @@ export class DiveGame extends Component {
         bio: this.profile.bio,
         unlocked: this.runUnlocked,
       })
+    }
+
+    // 暂停菜单**最后画**，盖在任何阶段之上（战斗中 / 商店 / 补给站都叫得出来）。
+    // 写在分支外面而不是塞进某个分支：四个绘制分支一行不用动，暂停只是"多盖一层"。
+    if (this.paused) {
+      this.hud.drawPause(w, {
+        onResume: () => this.togglePause(false),
+        onRestart: () => this.restartRun(),
+        onAskTitle: () => { this.pauseConfirm = true },
+        onConfirmTitle: () => this.toTitle(),
+        onCancelConfirm: () => { this.pauseConfirm = false },
+      }, { confirm: this.pauseConfirm })
     }
   }
 
@@ -846,6 +1008,7 @@ export class DiveGame extends Component {
           0xffffff, ev.kind === 'boss' ? 3 : 2, ev.r * (ev.kind === 'boss' ? 0.9 : 0.62), 1)
         this.pushRadialSparks(ev.x, ev.y, ev.kind === 'boss' ? 26 : 8 + Math.round(ev.r * 0.25),
           ev.kind === 'boss' ? 200 : 120, ev.kind === 'boss' ? 280 : 160, ev.kind === 'boss' ? 2.4 : 1.6, ev.color)
+        this.pushFxBit(ev.x, ev.y, ev.kind, ev.r)
         break
       case 'pickup':
         // 拾取反馈原来只有 3 颗火花 —— 磁吸**收割一串**鱼骨时几乎看不见。
@@ -928,6 +1091,84 @@ export class DiveGame extends Component {
   private pushShock(x: number, y: number, rMax: number, dur: number, color: number, width: number, core: number, rings: number): void {
     this.shocks.push({ x, y, r: 0, rMax, life: dur, maxLife: dur, color, width, core, rings, ringDelay: rings > 1 ? 0.3 : 0 })
     if (this.shocks.length > SHOCK_CAP) this.shocks.splice(0, this.shocks.length - SHOCK_CAP)
+  }
+
+  /**
+   * 位图击杀特效（V6.40）。贴图没加载 / 该敌人不配 → **静默跳过**（矢量特效照旧）——
+   * 主界面的"没有美术也能跑"同一条原则：缺图不该让战斗出错。
+   *
+   * 尺寸取"敌人半径的倍数"而不是固定像素：小怪的小爆、Boss 的大爆，
+   * 同一个道理（和 `pushShock` 用 `ev.r * 2.6` 是同一套算法）。
+   */
+  private pushFxBit(x: number, y: number, kind: string, r: number): void {
+    if (!this.artLoaded) return
+    const key = fxKeyFor(kind, r)
+    if (!key) return
+    const sf = this.art.get(key)
+    if (!sf) return
+    const sp = this.acquireFxBit(key, sf)
+    if (!sp) return
+    const boss = kind === 'boss'
+    const drift = kind === 'drift'
+    const r0 = boss ? r * 1.2 : drift ? r * 1.0 : r * 0.9
+    const r1 = boss ? r * 5.4 : drift ? r * 3.0 : r * 2.6
+    this.fxBits.push({
+      sp, key, x, y,
+      r0, r1,
+      rot0: (Math.random() - 0.5) * 26,
+      rot1: (Math.random() - 0.5) * 26 + (boss ? 40 : 16),
+      life: boss ? 0.52 : drift ? 0.46 : 0.34,
+      maxLife: boss ? 0.52 : drift ? 0.46 : 0.34,
+    })
+    if (this.fxBits.length > FXBIT_CAP) {
+      const drop = this.fxBits.splice(0, this.fxBits.length - FXBIT_CAP)
+      for (const d of drop) d.sp.node.active = false
+    }
+  }
+
+  private acquireFxBit(key: string, sf: SpriteFrame): Sprite | null {
+    for (const f of this.fxBitPool) {
+      if (f.key === key && !f.sp.node.active) {
+        f.sp.node.active = true
+        return f.sp
+      }
+    }
+    if (this.fxBitPool.length >= FXBIT_CAP) return null
+    const n = this.mkNode('fxb', this.fxBitLayer)
+    const sp = n.addComponent(Sprite)
+    sp.trim = false
+    sp.sizeMode = Sprite.SizeMode.CUSTOM
+    sp.spriteFrame = sf
+    // 贴图是 512×512 的正方形，alpha 已由 `process_fx.py` 从亮度导出 —— 直接用。
+    this.fxBitPool.push({ sp, key })
+    return sp
+  }
+
+  /** 每帧推进位图特效：位置固定，半径放大、旋转、淡出。 */
+  private stepFxBits(dt: number): void {
+    for (const f of this.fxBits) f.life -= dt
+    for (let i = this.fxBits.length - 1; i >= 0; i--) {
+      if (this.fxBits[i].life <= 0) {
+        this.fxBits[i].sp.node.active = false
+        this.fxBits.splice(i, 1)
+      }
+    }
+  }
+
+  /** 画位图特效（在 `stepFxBits` 之后调，画在 `gFront` 那层之下）。 */
+  private drawFxBits(): void {
+    for (const f of this.fxBits) {
+      const t = 1 - Math.max(0, f.life / f.maxLife)    // 0 → 1
+      const r = f.r0 + (f.r1 - f.r0) * (1 - Math.pow(1 - t, 2))   // ease-out
+      const ang = f.rot0 + (f.rot1 - f.rot0) * t
+      const a = t < 0.14 ? t / 0.14 : Math.pow(1 - (t - 0.14) / 0.86, 1.35)  // 快速起、慢收
+      const ut = f.sp.node.getComponent(UITransform)
+      if (ut) ut.setContentSize(r * 2, r * 2)
+      f.sp.node.setPosition(f.x, this.H - f.y)
+      f.sp.node.angle = ang
+      const op = f.sp.node.getComponent(UIOpacity) ?? f.sp.node.addComponent(UIOpacity)
+      op.opacity = Math.round(Math.max(0, Math.min(1, a)) * 255)
+    }
   }
 
   private pushSlash(x: number, y: number, ang: number, scale: number, color: number): void {
@@ -1030,6 +1271,8 @@ export class DiveGame extends Component {
     this.sparks.length = 0
     this.arcs.length = 0
     this.blasts.length = 0
+    this.fxBits.length = 0
+    for (const f of this.fxBitPool) f.sp.node.active = false
     for (const f of this.floatSlots) {
       if (!f) continue
       f.life = 0
