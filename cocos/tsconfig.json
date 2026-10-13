@@ -1,18 +1,28 @@
 {
+  // ==========================================================================
+  // Cocos Creator 工程 tsconfig
+  //
+  // `./temp/tsconfig.cocos.json` 由**编辑器首次打开工程时生成**，里面包含
+  //   · assets/**/*.ts 的 include
+  //   · 引擎自带的 `cc` 类型声明（temp/declarations/cc.d.ts）
+  // 所以这里**不手写 include**，避免和编辑器的资源索引打架 ——
+  // 手写 include 的后果是"编辑器里能跑、tsc 报错"这类莫名其妙的分裂。
+  //
+  // 同理：不要在这里写 `"types"` / `"lib"`，交给基座配置。
+  //
+  // ⚠️ 沙箱（无 GUI 编辑器）里 `temp/` 不存在，所以**不要用这个文件做 CI 检查**；
+  //    离线校验走 `tools/verify_cocos.py`（它自带 cc 声明桩）。
+  // ==========================================================================
+  // Base configuration. Do not edit this field.
+  "extends": "./temp/tsconfig.cocos.json",
+
   "compilerOptions": {
-    "target": "ES2020",
-    "module": "ES2020",
-    "moduleResolution": "node",
+    // 代码是按 strict 写的（`!` 断言、`T | null` 联合都到位），别降到 false ——
+    // 降级会一口气放过所有隐式 any 与可能为 null 的访问。
     "strict": true,
-    "skipLibCheck": true,
-    "esModuleInterop": true,
+    // `@property` 装饰器依赖这两个开关。基座里通常已是这个值，
+    // 这里显式写死是为了"换 Cocos 版本后装饰器静默失效"这种坑不再出现。
     "experimentalDecorators": true,
-    "useDefineForClassFields": false,
-    "forceConsistentCasingInFileNames": true,
-    "lib": ["ES2020", "DOM"],
-    "types": [],
-    "noEmit": true,
-    "baseUrl": "."
-  },
-  "include": ["src/**/*.ts"]
+    "useDefineForClassFields": false
+  }
 }

@@ -1,0 +1,32 @@
+{
+  // ==========================================================================
+  // 离线类型检查用的 tsconfig（**不是** Cocos 工程的 tsconfig）
+  //
+  // 用途：在拿不到引擎 `cc.d.ts` 的沙箱里，把 `cocos/assets/scripts/**` 全量
+  //       过一遍 tsc —— 抓语法错误，以及**视图层用错模拟层 API**。
+  //
+  // 与 `cocos/tsconfig.json` 的分工：
+  //   cocos/tsconfig.json  ← 给编辑器和 Cocos 构建用（extends temp/tsconfig.cocos.json）
+  //   本文件               ← 给 `tools/verify_cocos.py` 用（cc 走 `cocos_cc_stub.d.ts`）
+  // 两者不冲突，也不要合并：合并必然导致一边缺文件。
+  //
+  // 运行： python tools/verify_cocos.py
+  // ==========================================================================
+  "compilerOptions": {
+    "noEmit": true,
+    "strict": true,
+    "target": "ES2020",
+    "module": "ES2020",
+    "moduleResolution": "node",
+    "skipLibCheck": true,
+    "lib": ["ES2020", "DOM"],
+    "experimentalDecorators": true,
+    "useDefineForClassFields": false,
+    "forceConsistentCasingInFileNames": true,
+    "types": []
+  },
+  "include": [
+    "../cocos/assets/scripts/**/*.ts",
+    "./cocos_cc_stub.d.ts"
+  ]
+}
