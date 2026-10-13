@@ -264,7 +264,11 @@ def main() -> int:
             "designH": DESIGN_H,
             "seed": SEED,
             "subIndex": 0,
-            "cam": {"__id__": 4},
+            # 这里曾经还序列化过 `"cam": {"__id__": 4}`（让组件拿到相机以便缩放）。
+            # 后来发现 **Cocos 3.8 的 Camera 没有 `zoom` 属性**（只有 orthoHeight，
+            # 而那是 Canvas 自己托管的状态），于是改成缩放 WorldRoot 节点，
+            # 组件不再需要相机 —— 属性删掉，场景里那条引用也一并删了
+            # （相机仍由 Canvas 的 `_cameraComponent` 持有，不会悬空）。
             "_id": nid(),
         },
         {   # 10 cc.SceneGlobals

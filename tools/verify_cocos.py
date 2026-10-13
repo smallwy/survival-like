@@ -1,28 +1,43 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Cocos 侧**离线**验证（不需要 GUI 编辑器、不需要引擎）。
+"""Cocos 侧**离线**验证（不需要 GUI 编辑器）。
 
-一条命令跑四件事：
+一条命令跑六件事：
   1. 真源漂移检查 —— `shared/` 与 `cocos/assets/scripts/shared/` 是否一致；
   2. 模拟核心无头冒烟 —— 编译 `shared/dive` 为 CJS 真跑，21 条不变量断言；
-  3. 视图层类型检查 —— 用 `tools/cocos_cc_stub.d.ts` 顶上 `cc`，把
-     `cocos/assets/scripts/**` 全量过 tsc；
-  4. 工程资源完整性 —— 场景/prefab 的 `__id__` 引用、`_id` 唯一性，以及
+  3. 视图层类型检查 —— 把 `cocos/assets/scripts/**` 全量过 tsc；
+  4. 美术完整性 —— 源图与 cocos 副本是否一致，以及**代码会去要的每个 key
+     在磁盘上是否真有对应文件**（反向也查残留）；
+  5. 工程资源完整性 —— 场景/prefab 的 `__id__` 引用、`_id` 唯一性，以及
      **脚本类 id ↔ .ts.meta uuid** 是否对得上（压缩 uuid 算法错了就红在这）。
+
+------------------------------------------------------------------------------
+第 3 步用哪份 `cc` 声明：优先用**引擎自带的那份**
+------------------------------------------------------------------------------
+按下面顺序找，找到就用，找不到才退回 `tools/cocos_cc_stub.d.ts`：
+
+  1. 环境变量 `COCOS_ENGINE_DTS`
+  2. `C:/ProgramData/cocos/editors/Creator/<版本>/resources/resources/3d/engine/
+     bin/.declarations/cc.d.ts`（本机 3.8.8 就装在这）
+
+**为什么这件事重要**：手写的声明桩是"按我的理解"写的，它只能验证"代码是否
+符合我的假设"。本项目真的因此漏过一次 —— 桩里我顺手写了 `Camera.zoom`，于是
+检查通过；换成引擎真声明后立刻报错，Cocos 3.8 的 `Camera` 根本没有 `zoom`
+（只有 `orthoHeight`，而那是 Canvas 托管的状态）。**桩越像真的，假绿越危险。**
 
 ------------------------------------------------------------------------------
 它能证明什么、不能证明什么（**这条边界必须说清，否则会得到假结论**）
 ------------------------------------------------------------------------------
 能证明：
   · 模拟核心与 `DiveScene.ts` 的行为一致（清波/商店/决策/死亡路径/确定性）；
-  · 视图层**没有用错模拟层 API**（字段名拼错、参数个数不对、类型不匹配）——
-    这是移植里最容易出的错，而且只有 tsc 抓得住；
-  · 真源与 Cocos 副本没有漂移；
+  · 视图层**没有用错模拟层 API，也没有用错引擎 API**（字段名拼错、参数个数不对、
+    属性根本不存在……）—— 这是移植里最容易出的错，而且只有 tsc 抓得住；
+  · 真源与 Cocos 副本没有漂移；美术亦然（且"表里加了 id、图却没同步"会红）；
   · 工程骨架自洽：打开编辑器时不会遇到"Missing Script / 悬空引用"这类问题。
 
 **不能**证明：
-  · 引擎 API 的真实行为（`Graphics.circle` 画出来什么样、`Node.layer` 默认值、
-    相机 zoom 与 UI 相机的配合……）。`cc` 声明桩只是签名，不含实现。
+  · 引擎 API 在**运行期**的真实行为（`Graphics.ellipse` 画出来什么样、
+    节点缩放与 UI 相机的配合、Sprite 的混合模式……）。类型只说明签名对。
   · 画面是否真的画对了。**这一条只能由你在 Creator 里打开工程、点运行确认。**
 
 所以本脚本绿了 ≠ 能跑；它绿了只说明"进编辑器之前，代码与工程骨架该对的都对上了"。
@@ -43,9 +58,74 @@ WEB = os.path.join(ROOT, 'web')
 TSC_JS = os.path.join(WEB, 'node_modules', 'typescript', 'bin', 'tsc')
 BUILD_DIR = os.path.join(ROOT, '.tmp', 'sim-build')
 COCOS_ASSETS = os.path.join(ROOT, 'cocos', 'assets')
+COCOS_RES = os.path.join(COCOS_ASSETS, 'resources')
+CHECK_TSCONFIG = os.path.join(ROOT, '.tmp', 'cocos_check.json')
 
 NODE = _node()
 steps = []
+
+# ---------------------------------------------------------------------------
+# 找引擎自带的 cc.d.ts（见文件头"第 3 步用哪份 cc 声明"）
+# ---------------------------------------------------------------------------
+_EDITOR_BASES = [
+    'C:/ProgramData/cocos/editors/Creator',                       # 本机 3.8.8
+    os.path.expanduser('~/.CocosCreator/editors/Creator'),
+    os.path.expanduser('~/AppData/Roaming/CocosCreator/editors/Creator'),
+    'C:/Program Files/Cocos/Creator',
+]
+_DTS_REL = 'resources/resources/3d/engine/bin/.declarations/cc.d.ts'
+
+
+def find_engine_dts():
+    """引擎自带的 cc.d.ts 路径；找不到返回 None（退回手写桩）。"""
+    env = os.environ.get('COCOS_ENGINE_DTS')
+    if env:
+        return env if os.path.isfile(env) else None
+    hits = []
+    for base in _EDITOR_BASES:
+        hits += glob.glob(os.path.join(base, '*', _DTS_REL))
+    if not hits:
+        return None
+
+    def ver_key(p):
+        parts = p.replace('\\', '/').split('/')
+        try:
+            i = parts.index('Creator')
+            return [int(x) for x in parts[i + 1].split('.') if x.isdigit()]
+        except Exception:                                    # noqa: BLE001
+            return [0]
+
+    return sorted(hits, key=ver_key)[-1]
+
+
+def write_check_tsconfig(engine_dts) -> str:
+    """生成类型检查用的 tsconfig。
+
+    **在 Python 里生成**，而不是仓库里放一份静态文件：`cc` 声明的位置是机器相关
+    的，静态文件必须"按机器改"，那就一定会有人忘了改、然后得到一份假绿。
+    """
+    cc = engine_dts.replace('\\', '/') if engine_dts else '../tools/cocos_cc_stub.d.ts'
+    cfg = {
+        'compilerOptions': {
+            'noEmit': True,
+            'strict': True,
+            'target': 'ES2020',
+            'module': 'ES2020',
+            'moduleResolution': 'node',
+            'skipLibCheck': True,
+            'lib': ['ES2020', 'DOM'],
+            'experimentalDecorators': True,
+            'useDefineForClassFields': False,
+            'forceConsistentCasingInFileNames': True,
+            'types': [],
+        },
+        'include': ['../cocos/assets/scripts/**/*.ts', cc],
+    }
+    os.makedirs(os.path.dirname(CHECK_TSCONFIG), exist_ok=True)
+    with open(CHECK_TSCONFIG, 'w', encoding='utf-8', newline='\n') as f:
+        json.dump(cfg, f, indent=2, ensure_ascii=False)
+        f.write('\n')
+    return cc
 
 
 def run(name, argv, cwd=ROOT):
@@ -205,8 +285,87 @@ def check_assets():
     return 0
 
 
+# ---------------------------------------------------------------------------
+# 美术完整性
+# ---------------------------------------------------------------------------
+def check_art():
+    print('\n' + '=' * 72)
+    print('>>> 美术完整性（源↔副本一致 / 代码会要的 key 在磁盘上都有）')
+    print('=' * 72)
+
+    errs = []
+
+    # 4.1 源 ↔ 副本：交给 sync_art.py --check（它做的是双侧哈希核对，
+    #     源变了、或 cocos 侧副本被手改，两种都能查出来）
+    print('  · 源↔副本漂移（web/src/assets → cocos/assets/resources）')
+    r = subprocess.run([sys.executable, os.path.join(TOOLS, 'sync_art.py'), '--check'],
+                       cwd=ROOT, encoding='utf-8', errors='replace',
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    for line in (r.stdout or '').strip().splitlines():
+        print('      ' + line)
+    if r.returncode != 0:
+        errs.append('美术源与副本不一致（见上面 sync_art 的输出）')
+
+    # 4.2 代码会去要的每个 key，磁盘上是否真有文件 —— 而且是**运行时同一份表**：
+    #     artPaths() 来自 shared/dive/artKeys.ts，跟 cocos 视图层用的是同一个函数。
+    idx = os.path.join(BUILD_DIR, 'dive', 'index.js')
+    if not os.path.isfile(idx):
+        errs.append('模拟核心没编译出来，读不到 artPaths()（先看第 2 步）')
+        paths = None
+    else:
+        js = "const m=require(process.argv[1]);process.stdout.write(JSON.stringify(m.artPaths()))"
+        r = subprocess.run([NODE, '-e', js, idx], cwd=ROOT, encoding='utf-8',
+                           errors='replace', stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        if r.returncode != 0:
+            errs.append('读取 artPaths() 失败：' + (r.stderr or '').strip()[:300])
+            paths = None
+        else:
+            paths = json.loads(r.stdout)
+
+    if paths is not None:
+        disk = set()
+        for dirpath, _dirs, files in os.walk(COCOS_RES):
+            for fn in files:
+                rel = os.path.relpath(os.path.join(dirpath, fn), COCOS_RES).replace('\\', '/')
+                if rel.endswith('.png'):
+                    disk.add(rel[:-4])
+                elif rel.endswith('.meta'):
+                    continue            # 编辑器给每张图生成的 .png.meta
+                else:
+                    errs.append(f'resources 下有非 PNG 文件：{rel}')
+
+        want = set(paths.values())
+        missing = sorted(k for k in paths if paths[k] not in disk)
+        orphans = sorted(disk - want)
+
+        print(f'  · artPaths() 给出 {len(paths)} 个 key；'
+              f'resources 下 {len(disk)} 个 PNG；对得上 {len(want & disk)} 个')
+
+        for k in missing[:15]:
+            errs.append(f'key "{k}" → 需要 {paths[k]}.png，磁盘上没有（跑 python tools/sync_art.py）')
+        if len(missing) > 15:
+            errs.append(f'…另有 {len(missing) - 15} 个缺失')
+        for o in orphans[:15]:
+            errs.append(f'磁盘上有 {o}.png，但没有任何 art key 指向它（残留 / 未登记）')
+        if len(orphans) > 15:
+            errs.append(f'…另有 {len(orphans) - 15} 个多余')
+
+    if errs:
+        print(f'\n  发现 {len(errs)} 个问题：')
+        for e in errs:
+            print('  ✗ ' + e)
+        steps.append(('美术完整性', 1))
+        return 1
+    print('\n  ✓ 美术完整：源与副本一致，且"代码会要的每一张图"都在磁盘上')
+    steps.append(('美术完整性', 0))
+    return 0
+
+
 def main():
     print(f'使用 node：{NODE}')
+
+    engine_dts = find_engine_dts()
+    cc = write_check_tsconfig(engine_dts)
 
     # 1) 真源漂移：shared/ 改了但忘了同步到 cocos/ 时，这里必须红
     run('真源漂移检查 sync_shared.py --check',
@@ -234,11 +393,21 @@ def main():
         steps.append(('模拟核心无头冒烟 dive_sim_smoke.js', 1))
         print('  （编译没过，跳过冒烟）')
 
-    # 3) 视图层：用 cc 声明桩做全量类型检查
-    run('视图层类型检查（cc 声明桩）',
-        [NODE, TSC_JS, '-p', os.path.join(TOOLS, 'cocos_check.tsconfig.json')])
+    # 3) 视图层：全量类型检查（cc 声明优先用引擎自带那份）
+    if engine_dts:
+        print(f'\ncc 声明 = 引擎自带：{cc}')
+        print('           → 检查的是**真**引擎 API（不是我们的假设）')
+    else:
+        print(f'\ncc 声明 = 手写桩：{cc}')
+        print('           ⚠️ 未找到引擎安装，本次只验证"代码是否符合我们的假设"。')
+        print('              装了 Cocos 后重跑，或设 COCOS_ENGINE_DTS 指向 cc.d.ts。')
+    run('视图层类型检查',
+        [NODE, TSC_JS, '-p', CHECK_TSCONFIG])
 
-    # 4) 工程资源：场景引用、脚本类 id、压缩 uuid
+    # 4) 美术：源↔副本 + "代码会要的 key 是否都在磁盘上"
+    check_art()
+
+    # 5) 工程资源：场景引用、脚本类 id、压缩 uuid
     check_assets()
 
     print('\n' + '=' * 72)

@@ -65,6 +65,21 @@ export class Gfx {
   fillCircle(x: number, y: number, r: number): this { this.circle(x, y, r); this.g.fill(); return this }
   strokeCircle(x: number, y: number, r: number): this { this.circle(x, y, r); this.g.stroke(); return this }
 
+  /**
+   * 椭圆（半轴 rx/ry）。
+   *
+   * 用途单一但重要：**深层的敌人定位环**。L3-L5 的鱼贴图本身是暗色，叠在同样
+   * 深的背景上会糊成一片 —— web 侧为此画过一个"贴合鱼轮廓的描边环"，
+   * 而且明确否掉了"暗色实心椭圆衬底"那版（实心底比小鱼还大，把鱼盖成亮斑，
+   * 满屏看起来像白色小飞虫）。所以这里只要描边。
+   */
+  ellipse(x: number, y: number, rx: number, ry: number): this {
+    this.g.ellipse(x, this.y(y), rx, ry); return this
+  }
+  strokeEllipse(x: number, y: number, rx: number, ry: number): this {
+    this.ellipse(x, y, rx, ry); this.g.stroke(); return this
+  }
+
   /** 矩形，(x,y) 是**左上角** */
   rect(x: number, y: number, w: number, h: number): this {
     const yb = this.y(y + h)

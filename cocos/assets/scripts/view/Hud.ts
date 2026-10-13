@@ -7,8 +7,11 @@
  * 坐标系：HUD 根节点与 WorldRoot 用**同一套 sim 坐标**（左上原点、y 向下），
  * 但**不随镜头缩放** —— 所以它是 Canvas 下独立的一支，位置固定在 (-W/2, -H/2)。
  *
+ * 商店卡上的立绘由注入的 `SpriteBank` 提供。**空银行是合法状态**：
+ * 没同步美术时立绘框退化成"—"占位，交互一切照旧。
+ *
  * ---------------------------------------------------------------------------
- * 四个注入 Creator 后才会暴露的坑（本文件都是按"踩过"的姿态写的）
+ * 五个注入 Creator 后才会暴露的坑（本文件都是按"踩过"的姿态写的）
  * ---------------------------------------------------------------------------
  * ① **layer 必须显式继承**：运行时 `new Node()` 的 layer 是 DEFAULT，而 Canvas
  *    的 UI 相机只渲染 UI_2D —— 漏一处就是"画面上什么都没有"。统一走 `mk()`。
@@ -22,14 +25,20 @@
  *    不能"先 rect 攒着、中途换色"—— 那会把前一个图形也染成新色。
  *    本文件统一用 `fill(c); fillRect(...)` / `line(c,a,w); strokeRect(...)` 成对写法。
  *
- * ④ **不要每帧 new Gfx**：Gfx 是薄的包装对象，但每帧每个按钮都新建一个纯属白扔
- *    GC。按钮自己的 Gfx 存在 Btn 记录里复用。
+ * ④ **不要每帧 new Gfx / new Sprite**：文本、按钮、立绘三类都是池化的。
+ *    每帧新建纯属白扔 GC。
+ *
+ * ⑤ **Sprite 必须 `trim = false`**：`trim` 默认 true，会裁掉透明边并按裁剪后的
+ *    尺寸渲染 —— 而立绘的 contain 缩放是按**原图**比例算的，裁了就偏。
  */
 
-import { Node, Label, Graphics, UITransform } from 'cc'
+import { Node, Label, Graphics, Sprite, SpriteFrame, UITransform } from 'cc'
 import { Gfx, col } from './Gfx'
+import { SpriteBank } from './art'
 import { UI, TXT, MENU } from '../shared/theme'
-import { LAYERS, RELIC_SLOTS, STAT_META, STAT_CARD, WEAPON_DEF } from '../shared/dive/tables'
+import {
+  LAYERS, RELIC_SLOTS, STAT_META, STAT_CARD, WEAPON_DEF, CARD_WEAPON_ID,
+} from '../shared/dive/tables'
 import type { DiveWorld } from '../shared/dive/world'
 import type { UpgradeDef } from '../shared/dive/types'
 
@@ -48,13 +57,21 @@ export class Hud {
   private readonly g: Gfx
   private readonly labels: Label[] = []
   private readonly btns: Btn[] = []
+  private readonly arts: Sprite[] = []
   private labelUsed = 0
   private btnUsed = 0
+  private artUsed = 0
   /** 全屏底色的外扩量（见 pageFill）：每帧按实际可视区刷新 */
   private padW = 8
   private padH = 8
 
-  constructor(private readonly canvas: Node, private readonly W: number, private readonly H: number) {
+  constructor(
+    private readonly canvas: Node,
+    private readonly W: number,
+    private readonly H: number,
+    /** 立绘银行。可以为空银行 —— 那就只画底色框，不影响任何交互 */
+    private readonly art: SpriteBank,
+  ) {
     this.root = this.mk('Hud', canvas)
     const ut = this.root.addComponent(UITransform)
     ut.setAnchorPoint(0, 0)
@@ -169,14 +186,64 @@ export class Hud {
     this.btnUsed++
   }
 
-  /** 每帧开头调用：清 Graphics、把上一帧多余的文本/按钮关掉 */
+  /** 每帧开头调用：清 Graphics、把上一帧多余的文本/按钮/立绘关掉 */
   begin(): void {
     this.g.clear()
     this.refreshPad()
     for (let i = this.labelUsed; i < this.labels.length; i++) this.labels[i].node.active = false
     for (let i = this.btnUsed; i < this.btns.length; i++) this.btns[i].node.active = false
+    for (let i = this.artUsed; i < this.arts.length; i++) this.arts[i].node.active = false
     this.labelUsed = 0
     this.btnUsed = 0
+    this.artUsed = 0
+  }
+
+  /**
+   * 一张立绘（contain 缩放：等比缩到**刚好放得进**给定框，多出来的留白）。
+   *
+   * 为什么是 contain 而不是 cover：素材统一是 2:1，而卡上的立绘框按卡高变化，
+   * cover 会把画面裁掉（武器会被切掉枪口）。contain 任何比例都放得下。
+   */
+  private putArt(cx: number, cy: number, fw: number, fh: number, sf: SpriteFrame | undefined, alpha = 1): void {
+    if (!sf) return
+    let sp = this.arts[this.artUsed]
+    if (!sp) {
+      const n = this.mk('art', this.root)
+      sp = n.addComponent(Sprite)
+      sp.trim = false
+      sp.sizeMode = Sprite.SizeMode.CUSTOM
+      this.arts.push(sp)
+    }
+    sp.node.active = true
+    sp.spriteFrame = sf
+    sp.color = col(0xffffff, alpha)
+    const iw = sf.rect.width
+    const ih = sf.rect.height
+    const k = Math.min(fw / Math.max(1, iw), fh / Math.max(1, ih))
+    sp.node.getComponent(UITransform)!.setContentSize(iw * k, ih * k)
+    sp.node.setPosition(cx, this.H - cy)
+    this.artUsed++
+  }
+
+  /**
+   * 商店卡 → 立绘 key。
+   *
+   * 两处历史坑（都在 web 侧踩过，注释原文在 DiveScene 的 `CARD_WEAPON_ID`）：
+   *   · 武器卡 id 有两种前缀：`w_<id>`（基础）与 `e_<id>`（进化）。
+   *   · 但 `w_torp` / `w_harp` 这两张早期卡用的是**缩写**，直接切前缀会得到
+   *     `torp` / `harp` —— `WEAPON_DEF` 里查不到 → 立绘取不到 → 卡面空白。
+   *     所以必须先过一遍修正表。
+   * 遗物卡直接取 `relicId`；其余类型（属性卡等）没有立绘，返回 null。
+   */
+  private cardArtKey(up: UpgradeDef): string | null {
+    if (up.kind === 'relic') return up.relicId ? 'item_' + up.relicId : null
+    const fixed = CARD_WEAPON_ID[up.id]
+    if (fixed) return 'item_' + fixed
+    if (up.id.startsWith('w_') || up.id.startsWith('e_')) {
+      const raw = up.id.slice(2)
+      if ((WEAPON_DEF as Record<string, unknown>)[raw]) return 'item_' + raw
+    }
+    return null
   }
 
   // -------------------------------------------------------------------------
@@ -290,9 +357,22 @@ export class Hud {
 
       if (!up) { this.center(x + cw / 2, y0 + ch / 2, sold ? '已购买' : '空', 16, TXT.mute); continue }
 
-      this.center(x + cw / 2, y0 + 34, up.name, 20, sold ? TXT.mute : TXT.cyber)
-      this.center(x + cw / 2, y0 + 66, up.desc, 14, TXT.dim)
-      if (up.relicId) this.center(x + cw / 2, y0 + 92, `遗物 · 上限 ${RELIC_SLOTS}`, 12, TXT.amber)
+      // ---- 立绘框 ----
+      // 卡面唯一的实底深色块（MENU 的明度阶梯是 page < slot < card）：
+      // 亮色立绘要靠"比卡面更深"的底才跳得出来，垫光晕只会把画面弄脏。
+      const ax = x + 14, ay = y0 + 50, aw = cw - 28, ah = 96
+      this.g.fill(MENU.slot, 1); this.g.fillRect(ax, ay, aw, ah)
+      this.g.line(MENU.divider, 0.8, 1); this.g.strokeRect(ax, ay, aw, ah)
+      const artKey = this.cardArtKey(up)
+      const artSf = artKey ? this.art.get(artKey) : undefined
+      this.putArt(x + cw / 2, ay + ah / 2, aw - 8, ah - 8, artSf, sold ? 0.35 : 1)
+      // 没有立绘的（属性卡 / 加装卡）在框里放一个"无图"提示，
+      // 免得玩家以为卡坏了 —— 空框比缺图更含糊。
+      if (!artSf) this.center(x + cw / 2, ay + ah / 2, '—', 20, TXT.mute)
+
+      this.center(x + cw / 2, y0 + 30, up.name, 20, sold ? TXT.mute : TXT.cyber)
+      this.center(x + cw / 2, y0 + 168, up.desc, 14, TXT.dim)
+      if (up.relicId) this.center(x + cw / 2, y0 + 190, `遗物 · 上限 ${RELIC_SLOTS}`, 12, TXT.amber)
 
       // 属性卡显示"当前值"
       const statKey = STAT_CARD[up.id]
@@ -301,16 +381,16 @@ export class Hud {
         if (meta) {
           const cur = w.st[statKey]
           const show = meta.pct ? `${(cur * 100).toFixed(0)}%` : cur.toFixed(1)
-          this.center(x + cw / 2, y0 + 118, `${meta.name} 现 ${show}`, 13, TXT.main)
+          this.center(x + cw / 2, y0 + 214, `${meta.name} 现 ${show}`, 13, TXT.main)
         }
       }
-      this.center(x + cw / 2, y0 + ch - 92, sold ? '已购买' : `${up.cost} 鱼骨`, 18,
+      this.center(x + cw / 2, y0 + 250, sold ? '已购买' : `${up.cost} 鱼骨`, 18,
         sold ? TXT.mute : (afford ? TXT.bone : TXT.warn))
 
       const bw2 = (cw - 44) / 2, bh = 40
-      this.button(x + 16 + bw2 / 2, y0 + ch - 62, bw2, bh, sold ? '已售出' : '购买',
+      this.button(x + 16 + bw2 / 2, y0 + ch - 40, bw2, bh, sold ? '已售出' : '购买',
         () => cbs.onBuy(i), !sold && afford)
-      this.button(x + 16 + bw2 + 12 + bw2 / 2, y0 + ch - 62, bw2, bh, w.locked[i] ? '已锁定' : '锁定',
+      this.button(x + 16 + bw2 + 12 + bw2 / 2, y0 + ch - 40, bw2, bh, w.locked[i] ? '已锁定' : '锁定',
         () => cbs.onLock(i), !sold)
     }
 

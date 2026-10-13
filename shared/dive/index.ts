@@ -26,3 +26,6 @@ export * from './tables'
 export * from './rng'
 export * from './pool'
 export * from './world'
+// 美术 key→路径 的唯一说明。放这里而不是各引擎各写一份，是为了让离线验证
+// 能 require 运行时同一份表去跟磁盘对账（见 artKeys.ts 头部说明）。
+export * from './artKeys'
