@@ -16,11 +16,18 @@
  */
 
 import { sys } from 'cc'
-import { defaultProfile, normalizeProfile } from '../shared/dive/profile'
+import { defaultProfile, normalizeProfile, migrateV1toV2 } from '../shared/dive/profile'
 import type { Profile } from '../shared/dive/profile'
 
 /** 带版本号的 key：将来结构大改时可以并存 key，而不是原地覆盖旧档 */
-const KEY = 'sgr.profile.v1'
+const KEY = 'sgr.profile.v2'
+/**
+ * v1 的 key —— **只读**，用于迁移；不写、不删（回滚保护）。
+ *
+ * 为什么留着：万一 v2 出问题要回退版本，v1 存档还在，老玩家不至于进度全灭。
+ * 迁移只在内存里做，落盘一律写 v2。
+ */
+const KEY_V1 = 'sgr.profile.v1'
 
 /**
  * 取本地存储。Web 上就是 `window.localStorage`，原生平台落到各平台实现。
@@ -38,8 +45,14 @@ export function loadProfile(): Profile {
     const ls = store()
     if (!ls) return defaultProfile()
     const raw = ls.getItem(KEY)
-    if (!raw) return defaultProfile()
-    return normalizeProfile(JSON.parse(raw))
+    if (raw) return normalizeProfile(JSON.parse(raw))
+    // 回落：v2 没有 → 读 v1 并迁移（旧纪录一个不丢，新字段走默认值）
+    const rawV1 = ls.getItem(KEY_V1)
+    if (rawV1) {
+      console.info('[save] 发现 v1 存档，迁移到 v2（旧 key 保留）')
+      return migrateV1toV2(JSON.parse(rawV1))
+    }
+    return defaultProfile()
   } catch (e) {
     console.warn('[save] 读档失败，按"无存档"开局：', e)
     return defaultProfile()

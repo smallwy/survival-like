@@ -389,7 +389,7 @@ const STAT_CARD: Record<string, keyof Stats> = {
  * 一半的遗物**带代价**：这是设计的核心。纯增益道具不需要抉择，
  * 只要看到就买；带代价的才会让玩家在商店里停下来算"我这局吃不吃得住"。
  */
-const RELIC_SLOTS = 4
+const RELIC_SLOTS = 6
 
 type RelicId =
   | 'echo_heart'      // 回声心脏：低氧增伤
@@ -5866,45 +5866,44 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
    */
   private drawRelicSlots(g: Phaser.GameObjects.Graphics, x: number, y: number): void {
     const w = 250
-    const cellH = 74
-    const h = 44 + RELIC_SLOTS * cellH
+    // V6.30 P0-②：被动槽 4 → 6。单列 6 行时 `44 + 6 × 74 = 488`，面板起点 y≈323
+    // → 底边 811 **超出 749 视口**。故改 **2 列 × 3 行**（每格只放图标 + 名称），
+    // 高度降到 `40 + 3 × 58 = 214`。描述与代价**仍完整写在商店卡上**（槽里不重复）。
+    const cols = 2
+    const rows = Math.ceil(RELIC_SLOTS / cols)
+    const cellH = 58
+    const h = 40 + rows * cellH
     // 审计：每帧登记侧栏面板（用于对比度计算）
     this.ui.push({ kind: 'panel', x, y, w, h, fill: '#' + (UI.panel as number).toString(16).padStart(6, '0') })
     g.fillStyle(UI.panel, 0.88); g.fillRoundedRect(x, y, w, h, 10)
     neon(g, BONE, () => { g.strokeRoundedRect(x, y, w, h, 10) },
       { width: 1, alpha: 0.5, bloom: false })
-    this.txt(`遗物槽 ${this.relics.length} / ${RELIC_SLOTS}`, x + 14, y + 11, '14px', TXT.bone, FONT)
+    this.txt(`遗物槽 ${this.relics.length} / ${RELIC_SLOTS}`, x + 14, y + 9, '14px', TXT.bone, FONT)
     g.fillStyle(BONE, 0.35)
-    g.fillRect(x + 14, y + 32, w - 28, 1)
+    g.fillRect(x + 14, y + 30, w - 28, 1)
 
+    const pad = 12, gapx = 8
+    const bw = (w - pad * 2 - gapx * (cols - 1)) / cols
+    const bh = cellH - 8
     for (let i = 0; i < RELIC_SLOTS; i++) {
-      const ry = y + 38 + i * cellH
-      const bx = x + 12, bw = w - 24, bh = cellH - 8
+      const cx = x + pad + (i % cols) * (bw + gapx)
+      const cy = y + 40 + Math.floor(i / cols) * cellH
       const id = this.relics[i]
       if (!id) {
         g.lineStyle(1, UI.line, 0.5)
-        g.strokeRoundedRect(bx, ry, bw, bh, 8)
-        this.txt(`空槽 ${i + 1}`, bx + bw / 2, ry + bh / 2 - 8, '12px', TXT.mute, FONT, 'center')
+        g.strokeRoundedRect(cx, cy, bw, bh, 8)
+        this.txt(`${i + 1}`, cx + bw / 2, cy + bh / 2 - 8, '14px', TXT.mute, FONT, 'center')
         continue
       }
       const r = RELIC_DEF[id]
-      g.fillStyle(UI.panelHi, 0.75); g.fillRoundedRect(bx, ry, bw, bh, 8)
-      neon(g, BONE, () => { g.strokeRoundedRect(bx, ry, bw, bh, 8) },
+      g.fillStyle(UI.panelHi, 0.75); g.fillRoundedRect(cx, cy, bw, bh, 8)
+      neon(g, BONE, () => { g.strokeRoundedRect(cx, cy, bw, bh, 8) },
         { width: 1.2, alpha: 0.75, bloom: false })
-      this.drawRelicIcon(g, id, bx + 26, ry + bh / 2, 14)
-      this.txt(r.name, bx + 50, ry + 7, '14px', TXT.bone, FONT)
-      // 描述可能较长，**折行**（槽宽 226，14px 中文约 16 字/行）
-      // 原来是一行 10px 不折行，「拾取范围 +80% · 鱼骨价值 +30%」直接顶出槽外。
-      const dLines = this.wrapByWidth(r.desc, 12, bw - 62, 2)
-      for (let li = 0; li < dLines.length; li++) {
-        this.txt(dLines[li], bx + 50, ry + 26 + li * 15, '12px', TXT.dim, FONT)
-      }
-      if (r.cost2) {
-        const cLines = this.wrapByWidth(r.cost2, 12, bw - 62, 2)
-        for (let li = 0; li < cLines.length; li++) {
-          this.txt(cLines[li], bx + 50, ry + 27 + dLines.length * 15 + li * 15, '12px', TXT.warn, FONT)
-        }
-      }
+      this.drawRelicIcon(g, id, cx + 24, cy + bh / 2, 12)
+      this.txt(r.name, cx + 40, cy + bh / 2 - 8, '14px', TXT.bone, FONT)
+      // 带代价的遗物打一个警示点：**代价不能藏起来**（玩家第 8 波发现氧气上限变低，
+      // 得有个地方回查是哪个遗物带来的）。完整代价文字在商店卡上。
+      if (r.cost2) { g.fillStyle(UI.danger, 0.9); g.fillCircle(cx + bw - 8, cy + 8, 2.5) }
     }
   }
 
@@ -6013,6 +6012,10 @@ this.txt('热泉上升流 · 按住 ↓ 压住艇身', W / 2, byy - 12, '13px', 
         }
         break
       }
+      // ⚠️ V6.33 的 4 条机制型遗物（导体缠绕/破血锚/共鸣腔/过载核心）**只落在 Cocos 侧**。
+      //    web 原型自 V6.29 起已落后于真源（连进化武器 harp_cb/echo_mu/acid_fd 都没有），
+      //    只补这 4 条会造成"半对齐"的新混乱 —— 追平应作为独立一轮整体处理。
+      //    在 web 追平之前，这里不要加这 4 个 case（会触发 TS2678：值不在 RelicId 里）。
     }
   }
 

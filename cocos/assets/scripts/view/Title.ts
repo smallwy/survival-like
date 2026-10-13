@@ -62,9 +62,12 @@ import {
   neon, neonLine, neonCircle, neonPoly, verticalBands, glowPool, lightCone,
 } from './neon'
 import { SpriteBank } from './art'
-import { UI, TXT, BUILD_TAG } from '../shared/theme'
+import { UI, TXT, MENU, TXT_LIGHT, BUILD_TAG } from '../shared/theme'
 import { SUBS, SUB_ART_R } from '../shared/subs'
 import type { SubDef, SubId } from '../shared/subs'
+import { unlocksByKind, isUnlocked, PERKS } from '../shared/dive/unlocks'
+import type { PerkId } from '../shared/dive/unlocks'
+import type { MetaSource } from './Codex'
 
 /** 卡片布局：与 web 逐值一致（改这里就是改"卡面比例"） */
 const CW = 268
@@ -129,15 +132,34 @@ export class Title {
   private footer = ''
   private footerLabel: Label | null = null
   private recordsLabel: Label | null = null
-  /** 装置坞占位面板。开着的时候卡片与按钮不响应 —— 否则"点一下关闭"会顺手把选项也换了 */
+  /** 沉淀生物质钱包（顶部右侧）。数值由 `refreshWallet()` 写 */
+  private walletLabel: Label | null = null
+  private walletIcon: Gfx | null = null
+  /** 装置坞（解锁屏）。开着的时候卡片与按钮不响应 —— 否则"点一下关闭"会顺手把选项也换了 */
   private modal: Node | null = null
+
+  // ---- 装置坞 ----
+  private gDock: Gfx | null = null
+  private dockText: Node | null = null
+  private dockHit: Node | null = null
+  private dockTab = 0
+  /** 装置坞四类（与 `unlocks.ts` 的 UnlockKind + perk 对应） */
+  private static readonly DOCK_TABS = ['潜航器', '武器', '遗物', '强化']
 
   constructor(
     private readonly canvas: Node,
     private readonly W: number,
     private readonly H: number,
     private readonly art: SpriteBank,
-    private readonly cb: { onStart: (sub: SubId) => void },
+    private readonly cb: {
+      onStart: (sub: SubId) => void
+      /** 元系统只读快照（bio / 解锁 / 图鉴 / 强化等级） */
+      getMeta: MetaSource
+      /** 花 bio 买一项永久强化；返回是否买成（成不成由视图层定，见 DiveGame） */
+      onBuyPerk: (id: PerkId) => boolean
+      /** 打开图鉴屏（图鉴是独立类，由 DiveGame 持有） */
+      onOpenCodex: () => void
+    },
   ) {
     this.root = this.mk('Title', canvas)
     const ut = this.root.addComponent(UITransform)
@@ -513,7 +535,9 @@ export class Title {
     const cx = this.W / 2
     const by = this.H * 0.70
     this.makeButton(cx, by, '开 始 下 潜', true, () => this.confirm())
-    this.makeButton(cx, by + 78, '装 置 坞', false, () => this.showDock())
+    // 次按钮两个横排：装置坞 / 图鉴（点击区 180×48 ≥ 次按钮下限 160×48，间距 20）
+    this.makeButton(cx - 100, by + 78, '装 置 坞', false, () => this.showDock(), 180)
+    this.makeButton(cx + 100, by + 78, '图 鉴', false, () => this.cb.onOpenCodex(), 180)
   }
 
   private buildHints(): void {
@@ -522,6 +546,38 @@ export class Title {
     // 纪录行。web 侧没有这一行 —— 放**顶部**是因为纵向布局已经排满
     // （副标题 322 / 装饰线 349 / 卡顶 358 之间没有空档），而 0–180 整条是空的。
     this.recordsLabel = this.center(cx, 38, '尚无下潜记录', 14, TXT.mute)
+
+    // 沉淀生物质钱包（顶部右侧，与战绩行同高、右对齐不撞）。
+    // 数字 22px 走 TXT.amber（资源色），标签 14px 走弱色 —— 中文 14px 是下限。
+    this.walletLabel = this.put(this.W - 24, 42, '0', 22, TXT.amber, 'right')
+    this.put(this.W - 24, 20, '沉淀生物质', 14, TXT.mute, 'right')
+    const iconNode = this.mk('tWalletIcon', this.root)
+    this.walletIcon = new Gfx(iconNode.addComponent(Graphics), this.H)
+    this.drawWalletIcon()
+    this.refreshWallet()      // 读档先于建节点，所以这里直接就能显示真实余额
+    this.updateFooter()
+  }
+
+  /** 钱包图标：一个小菱形（＝"沉淀物"）。故意不用 emoji/字形 —— 默认字体不一定有。 */
+  private drawWalletIcon(): void {
+    const g = this.walletIcon
+    if (!g) return
+    const cx = this.W - 162
+    const cy = 42
+    g.clear()
+    g.fill(UI.amber, 0.9)
+    g.moveTo(cx, cy - 9); g.lineTo(cx + 9, cy); g.lineTo(cx, cy + 9); g.lineTo(cx - 9, cy)
+    g.close(); g.fillPath()
+    // 外描边用同色低透明：既收口又不抢眼（不引新色，PALETTE 里没有 amberHi）
+    g.line(UI.amber, 0.45, 1.2)
+    g.strokeSeg(cx, cy - 9, cx + 9, cy)
+    g.strokeSeg(cx + 9, cy, cx, cy + 9)
+  }
+
+  /** 刷新钱包数字（开局、结算后、买完强化后都调一次） */
+  refreshWallet(): void {
+    if (!this.walletLabel) return
+    this.walletLabel.string = String(this.cb.getMeta().bio)
   }
 
   /** 版本角标：一眼确认"跑的是哪个版本、适配成了多大"（本项目反复吃过的亏） */
@@ -541,8 +597,9 @@ export class Title {
    * 霓虹按钮：近黑底 + 青描边 + 外侧 halo。
    * 不用"实心青填充"——大面积高饱和会把标题压下去，也不符合 U 艇仪表的调性。
    */
-  private makeButton(cx: number, cy: number, s: string, primary: boolean, onTap: () => void): void {
-    const w = primary ? 300 : 200
+  private makeButton(cx: number, cy: number, s: string, primary: boolean, onTap: () => void,
+                     widthOverride?: number): void {
+    const w = widthOverride ?? (primary ? 300 : 200)
     const h = primary ? 66 : 48
     const n = this.mk('tbtn', this.root)
     const ut = n.addComponent(UITransform)
@@ -675,48 +732,186 @@ export class Title {
     this.recordsLabel.color = col(parseInt((hasRuns ? TXT.main : TXT.mute).slice(1), 16))
   }
 
-  /** 装置坞占位面板 —— 港口与装置升级树还没做，这里只说明"还没接入"，不假装有内容。 */
+  // -------------------------------------------------------------------------
+  // 装置坞（解锁屏）—— V6.36：接真解锁集与永久强化，替换原来的占位面板
+  // -------------------------------------------------------------------------
+  private static readonly DOCK_PW = 880
+  private static readonly DOCK_PH = 660
+
+  private dockX0(): number { return (this.W - Title.DOCK_PW) / 2 }
+  private dockY0(): number { return (this.H - Title.DOCK_PH) / 2 }
+
+  /** 左列 4 个 tab 的矩形（sim 坐标，左上角） */
+  private dockTabRect(i: number): { x: number; y: number; w: number; h: number } {
+    return { x: this.dockX0() + 20, y: this.dockY0() + 84 + i * 68, w: 140, h: 56 }
+  }
+
+  /**
+   * 建一个 UITransform 命中矩形（**sim 坐标**，锚点 (0,0)）。
+   *
+   * ⚠️ 位置必须写 `(x, H - y - h)`：锚点 (0,0) 的节点位置点是它的**左下角**，
+   *    而 sim 的 (x,y) 是左上角。漏了这一步不会报错，只会得到一个错一格的透明热区。
+   */
+  private hitRect(parent: Node, x: number, y: number, w: number, h: number): Node {
+    const n = this.mk('hit', parent)
+    const ut = n.addComponent(UITransform)
+    ut.setAnchorPoint(0, 0)
+    ut.setContentSize(w, h)
+    n.setPosition(x, this.H - y - h)
+    return n
+  }
+
+  private closeDock(): void {
+    if (this.dockHit) { this.dockHit.destroy(); this.dockHit = null }
+    this.gDock = null
+    this.dockText = null
+    this.modal = null
+  }
+
+  /** 装置坞：解锁屏。开着时卡片与按钮不响应（`this.modal` 挡着）。 */
   private showDock(): void {
     if (this.modal) return
-    const m = this.mk('dockModal', this.root)
-    const pw = 440
-    const ph = 240
-    m.setPosition(this.W / 2, this.H / 2)
+    this.dockTab = 0
 
-    const g = new Gfx(this.mk('dockBg', m).addComponent(Graphics), 0)
-    g.fill(UI.abyss, 0.94)
-    g.fillRoundRect(-pw / 2, -ph / 2, pw, ph, 14)
-    g.line(UI.cyan, 0.9, 1.5)
-    g.strokeRoundRect(-pw / 2, -ph / 2, pw, ph, 14)
-    g.line(UI.cyan, 0.10, 3)
-    g.strokeRoundRect(-pw / 2 - 3, -ph / 2 - 3, pw + 6, ph + 6, 16)
+    const root = this.mk('dockRoot', this.root)
+    this.modal = root
+    this.dockHit = root
+    this.gDock = new Gfx(this.mk('dockG', root).addComponent(Graphics), this.H)
 
-    const line = (y: number, s: string, size: number, color: string) => {
-      const l = this.mk('dockText', m).addComponent(Label)
+    // 全屏关闭区（点面板外关闭；盖住画布含外扩，否则弹窗两侧点不动）
+    const scrim = this.hitRect(root, -this.padW, -this.padH, this.W + this.padW * 2, this.H + this.padH * 2)
+    scrim.on(Node.EventType.TOUCH_END, () => this.closeDock())
+
+    // 面板本体：吞掉点击（否则点面板会顺手关掉它）
+    this.hitRect(root, this.dockX0(), this.dockY0(), Title.DOCK_PW, Title.DOCK_PH)
+
+    // 关闭按钮 ×（44×44，右上角）
+    const cbtn = this.hitRect(root, this.dockX0() + Title.DOCK_PW - 56, this.dockY0() + 10, 44, 44)
+    cbtn.on(Node.EventType.TOUCH_END, () => this.closeDock())
+
+    // 左列 4 个 tab
+    for (let i = 0; i < 4; i++) {
+      const r = this.dockTabRect(i)
+      const n = this.hitRect(root, r.x, r.y, r.w, r.h)
+      n.on(Node.EventType.TOUCH_END, () => { if (this.dockTab !== i) { this.dockTab = i; this.drawDock() } })
+    }
+
+    this.drawDock()
+  }
+
+  /** 重画装置坞内容（切 tab / 买完强化后调）。文本层与行热区整体重建，避免节点泄漏。 */
+  private drawDock(): void {
+    if (!this.gDock || !this.dockHit) return
+    const root = this.dockHit
+    if (this.dockText) this.dockText.destroy()
+    const text = this.mk('dockText', root)
+    this.dockText = text
+    const line = (x: number, y: number, s: string, size: number, color: string,
+                  mode: 'left' | 'center' | 'right' = 'left') => {
+      const l = this.mk('dl', text).addComponent(Label)
       l.string = s
       l.fontSize = size
       l.lineHeight = size + 2
       l.color = col(parseInt(color.slice(1), 16))
-      l.horizontalAlign = Label.HorizontalAlign.CENTER
       l.verticalAlign = Label.VerticalAlign.CENTER
-      l.node.setPosition(0, y)
+      l.horizontalAlign = mode === 'left' ? Label.HorizontalAlign.LEFT
+        : mode === 'right' ? Label.HorizontalAlign.RIGHT : Label.HorizontalAlign.CENTER
+      const ut = l.node.getComponent(UITransform)
+      if (ut) ut.setAnchorPoint(mode === 'left' ? 0 : mode === 'right' ? 1 : 0.5, 0.5)
+      l.node.setPosition(x, this.H - y)
     }
-    line(ph / 2 - 38, '装 置 坞', 27, TXT.cyber)
-    line(6, '尚未接入：港口与装置升级树还没做', 16, TXT.dim)
-    line(38, `当前潜航器：${SUBS[this.sel].name}　·　装备槽 ${SUBS[this.sel].slots}`, 15, TXT.mute)
-    line(-ph / 2 + 28, '点击任意处关闭', 14, TXT.mute)
 
-    // 全屏关闭区：盖住整块画布（含外扩），否则弹窗两侧点不动
-    const hit = this.mk('dockHit', this.root)
-    const ut = hit.addComponent(UITransform)
-    ut.setAnchorPoint(0, 0)
-    ut.setContentSize(this.W + this.padW * 2, this.H + this.padH * 2)
-    hit.setPosition(-this.W / 2 - this.padW, -this.H / 2 - this.padH)
-    hit.on(Node.EventType.TOUCH_END, () => {
-      m.destroy()
-      this.modal = null
-    })
-    this.modal = m
+    const g = this.gDock
+    const x0 = this.dockX0(), y0 = this.dockY0()
+    const PW = Title.DOCK_PW, PH = Title.DOCK_PH
+    const meta = this.cb.getMeta()
+    g.clear()
+    g.fill(MENU.page, 0.9)
+    g.fillRect(-this.padW, -this.padH, this.W + this.padW * 2, this.H + this.padH * 2)
+    g.fill(UI.abyss, 0.98)
+    g.fillRoundRect(x0, y0, PW, PH, 14)
+    neon(g, UI.cyan, () => { g.roundRect(x0, y0, PW, PH, 14); g.stroke() },
+      { width: 1.5, alpha: 0.85, bloom: false })
+    // 顶栏横梁（同 Codex：`MENU` 没有 `header`，梁取 `UI.panelHi`「抬起面」）
+    g.fill(UI.panelHi, 0.9)
+    g.fillRoundRect(x0, y0, PW, 62, 14)
+    g.fill(UI.panelHi, 0.9)
+    g.fillRect(x0, y0 + 48, PW, 14)
+
+    line(x0 + 28, y0 + 32, '装 置 坞', 26, TXT_LIGHT.main, 'left')
+    line(x0 + PW - 72, y0 + 32, `${meta.bio} 沉淀`, 16, TXT_LIGHT.accent, 'right')
+    line(x0 + PW - 28, y0 + PH - 22, '点击面板外关闭', 14, TXT_LIGHT.mute, 'right')
+    line(x0 + 28, y0 + PH - 22, '达成条件即解锁；强化用沉淀生物质购买', 14, TXT_LIGHT.mute, 'left')
+
+    // 关闭按钮的 ×
+    g.line(UI.cyan, 0.85, 2)
+    const cxp = x0 + PW - 34, cyp = y0 + 32
+    g.strokeSeg(cxp - 8, cyp - 8, cxp + 8, cyp + 8)
+    g.strokeSeg(cxp + 8, cyp - 8, cxp - 8, cyp + 8)
+
+    // 左列 tab
+    for (let i = 0; i < 4; i++) {
+      const r = this.dockTabRect(i)
+      const on = i === this.dockTab
+      g.fill(on ? MENU.cardHi : MENU.slot, 1)
+      g.fillRoundRect(r.x, r.y, r.w, r.h, 9)
+      neon(g, on ? UI.cyan : UI.line, () => { g.roundRect(r.x, r.y, r.w, r.h, 9); g.stroke() },
+        { width: on ? 2 : 1.2, alpha: on ? 1 : 0.5, bloom: false })
+      line(r.x + r.w / 2, r.y + r.h / 2, Title.DOCK_TABS[i], 16, on ? TXT_LIGHT.main : TXT_LIGHT.dim, 'center')
+    }
+
+    // 右区列表
+    const lx = x0 + 180
+    const lw = PW - 180 - 24
+    const rowH = 38
+    const pitch = 42
+    const yTop = y0 + 86
+
+    // 行热区容器（强化行才有点击）
+    const rows = this.mk('dockRows', root)
+
+    if (this.dockTab === 3) {
+      // ---- 永久强化（可购买）----
+      for (let i = 0; i < PERKS.length; i++) {
+        const d = PERKS[i]
+        const ry = yTop + i * pitch
+        const cur = Math.max(0, Math.min(d.maxLvl, Math.floor(meta.perks[d.id] ?? 0)))
+        const cost = cur >= d.maxLvl ? null : d.prices[cur]
+        const afford = cost !== null && meta.bio >= cost
+        g.fill(MENU.card, 1)
+        g.fillRoundRect(lx, ry, lw, rowH, 8)
+        neon(g, cost !== null && afford ? UI.amber : MENU.edge, () => { g.roundRect(lx, ry, lw, rowH, 8); g.stroke() },
+          { width: 1.2, alpha: 0.75, bloom: false })
+        line(lx + 12, ry + rowH / 2, d.name, 16, TXT_LIGHT.main)
+        line(lx + 132, ry + rowH / 2, `${d.desc}　Lv ${cur}/${d.maxLvl}`, 14, TXT_LIGHT.dim)
+        const chip = cost === null ? '已满级' : `${cost} 沉淀`
+        line(lx + lw - 12, ry + rowH / 2, chip, 14,
+          cost === null ? TXT_LIGHT.mute : afford ? TXT_LIGHT.accent : TXT_LIGHT.warn, 'right')
+        if (cost !== null) {
+          const hit = this.hitRect(rows, lx, ry, lw, rowH)
+          hit.on(Node.EventType.TOUCH_END, () => {
+            if (this.cb.onBuyPerk(d.id)) this.drawDock()
+          })
+        }
+      }
+    } else {
+      // ---- 潜航器 / 武器 / 遗物（达成即解锁，只读）----
+      const kind = (['sub', 'weapon', 'relic'] as const)[this.dockTab]
+      const list = unlocksByKind(kind)
+      for (let i = 0; i < list.length && i < 12; i++) {
+        const u = list[i]
+        const ry = yTop + i * pitch
+        const ok = isUnlocked(meta, u.id)
+        g.fill(ok ? MENU.card : MENU.slot, 1)
+        g.fillRoundRect(lx, ry, lw, rowH, 8)
+        neon(g, ok ? UI.jade : MENU.edge, () => { g.roundRect(lx, ry, lw, rowH, 8); g.stroke() },
+          { width: ok ? 1.4 : 1, alpha: ok ? 0.9 : 0.55, bloom: false })
+        line(lx + 12, ry + rowH / 2, u.name, 16, ok ? TXT_LIGHT.main : TXT_LIGHT.mute)
+        line(lx + 152, ry + rowH / 2, u.cond, 14, ok ? TXT_LIGHT.dim : TXT_LIGHT.mute)
+        line(lx + lw - 12, ry + rowH / 2, ok ? '已解锁' : '未达成', 14,
+          ok ? TXT_LIGHT.good : TXT_LIGHT.mute, 'right')
+      }
+    }
   }
 
   // -------------------------------------------------------------------------

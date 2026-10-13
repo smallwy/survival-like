@@ -303,6 +303,12 @@ if __name__ == '__main__':
         #   ② 关键词要用靠前的片段，不能写完整词（"机关枪"会被截掉）。
         name = None
         for kw, nid in (
+                        # 批 4：V6.30 新增进化（image-to-image 由基础武器改造）
+                        # ⚠️ 必须排在最前："聚焦回声炮" 里含 "回声炮" 三个连续字，
+                        #    排在基础武器之后就永远匹配不到。
+                        ('三重鱼', 'harp_tr'), ('回旋鱼', 'harp_cb'),
+                        ('多重回', 'echo_mu'), ('聚焦回', 'echo_fo'),
+                        ('持久酸', 'acid_fd'), ('酸雨', 'acid_ra'),
                         # 批 3：遗物（独立物件，键 = RelicId）
                         ('回声心脏', 'echo_heart'), ('骨殖转化', 'osteoblast'),
                         ('潮汐罗盘', 'tidal_compass'), ('共振核心', 'resonance_core'),

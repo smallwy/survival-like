@@ -43,6 +43,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -64,7 +65,7 @@ ITEM_W, ITEM_H = 600, 300
 # weapons/*.png 等，都是历史中间产物或已废弃（`w_gun` 这类键现在只出现在
 # 卡片 id 字符串里，不作为贴图使用），不进清单。
 # ---------------------------------------------------------------------------
-RULES: list[tuple[str, str, str]] = [
+_ASSET_RULES: list[tuple[str, str, str]] = [
     # ---- 五层环境背景（DiveScene: ENV_BG / bg.setTexture(`env${layerIdx}`)）----
     ("env/L1.webp", "env/L1.png", "webp2png"),
     ("env/L2.webp", "env/L2.png", "webp2png"),
@@ -80,36 +81,31 @@ RULES: list[tuple[str, str, str]] = [
     ("sub/sub_raia.png", "sub/sub_raia.png", "copy"),
     ("sub/sub_bathy.png", "sub/sub_bathy.png", "copy"),
     ("sub/sub_body.png", "sub/sub_body.png", "copy"),   # 变体缺失时的兜底
-    # ---- 商店卡片立绘（键统一为 item_<id>）----
-    # 武器 id：gun/torpedo/arc/sonar + 8 个进化形态
-    ("items/item_gun.png", "items/item_gun.png", "item"),
-    ("items/item_gun_gl.png", "items/item_gun_gl.png", "item"),
-    ("items/item_gun_sg.png", "items/item_gun_sg.png", "item"),
-    ("items/item_torpedo.png", "items/item_torpedo.png", "item"),
-    ("items/item_torp_cl.png", "items/item_torp_cl.png", "item"),
-    ("items/item_torp_hv.png", "items/item_torp_hv.png", "item"),
-    ("items/item_arc.png", "items/item_arc.png", "item"),
-    ("items/item_arc_ov.png", "items/item_arc_ov.png", "item"),
-    ("items/item_arc_st.png", "items/item_arc_st.png", "item"),
-    ("items/item_sonar.png", "items/item_sonar.png", "item"),
-    ("items/item_sonar_rs.png", "items/item_sonar_rs.png", "item"),
-    ("items/item_sonar_fc.png", "items/item_sonar_fc.png", "item"),
-    ("items/item_harpoon.png", "items/item_harpoon.png", "item"),
-    # 遗物 id：见 shared/dive/tables.ts RELIC_DEF
-    ("items/item_echo_heart.png", "items/item_echo_heart.png", "item"),
-    ("items/item_osteoblast.png", "items/item_osteoblast.png", "item"),
-    ("items/item_tidal_compass.png", "items/item_tidal_compass.png", "item"),
-    ("items/item_resonance_core.png", "items/item_resonance_core.png", "item"),
-    ("items/item_gluttony.png", "items/item_gluttony.png", "item"),
-    ("items/item_abyss_mark.png", "items/item_abyss_mark.png", "item"),
-    ("items/item_current_fin.png", "items/item_current_fin.png", "item"),
-    ("items/item_silent_plating.png", "items/item_silent_plating.png", "item"),
-    # V6.18 新增的三把基础武器：鱼叉 / 回声 / 酸液（`harpoon` 已在上面）
-    ("items/item_echo.png", "items/item_echo.png", "item"),
-    ("items/item_acid.png", "items/item_acid.png", "item"),
+    # 非道具的三类到此为止（数量固定）；道具立绘见下面的 _item_rules()
 ]
-# 合计 23 张 = 15 把武器（4 基础 + 8 进化 + harpoon/echo/acid）+ 8 件遗物，
-# 与 web 侧 items/ 下非 _regen 的 23 个文件一一对应 —— 一张不多一张不少。
+
+
+# ---------------------------------------------------------------------------
+# 道具立绘清单：从 `shared/itemArt.ts` 的 `ITEM_ART_PATH` **推导**，不再手写
+# ---------------------------------------------------------------------------
+# ⚠️ 这里以前是**手写副本**（23 行），和 `ITEM_ART_PATH` 是重复维护的同一份事实。
+#    漏补一行的症状是：图在 web 侧有、cocos 侧没有，而同步器**报"已是最新"** ——
+#    它压根不知道有这张图。属于本项目最忌讳的**静默缺图**。
+#    （V6.30 加 3 张进化立绘时正是踩到这一点：图生成了，脚本却说"写盘 0 个"。）
+#
+#    源路径 == 目标路径：两边刻意保持同样的子目录结构（见 artKeys.ts 头注）。
+def _item_rules() -> list[tuple[str, str, str]]:
+    txt = (ROOT / "shared" / "itemArt.ts").read_text(encoding="utf-8")
+    pairs = re.findall(r"^\s*([A-Za-z_]\w*)\s*:\s*'(items/[^']+\.png)'", txt, re.M)
+    if len(pairs) < 20:
+        raise SystemExit(
+            "[sync_art] 从 itemArt.ts 只解析出 %d 条道具立绘（预期 >=20），"
+            "格式可能变了，先检查 shared/itemArt.ts" % len(pairs)
+        )
+    return [(p, p, "item") for _, p in pairs]
+
+
+RULES: list[tuple[str, str, str]] = _ASSET_RULES + _item_rules()
 
 
 def sha256_bytes(b: bytes) -> str:

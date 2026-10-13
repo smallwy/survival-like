@@ -28,8 +28,9 @@
  * ④ **不要每帧 new Gfx / new Sprite**：文本、按钮、立绘三类都是池化的。
  *    每帧新建纯属白扔 GC。
  *
- * ⑤ **Sprite 必须 `trim = false`**：`trim` 默认 true，会裁掉透明边并按裁剪后的
- *    尺寸渲染 —— 而立绘的 contain 缩放是按**原图**比例算的，裁了就偏。
+ * ⑤ **Sprite 必须 `trim = false`，且比例取 `originalSize`**：`trim` 默认 true，
+ *    会按裁剪后的 rect 渲染；而立绘的 contain 缩放要按**整张画布**（`originalSize`）算。
+ *    两者**必须一致** —— 只改一半就是玩家报的"发射器变形"（2026-10-13，见 `putArt` 注释）。
  */
 
 import { Node, Label, Graphics, Sprite, SpriteFrame, UITransform } from 'cc'
@@ -95,6 +96,8 @@ interface BtnStyle {
   offFill?: number
   /** 描边（启用态）。缺省 = `UI.cyan` */
   edge?: number
+  /** 描边透明度。缺省 0.8。设 0 配合 `fillA: 0` ⇒ **不可见热区** */
+  edgeA?: number
   /** 禁用态描边。缺省 = `MENU.edge` */
   offEdge?: number
   /** 文字（启用态 / 禁用态）。缺省 = 原暗色的 `#c8f8ff` / `#4d6b7c` */
@@ -119,8 +122,20 @@ const BTN_BRIGHT_DISABLED: BtnStyle = {
   fill: 0x35586a, edge: 0x53798c, text: TXT_LIGHT.mute,
   offFill: 0x35586a, offEdge: 0x53798c, offText: TXT_LIGHT.mute, r: 9, size: 16,
 }
-const BTN_BRIGHT_TINY: BtnStyle = { fill: 0x4f7f94, edge: 0x8fb2c4, text: TXT_LIGHT.dim, r: 6, size: 12 }
-const BTN_BRIGHT_LOCKED: BtnStyle = { fill: BRIGHT.lockHi, edge: BRIGHT.mount, text: '#ffd894', r: 6, size: 12 }
+const BTN_BRIGHT_TINY: BtnStyle = { fill: 0x4f7f94, edge: 0x8fb2c4, text: TXT_LIGHT.dim, r: 6, size: 13 }
+const BTN_BRIGHT_LOCKED: BtnStyle = { fill: BRIGHT.lockHi, edge: BRIGHT.mount, text: '#ffd894', r: 6, size: 13 }
+
+/**
+ * **不可见热区**（2026-10-13 新增）。用于"整张商店卡可点购买"。
+ *
+ * 背景：商店副标题写着「点卡片或按 1 / 2 / 3 购买」，但 `shopCard` 从来没建过整卡热区
+ * （只有右下角那个「购买」按钮真好使）—— 文案承诺的入口是死的。
+ *
+ * ⚠️ 必须用池化 `this.button` 而不是自建节点：按钮池的**创建顺序 = 节点树顺序 = 命中优先级**，
+ *    在 `shopCard` 里**先**申请本热区、**后**申请「锁定 / 购买」按钮，
+ *    两个真按钮就天然压在热区之上 —— 否则点「锁定」会被热区抢走变成买卡。
+ */
+const BTN_HIT: BtnStyle = { fill: 0x000000, fillA: 0, edge: 0x000000, edgeA: 0, r: 0 }
 
 /** 购买按钮按**类型色**着色：器械青 / 挂载琥珀 / 属性紫 / 遗物靛 —— 与卡的描边同一色，一眼对上 */
 function lightBuyBtn(accent: number): BtnStyle {
@@ -292,7 +307,7 @@ export class Hud {
     b.gfx.fill(enabled ? (o.fill ?? UI.panelHi) : (o.offFill ?? MENU.slot), o.fillA ?? 0.95)
     if (r > 0) b.gfx.fillRoundRect(-w / 2, -h / 2, w, h, r)
     else b.gfx.fillRect(-w / 2, -h / 2, w, h)
-    b.gfx.line(enabled ? (o.edge ?? UI.cyan) : (o.offEdge ?? MENU.edge), 0.8, r > 0 ? 1.5 : 1)
+    b.gfx.line(enabled ? (o.edge ?? UI.cyan) : (o.offEdge ?? MENU.edge), o.edgeA ?? 0.8, r > 0 ? 1.5 : 1)
     if (r > 0) b.gfx.strokeRoundRect(-w / 2, -h / 2, w, h, r)
     else b.gfx.strokeRect(-w / 2, -h / 2, w, h)
     this.btnUsed++
@@ -315,6 +330,13 @@ export class Hud {
    *
    * 为什么是 contain 而不是 cover：素材统一是 2:1，而卡上的立绘框按卡高变化，
    * cover 会把画面裁掉（武器会被切掉枪口）。contain 任何比例都放得下。
+   *
+   * ⚠️ **比例必须取 `originalSize`（未裁剪的整张画布），不是 `rect`（裁剪后）**（2026-10-13 修）。
+   *    素材导入 meta 是 `trimType: auto`：`item_gun` 的 `rect` 只有 344×264，而 `originalSize` 是 600×300。
+   *    引擎在 `trim=false` 时按 **`originalSize`** 算顶点（`simple.ts`：`scaleX = cw / ow`），
+   *    若这里反用 `rect` 定 contentSize，两边尺寸源打架 → 非等比拉伸。
+   *    实测 `item_gun`：contentSize 156×120、trimmedBorder (128,−128,18,−18)
+   *    → 实际绘制矩形只有 **89×105**，把 2:1 的立绘横向压掉 35%，就是玩家看到的"发射器变形了"。
    */
   private putArt(cx: number, cy: number, fw: number, fh: number, sf: SpriteFrame | undefined, alpha = 1): void {
     if (!sf) return
@@ -329,8 +351,10 @@ export class Hud {
     sp.node.active = true
     sp.spriteFrame = sf
     sp.color = col(0xffffff, alpha)
-    const iw = sf.rect.width
-    const ih = sf.rect.height
+    // 未裁剪的整张画布尺寸 —— 与引擎 `trim=false` 的顶点定标同源（见方法注释）
+    const os = sf.originalSize
+    const iw = os.width
+    const ih = os.height
     const k = Math.min(fw / Math.max(1, iw), fh / Math.max(1, ih))
     sp.node.getComponent(UITransform)!.setContentSize(iw * k, ih * k)
     sp.node.setPosition(cx, this.H - cy)
@@ -778,6 +802,52 @@ export class Hud {
         for (let i = -1; i <= 1; i++) g.strokeSeg(cx + i * r * 0.28, cy - r * 0.45, cx + i * r * 0.28, cy + r * 0.45)
         break
       }
+      // ---- V6.33 机制型遗物 4 条（形状必须与上面 8 个明显不同，否则缩到 11px 认不出）----
+      case 'conductor_coil': {
+        // 线圈：三匝弹簧（横向弧），从上到下渐细 —— "缠绕"的意思
+        for (let i = 0; i < 3; i++) {
+          const yy = cy - r * 0.42 + i * r * 0.42
+          g.line(c, 0.9 - i * 0.18, lw - i * 0.25)
+          g.arc(cx, yy, r * 0.42, Math.PI * 0.06, Math.PI * 0.94, false)
+          g.stroke()
+        }
+        break
+      }
+      case 'bleeding_anchor': {
+        // 锚：竖杆 + 顶部横杆 + 底部弯钩（下半圆），末端缀一滴血
+        g.line(c, 0.95, lw)
+        g.moveTo(cx, cy - r * 0.7); g.lineTo(cx, cy + r * 0.5); g.stroke()
+        g.moveTo(cx - r * 0.45, cy - r * 0.52); g.lineTo(cx + r * 0.45, cy - r * 0.52); g.stroke()
+        g.arc(cx, cy + r * 0.05, r * 0.5, 0, Math.PI); g.stroke()
+        g.fill(UI.danger, 0.9); g.fillCircle(cx, cy + r * 0.7, 2.2)
+        break
+      }
+      case 'resonance_chamber': {
+        // 腔体：一个开口朝上的碗（下半圆 + 两侧短壁）+ 内里两点回声
+        g.line(c, 0.95, lw)
+        g.arc(cx, cy - r * 0.1, r * 0.6, 0, Math.PI); g.stroke()
+        g.line(c, 0.7, 1.4)
+        g.moveTo(cx - r * 0.6, cy - r * 0.1); g.lineTo(cx - r * 0.6, cy - r * 0.62); g.stroke()
+        g.moveTo(cx + r * 0.6, cy - r * 0.1); g.lineTo(cx + r * 0.6, cy - r * 0.62); g.stroke()
+        g.fill(c, 0.9)
+        g.fillCircle(cx, cy + r * 0.02, 2.4)
+        g.fillCircle(cx, cy + r * 0.34, 1.7)
+        break
+      }
+      case 'overload_core': {
+        // 核心：实心圆 + 一圈断口环 + 三向放射 —— "过载"
+        g.line(c, 0.9, 1.4)
+        g.arc(cx, cy, r * 0.72, 0.4, Math.PI * 1.0); g.stroke()
+        g.arc(cx, cy, r * 0.72, Math.PI * 1.4, Math.PI * 2.0); g.stroke()
+        for (let i = 0; i < 3; i++) {
+          const a = -Math.PI / 2 + i * (Math.PI * 2 / 3)
+          g.moveTo(cx + Math.cos(a) * r * 0.4, cy + Math.sin(a) * r * 0.4)
+          g.lineTo(cx + Math.cos(a) * r * 0.66, cy + Math.sin(a) * r * 0.66)
+          g.stroke()
+        }
+        g.fill(UI.danger, 0.95); g.fillCircle(cx, cy, r * 0.3)
+        break
+      }
     }
   }
 
@@ -998,9 +1068,21 @@ export class Hud {
    *   · 「太亮 / 中等色差」 → `BRIGHT` 由近白（对比 15:1）降到中调水青（对比 ~5:1），
    *     文字翻成浅色。见 `theme.ts` 的 V8 注释。
    *   · 「立绘 UI 布局感」   → 卡片从"信息为主、立绘是 84px 的小条"改成
-   *     **立绘占卡面上半 148px（约 42%）**，且立绘位顶部压一条类型色、
+   *     **立绘占卡面上半**，且立绘位顶部压一条类型色、
    *     内侧做三层递减暗带伪内凹 —— 视觉上先看到"这是个什么东西"，再读数字。
    *     价格行并进购买按钮（`购买 · 45`），把省下的行高让给立绘。
+   *
+   * -----------------------------------------------------------------------
+   * V9 修 bug + 重排（2026-10-13 傍晚）
+   * -----------------------------------------------------------------------
+   * 用户原话：「发射器变形了」+「整体重排商店」。
+   *   · **变形 = 立绘框比例错**：V8 的框是 **176×148（1.19:1）**，而素材管线下（`process_item_art.py`）
+   *     立绘是 **2:1 画布**。框与画布不同比例 ⇒ 立绘放不满 + 上下死空间。
+   *     归位 **176×88（2:1）** 后：卡高 356 → **292**，面板高 534 → **470**（占屏 71% → 63%）。
+   *     即「太大了」这条反馈是靠**砍死空间**解决的，不是把内容压小。
+   *   · 另修 `putArt` 取错尺寸源的 bug（`rect` → `originalSize`），见该方法注释。
+   *   · 字号阶梯整体上移：标题 19→20、名称 16→17、描述/副标题/类型/遗物代价 12→**13**、
+   *     状态行 12→**14**（关键信息，与描述拉开一档）。
    */
   drawShop(w: DiveWorld, cbs: {
     onBuy: (i: number) => void
@@ -1017,7 +1099,11 @@ export class Hud {
     // 面板几何：宽度跟随卡片总宽（自适应设计分辨率），高度是各分区之和
     const cw = 204, gap = 18, pad = 26
     const pw = cw * 3 + gap * 2 + pad * 2
-    const headerH = 56, cardH = 356, footH = 56, vpad = 20
+    // 2026-10-13：卡高 356 → **292**。立绘框归位 2:1（176×88，见 shopCard）后，
+    // 原本框下方那片「立绘放不满、名字又钉在卡底」的死空间随之消失。
+    // 面板高 534 → **470**（占屏高 71% → 63%）—— 「商店太大」这条反馈靠**砍死空间**解决，
+    // 而不是把卡压小：卡宽仍 204，信息一个没少。
+    const headerH = 56, cardH = 292, footH = 56, vpad = 20
     const ph = vpad * 2 + headerH + 12 + cardH + 14 + footH
     const px = (W - pw) / 2
     const py = (H - ph) / 2
@@ -1027,8 +1113,8 @@ export class Hud {
     const iy = py + vpad
 
     // ---- 顶栏：标题 + 副标题 + 骨币胶囊（右）----
-    this.text(ix, iy + 18, `L${w.layerIdx + 1} ${LAYERS[w.layerIdx].name} · 波间补给`, 19, TXT_LIGHT.main)
-    this.text(ix, iy + 41, `第 ${w.waveInLayer + 1} 波结束 · 点卡片或按 1 / 2 / 3 购买`, 12, TXT_LIGHT.dim)
+    this.text(ix, iy + 18, `L${w.layerIdx + 1} ${LAYERS[w.layerIdx].name} · 波间补给`, 20, TXT_LIGHT.main)
+    this.text(ix, iy + 41, `第 ${w.waveInLayer + 1} 波结束 · 点卡片或按 1 / 2 / 3 购买`, 13, TXT_LIGHT.dim)
 
     const bankStr = `${w.bank}`
     const pillW = 34 + bankStr.length * 11 + 42
@@ -1073,6 +1159,11 @@ export class Hud {
         : up.kind === 'mount' ? BRIGHT.mount
           : up.kind === 'weapon' ? BRIGHT.weapon : BRIGHT.stat
 
+    // ---- 整卡热区（**必须最先申请** —— 理由见 BTN_HIT：创建顺序即命中优先级）----
+    // 副标题承诺「点卡片购买」，这一行把它兑现。`buyCard()` 自带 phase / sold / 付费三重守卫，
+    // 所以空卡、已售卡、买不起都不需要在这里再判一次。
+    this.button(x + cw / 2, y + ch / 2, cw, ch, '', () => cbs.onBuy(i), true, BTN_HIT)
+
     // 卡体：中调实底。三态靠"卡面压暗 + 描边亮度"分档（买不起整张压一档）
     g.fill(sold ? BRIGHT.slot : (afford ? BRIGHT.card : BRIGHT.cardOff), 1)
     g.fillRoundRect(x, y, cw, ch, 12)
@@ -1094,11 +1185,14 @@ export class Hud {
     if (up) {
       const kindLabel = up.kind === 'weapon' ? '器械'
         : up.kind === 'mount' ? '挂载' : up.kind === 'relic' ? '遗物' : '属性'
-      this.text(x + 42, y + 23, kindLabel, 12, TXT_LIGHT.dim)
+      this.text(x + 42, y + 23, kindLabel, 13, TXT_LIGHT.dim)
     }
 
     // ---- 锁定按钮（右上，**独立热区** —— 和购买按钮挤在一起会误点成买卡）----
-    this.button(x + cw - 38, y + 23, 52, 22, locked ? '已锁' : '锁定',
+    // 2026-10-13：热区由 52×22 抬到 56×30。22px 高远低于 44px 触屏下限，
+    // 且它压在整卡热区之上（先申请热区、后申请本按钮），是卡内唯一的误触源。
+    // 30 是**不侵入下方立绘槽**（y+48 起）的上限。
+    this.button(x + cw - 40, y + 23, 56, 30, locked ? '已锁' : '锁定',
       () => cbs.onLock(i), !sold, locked ? BTN_BRIGHT_LOCKED : BTN_BRIGHT_TINY)
 
     if (!up) {
@@ -1106,11 +1200,15 @@ export class Hud {
       return
     }
 
-    // ---- 立绘区（**卡片主体**：148px ≈ 卡高的 42%）----
+    // ---- 立绘区（**卡片主体**：176×88 = **2:1**，与素材画布同比例）----
+    // ⚠️ 框的比例不是随便定的：`tools/process_item_art.py` 规定立绘统一 **2:1 画布**、
+    //    内容按 FILL=0.86 居中。框一旦不是 2:1，就会出现「立绘放不满 + 上下大片死空间」——
+    //    V8 那版是 176×148（1.19:1），正是"死空间"和"看着被拉扁"的来源。
+    //    框与画布同比例 ⇒ contain 零浪费、也从不拉伸。
     // 立体感用与战斗里炮塔**同一套语言**：内凹 + 左上受光 + 硬边。
     // 两层递减暗带代替渐变（引擎无渐变填充），让这块读作"凹进去的展示窗"。
     const cxm = x + cw / 2
-    const ax = x + 14, ay = y + 46, aw = cw - 28, ah = 148
+    const ax = x + 14, ay = y + 48, aw = cw - 28, ah = 88
     g.fill(BRIGHT.slot, 1); g.fillRoundRect(ax, ay, aw, ah, 10)
     g.fill(UI.abyss, 0.18); g.fillRect(ax + 1, ay + 1, aw - 2, 8)
     g.fill(UI.abyss, 0.10); g.fillRect(ax + 1, ay + 9, aw - 2, 5)
@@ -1119,7 +1217,7 @@ export class Hud {
     g.line(BRIGHT.divider, 0.9, 1); g.strokeRoundRect(ax + 0.5, ay + 0.5, aw - 1, ah - 1, 10)
     const artKey = this.cardArtKey(up)
     const artSf = artKey ? this.art.get(artKey) : undefined
-    this.putArt(cxm, ay + ah / 2 + 4, aw - 20, ah - 26, artSf, sold ? 0.4 : 1)
+    this.putArt(cxm, ay + ah / 2 + 4, aw - 16, ah - 16, artSf, sold ? 0.4 : 1)
 
     // 没有立绘的卡**按类型补代码图形** —— 旧版这里一律画一个"—"，
     // 属性卡 / 挂载卡整张看起来像"资源没加载出来"。这才是"商店资源不对"的实质。
@@ -1137,8 +1235,10 @@ export class Hud {
         const sk = STAT_CARD[up.id]
         if (sk) {
           const gcol = STAT_META.find(m => m.k === sk)?.col ?? UI.cyan
-          this.statGlyph(sk, cxm, artCy - 22, 56, gcol)
-          this.statGauge(cxm, artCy + 42, up.id, w)
+          // 立绘框 148 → 88 后，图腾 / 量槽的偏移同比收小 ——
+          // 否则图腾会戳出框顶、量槽落到框外压到名字（框内高度只剩 88）
+          this.statGlyph(sk, cxm, artCy - 16, 48, gcol)
+          this.statGauge(cxm, artCy + 32, up.id, w)
         }
       }
     }
@@ -1156,8 +1256,8 @@ export class Hud {
     // ---- 名称 / 描述 ----
     // 行位全部**从卡底往上排**（`ch - N`）而不是写死绝对值 —— 改卡高时下半区整体跟着走，
     // 不会出现"立绘变高了、名字还钉在原地"的错位。
-    this.center(cxm, y + ch - 130, up.name, 16, sold ? TXT_LIGHT.mute : TXT_LIGHT.main)
-    this.center(cxm, y + ch - 108, fitText(up.desc, 12, cw - 22), 12, TXT_LIGHT.dim)
+    this.center(cxm, y + ch - 134, up.name, 17, sold ? TXT_LIGHT.mute : TXT_LIGHT.main)
+    this.center(cxm, y + ch - 112, fitText(up.desc, 13, cw - 22), 13, TXT_LIGHT.dim)
 
     // ---- 状态行：**买了会发生什么**必须写死（玩家不该靠猜是"新武器"还是"强化"）----
     let foot = ''
@@ -1183,7 +1283,9 @@ export class Hud {
       footWarn = w.relics.length >= RELIC_SLOTS
     }
     if (foot) {
-      this.center(cxm, y + ch - 88, fitText(foot, 12, cw - 20), 12,
+      // 状态行是全卡**最关键的一条**（"买了会发生什么"）—— 字号抬到 **14** 与描述（13）拉开一档，
+      // 并保留告警色。原来它和描述同色同字号，玩家得自己猜是"新装备"还是"强化"。
+      this.center(cxm, y + ch - 92, fitText(foot, 14, cw - 20), 14,
         sold ? TXT_LIGHT.mute : (footWarn ? TXT_LIGHT.warn : TXT_LIGHT.dim))
     }
 
@@ -1191,7 +1293,7 @@ export class Hud {
     if (up.kind === 'relic' && up.relicId) {
       const cost2 = RELIC_DEF[up.relicId]?.cost2
       if (cost2) {
-        this.center(cxm, y + ch - 70, fitText(cost2, 12, cw - 20), 12,
+        this.center(cxm, y + ch - 72, fitText(cost2, 13, cw - 20), 13,
           sold ? TXT_LIGHT.mute : TXT_LIGHT.warn)
       }
     }
@@ -1199,7 +1301,7 @@ export class Hud {
     // ---- 购买按钮（按类型色着色，与卡描边同色）----
     // 价格**并进按钮**（`购买 · 45`），把省下的那一行让给立绘。
     // 买不起时直接给**差额**（`缺 7 鱼骨`）—— 「鱼骨不足」这种文案玩家还得自己回顶栏算。
-    this.button(cxm, y + ch - 30, cw - 28, 36,
+    this.button(cxm, y + ch - 34, cw - 28, 36,
       sold ? '已售出' : (afford ? `购买 · ${up.cost}` : `缺 ${up.cost - w.bank} 鱼骨`),
       () => cbs.onBuy(i), !sold && afford,
       (!sold && afford) ? lightBuyBtn(typeCol) : BTN_BRIGHT_DISABLED)
@@ -1225,22 +1327,47 @@ export class Hud {
   // -------------------------------------------------------------------------
   // 结算
   // -------------------------------------------------------------------------
+  /**
+   * 结算屏（V6.36 起加"沉淀 / 解锁"两行，见元系统设计 §4.2）。
+   *
+   * 纵向阶梯（H=749）：标题 −104 → 带出 −56 → 公式 −16 → 层波 +12 →
+   * 信息行从 +44 起**逐行下移**（只画有内容的行，不留空行）→ 按钮取
+   * `max(信息行底 + 40, +140)`，保证信息再多也不会压到按钮。
+   *
+   * ⚠️ 溺水时**必须显式写"无沉淀"**：不写的话玩家分不清"浅捞一点上浮"
+   * 和"全损"的区别，反而削弱 §10 那条"下潜 vs 上浮"的止损线。
+   */
   drawResult(w: DiveWorld, cbs: { onRestart: () => void; onTitle: () => void },
-             record: string | null = null): void {
+             opts: { record?: string | null; banked?: number; bio?: number; unlocked?: string[] } = {}): void {
     const W = this.W, H = this.H
+    const record = opts.record ?? null
+    const banked = opts.banked ?? 0
+    const bio = opts.bio ?? 0
+    const unlocked = opts.unlocked ?? []
     this.pageFill(MENU.page, 0.92)
     const finalBio = w.win ? Math.floor(w.biomass * w.mult) : 0
-    this.center(W / 2, H / 2 - 90,
+    this.center(W / 2, H / 2 - 104,
       w.win ? (w.bossDown ? '击杀深渊守望者 · 上浮' : '上浮成功') : '氧气耗尽 · 溺水',
       26, w.win ? TXT.cyber : TXT.warn)
-    this.center(W / 2, H / 2 - 40, `带出生物质 ${finalBio}`, 28, TXT.jade)
-    this.center(W / 2, H / 2 + 2, w.win
+    this.center(W / 2, H / 2 - 56, `带出生物质 ${finalBio}`, 28, TXT.jade)
+    this.center(W / 2, H / 2 - 16, w.win
       ? `${w.biomass} × ${w.mult.toFixed(1)}（下潜 ${w.layerIdx} 层）`
       : `沉没的 ${Math.floor(w.biomass * w.mult)} 生物质全部损失`, 15, w.win ? TXT.amber : TXT.warn)
-    this.center(W / 2, H / 2 + 32, `L${w.layerIdx + 1} ${LAYERS[w.layerIdx].name} · 第 ${w.waveInLayer + 1} 波`, 14, TXT.dim)
-    // 新纪录（由 DiveGame 用 shared 的 applyRun 算出来，没有就不画这一行）
-    if (record) this.center(W / 2, H / 2 + 60, record, 16, TXT.cyan)
-    this.button(W / 2 - 115, H / 2 + 100, 210, 52, '再来一次', cbs.onRestart, true)
-    this.button(W / 2 + 115, H / 2 + 100, 210, 52, '返回主界面', cbs.onTitle, true)
+    this.center(W / 2, H / 2 + 12, `L${w.layerIdx + 1} ${LAYERS[w.layerIdx].name} · 第 ${w.waveInLayer + 1} 波`, 14, TXT.dim)
+
+    // 信息行：只画有内容的，逐行下移（沿用"没有就不画"的惯例）
+    let y = H / 2 + 44
+    if (record) { this.center(W / 2, y, record, 16, TXT.cyan); y += 26 }
+    if (banked > 0) {
+      this.center(W / 2, y, `沉淀 +${banked} 生物质（总额 ${bio}）`, 16, TXT.amber); y += 26
+    } else if (!w.win) {
+      // 溺水：显式说明"无沉淀"，否则玩家不知道沉淀这一栏为什么消失
+      this.center(W / 2, y, '溺水 · 生物质全损，无沉淀', 16, TXT.warn); y += 26
+    }
+    if (unlocked.length) { this.center(W / 2, y, `解锁：${unlocked.join(' · ')}`, 16, TXT.jade); y += 26 }
+
+    const by = Math.max(y + 40, H / 2 + 140)
+    this.button(W / 2 - 115, by, 210, 52, '再来一次', cbs.onRestart, true)
+    this.button(W / 2 + 115, by, 210, 52, '返回主界面', cbs.onTitle, true)
   }
 }

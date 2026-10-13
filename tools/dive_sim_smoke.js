@@ -27,7 +27,8 @@ if (!buildDir) {
 }
 
 const {
-  DiveWorld, defaultProfile, normalizeProfile, applyRun, depthLabel, recordLabel,
+  DiveWorld, defaultProfile, normalizeProfile, migrateV1toV2, applyRun, depthLabel, recordLabel,
+  settleProgress, evalUnlocks, perkLevel, perkBonus, buyPerk, canBuyPerk, filterPool, codexGains,
 } = require(path.join(path.resolve(buildDir), 'dive', 'index.js'))
 
 const W = 1304
@@ -251,12 +252,34 @@ console.log('\n[6] 跨局档案（shared/dive/profile.ts —— 纯函数，所�
     }
   })
 
-  check('合法档案原样保留', () => {
-    const src = {
-      v: 1, bestBiomass: 320, bestLayer: 2, bestWave: 1,
-      runs: 7, cleared: true, lastSub: 'raia',
-    }
-    assert.deepStrictEqual(normalizeProfile(src), src)
+  check('v1 档案迁移到 v2：旧纪录一个不丢，新字段走默认值', () => {
+    const v1 = { v: 1, bestBiomass: 320, bestLayer: 2, bestWave: 1, runs: 7, cleared: true, lastSub: 'raia' }
+    const p = migrateV1toV2(v1)
+    assert.strictEqual(p.v, 2)
+    assert.strictEqual(p.bestBiomass, 320)
+    assert.strictEqual(p.bestLayer, 2)
+    assert.strictEqual(p.bestWave, 1)
+    assert.strictEqual(p.runs, 7)
+    assert.strictEqual(p.cleared, true)
+    assert.strictEqual(p.lastSub, 'raia')
+    // v2 新字段全走默认值
+    assert.strictEqual(p.bio, 0)
+    assert.strictEqual(p.surfaced, 0)
+    assert.deepStrictEqual(p.unlocks, [])
+    assert.deepStrictEqual(p.seen, {})
+    assert.deepStrictEqual(p.perks, {})
+  })
+
+  check('合法 v2 档案洗一遍不变（幂等）', () => {
+    const p = normalizeProfile({
+      v: 2, bestBiomass: 320, bestLayer: 2, bestWave: 1, runs: 7, cleared: true, lastSub: 'raia',
+      bio: 120, totalBanked: 500, surfaced: 3, unlocks: ['sub:raia'], seen: { 'enemy:swarm': 40 },
+      milestones: ['mile:first_surface'], normalClears: 1, perks: { reload: 2 },
+    })
+    assert.strictEqual(p.bio, 120)
+    assert.strictEqual(p.perks.reload, 2)
+    assert.strictEqual(p.seen['enemy:swarm'], 40)
+    assert.deepStrictEqual(normalizeProfile(p), p)
   })
 
   check('applyRun 是纯函数：不改入参', () => {
@@ -310,6 +333,93 @@ console.log('\n[6] 跨局档案（shared/dive/profile.ts —— 纯函数，所�
       { biomass: 500, layer: 3, wave: 2, bossDown: false, sub: 'lumen' })
     assert.ok(recordLabel(both).includes('带出生物质'))
     assert.ok(recordLabel(both).includes('最深层'))
+  })
+}
+
+// ---------------------------------------------------------------------------
+console.log('\n[7] 元系统（沉淀 / 解锁 / 永久强化 / 图鉴）')
+{
+  check('沉淀：带出 400 ⇒ 沉淀 100（25%），bio 与 totalBanked 同步', () => {
+    const o = applyRun(defaultProfile(),
+      { biomass: 400, layer: 1, wave: 2, bossDown: false, sub: 'lumen', surfaced: true })
+    assert.strictEqual(o.banked, 100)
+    assert.strictEqual(o.profile.bio, 100)
+    assert.strictEqual(o.profile.totalBanked, 100)
+    assert.strictEqual(o.profile.surfaced, 1)
+  })
+
+  check('溺水：沉淀 0，surfaced 不加', () => {
+    const o = applyRun(defaultProfile(),
+      { biomass: 0, layer: 1, wave: 1, bossDown: false, sub: 'lumen', surfaced: false })
+    assert.strictEqual(o.banked, 0)
+    assert.strictEqual(o.profile.bio, 0)
+    assert.strictEqual(o.profile.surfaced, 0)
+  })
+
+  check('图鉴计数：刷怪增量累加、同族只算一次、0 计数不写', () => {
+    const g = codexGains({
+      spawned: { swarm: 5, dash: 2, drift: 0 }, bossDown: false,
+      weaponIds: ['gun', 'gun_gl'], relicIds: ['echo_heart'],
+    })
+    assert.strictEqual(g['enemy:swarm'], 5)
+    assert.strictEqual(g['enemy:dash'], 2)
+    assert.strictEqual(g['enemy:drift'], undefined, '0 计数不该写进增量')
+    assert.strictEqual(g['weapon:gun'], 1, '同族的进化形态只算一次')
+    assert.strictEqual(g['relic:echo_heart'], 1)
+    const o1 = applyRun(defaultProfile(), { biomass: 0, layer: 0, wave: 0, bossDown: false, sub: 'lumen', seen: g })
+    const o2 = applyRun(o1.profile, { biomass: 0, layer: 0, wave: 0, bossDown: false, sub: 'lumen', seen: g })
+    assert.strictEqual(o2.profile.seen['enemy:swarm'], 10, '遇见次数要累加')
+  })
+
+  check('解锁：上浮 5 次 ⇒ 解锁刺鳐', () => {
+    let p = defaultProfile()
+    for (let i = 0; i < 5; i++) {
+      p = applyRun(p, { biomass: 100, layer: 1, wave: 1, bossDown: false, sub: 'lumen', surfaced: true }).profile
+    }
+    const prog = settleProgress(p)
+    assert.ok(prog.unlocked.includes('sub:raia'), `unlocked=${prog.unlocked}`)
+    assert.ok(prog.profile.unlocks.includes('sub:raia'))
+  })
+
+  check('默认解锁：新档也有灯艇 / 机枪 / 鱼叉 / 回声', () => {
+    const u = evalUnlocks(defaultProfile())
+    for (const id of ['sub:lumen', 'weapon:gun', 'weapon:harpoon', 'weapon:echo']) {
+      assert.ok(u.includes(id), `缺 ${id}（unlocked=${u}）`)
+    }
+    assert.ok(!u.includes('weapon:torpedo'), '鱼雷不该默认解锁')
+  })
+
+  check('抽池过滤：默认档有机枪卡、没有鱼雷/电弧/声呐/酸液卡', () => {
+    const pool = filterPool(defaultProfile())
+    assert.ok(pool.some(u => u.id === 'w_gun'), '机枪卡应在池里')
+    assert.ok(!pool.some(u => u.id === 'w_torp'), '鱼雷卡不该在池里')
+    assert.ok(!pool.some(u => u.id === 'w_arc'), '电弧卡不该在池里')
+    assert.ok(!pool.some(u => u.id === 'e_torp_hv'), '鱼雷进化卡不该在池里')
+    assert.ok(!pool.some(u => u.relicId === 'overload_core'), '未解锁遗物不该在池里')
+    assert.ok(pool.some(u => u.relicId === 'echo_heart'), '默认遗物应在池里')
+  })
+
+  check('永久强化：购买扣 bio / 等级 +1 / 满级不可再买 / 满级 +10%', () => {
+    let p = { ...defaultProfile(), bio: 1000 }
+    assert.ok(canBuyPerk(p, 'reload'))
+    p = buyPerk(p, 'reload')
+    assert.strictEqual(perkBonus(p).rate, 0.02)
+    for (let i = 0; i < 4; i++) p = buyPerk(p, 'reload')
+    assert.strictEqual(perkLevel(p, 'reload'), 5)
+    assert.strictEqual(canBuyPerk(p, 'reload'), false, '满级后不能再买')
+    assert.ok(Math.abs(perkBonus(p).rate - 0.1) < 1e-9, `rate=${perkBonus(p).rate}`)
+  })
+
+  check('世界吃永久强化：perk 注入后开局 o2Max / rate 生效', () => {
+    const w = new DiveWorld({ w: W, h: H, seed: 1, perk: { rate: 0.1, o2Bonus: 15, pickup: 0.2 } })
+    assert.strictEqual(w.o2Max, 100 + 25 + 15, `o2Max=${w.o2Max}`)
+    assert.ok(Math.abs(w.st.rate - 0.1) < 1e-9, `rate=${w.st.rate}`)
+  })
+
+  check('世界刷怪计数：跑一会儿后 spawned 非空（图鉴计数来源）', () => {
+    const w = run(555, 30, circularInput).world
+    const n = Object.values(w.spawned).reduce((a, b) => a + b, 0)
+    assert.ok(n > 0, `spawned=${JSON.stringify(w.spawned)}`)
   })
 }
 

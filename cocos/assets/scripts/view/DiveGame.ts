@@ -86,16 +86,24 @@ import { Gfx, col } from './Gfx'
 import { neon, neonLine, neonCircle } from './neon'
 import { Hud } from './Hud'
 import { Title } from './Title'
+import { Codex } from './Codex'
 import { SpriteBank, frameAspect } from './art'
 import { loadProfile, saveProfile } from './save'
 import { DiveWorld } from '../shared/dive/world'
 import { applyRun, defaultProfile, depthLabel, recordLabel } from '../shared/dive/profile'
+import {
+  settleProgress, unlockName, perkBonus, filterPool,
+  canBuyPerk, buyPerk as buyPerkPure,
+} from '../shared/dive/unlocks'
+import type { PerkId } from '../shared/dive/unlocks'
+import { codexGains } from '../shared/dive/codex'
 import type { Profile } from '../shared/dive/profile'
 import {
-  CAM_ZOOM, TURRET_R, EMITTER_SIZE, SUB_D, BASE_SEATS, WEAPON_DEF,
+  CAM_ZOOM, TURRET_R, EMITTER_SIZE, SUB_D, BASE_SEATS, WEAPON_DEF, SEAT_RATIO, SEAT_RING_R,
+  BONE, weaponFamily,
 } from '../shared/dive/tables'
 import { UI } from '../shared/theme'
-import { SUBS, SUB_ART_R, getSub } from '../shared/subs'
+import { SUBS, getSub } from '../shared/subs'
 import type { SubId } from '../shared/subs'
 import type { SimEvent, InputState, Enemy, WeaponId } from '../shared/dive/types'
 
@@ -135,12 +143,50 @@ const FLOAT_CAP = 32
 const FISH_CAP = 140
 /** 单帧最大步长（与模拟层的 MAX_DT 同源，防止后台切回来时世界瞬移） */
 const MAX_DT = 0.05
-/** 机体贴图缩放：贴图里圆盘半径是 SUB_ART_R，要它渲染成 SUB_D/2 */
-const SUB_SCALE = SUB_D / (2 * SUB_ART_R)
 
 /** 局部 clamp（此处只有相机用，且要传 lo>hi 也不会炸的语义，所以不引 shared 的 clamp） */
 function clamp1(v: number, lo: number, hi: number): number {
   return v < lo ? lo : (v > hi ? hi : v)
+}
+
+/**
+ * 机体（玩家潜航器）的船体基色 —— 中亮青蓝。
+ *
+ * 为什么不用 `UI.cyanDim`（0x1f6a7d）：那个色在深海暗底上太闷，球体只剩一个黑饼，
+ * 而**玩家机体必须是画面里最亮的青系**（theme 的色相隔离规则：青蓝 = 我的东西）。
+ * 取 0x2f8fa8 让"球面受光的最亮处"接近 `UI.cyan`，同时保留外圈霓虹描边的对比。
+ */
+const BODY_METAL = 0x2f8fa8
+
+/**
+ * 机体**视觉半径** ÷ 座圈半径（`SEAT_RING_R`）。2026-10-13 新增。
+ *
+ * 用户反馈：「机体感觉大了一点点」。
+ * 原因两条叠加：① 矢量机体的球半径原与座圈同值 `48`，而旧贴图半径是 `SUB_D/2 = 44`
+ * （大了 ~9%）；② 旧贴图带透明边，现在是一个**满半径的实心圆**，视觉上更显大。
+ * `0.90 × 48 = 43.2 ≈ 44` → 与旧机体尺寸对齐。
+ *
+ * 顺带得到一个正确的结果：收缩后 6 座炮**正好骑在艇缘上** ——
+ * 舷侧两座（±30°/±150°）距圆心 `43.3`，球半径 `43.2`，炮心贴在轮廓线上；
+ * 上下两座仍落在赤道挂载带上。这正是 `SEAT_RING_R` 当初上调到 48 的设计意图
+ * （tables.ts：塔座中心落在机体外缘之外，读作"镶嵌在艇缘"）。
+ *
+ * ⚠️ 这是**纯视觉**系数：`SEAT_RING_R`（= 座位 = 子弹出生点）不动，**弹道零变化**。
+ */
+const BODY_VIS = 0.90
+
+/**
+ * 明度缩放：把 `0xRRGGBB` 按系数 f 调亮/调暗（f>1 提亮，会夹到 255）。
+ *
+ * 为什么需要它：机体的球面是靠**同心圆逐层换色**堆出来的（Cocos Graphics 没有
+ * 径向渐变、也没有 ADD 混合）。用「同一色 + 逐层降 alpha」叠 30 层会互相透出、
+ * 糊成一团灰；必须**每层算出一个不透明实色**再画，才有干净的球面受光。
+ * （与 `neon.ts` 的 `lerpColor` 互补：那个是两色插值，这个是单色调明度。）
+ */
+function shade(hex: number, f: number): number {
+  const r = hex >> 16 & 0xff, g = hex >> 8 & 0xff, b = hex & 0xff
+  const c = (v: number) => Math.max(0, Math.min(255, Math.round(v * f)))
+  return (c(r) << 16) | (c(g) << 8) | c(b)
 }
 
 @ccclass('DiveGame')
@@ -163,6 +209,10 @@ export class DiveGame extends Component {
   private profile: Profile = defaultProfile()
   /** 本次结算是否刷新了纪录（结算屏用来画"新纪录"那一行） */
   private runRecord: string | null = null
+  /** 本局沉淀进 bio 的数量（结算屏"沉淀 +N"那一行；0 = 不画） */
+  private runBanked = 0
+  /** 本局新解锁项的名称（结算屏"解锁：××"那一行；空 = 不画） */
+  private runUnlocked: string[] = []
   /** 本局是否已经记过档（防"多记一局"，见 finishRun） */
   private runSaved = false
 
@@ -186,6 +236,7 @@ export class DiveGame extends Component {
   private subNode!: Sprite
   private hud!: Hud
   private title!: Title
+  private codex!: Codex
 
   // ---- 敌人贴图池 ----
   private readonly fishPool: Fish[] = []
@@ -259,6 +310,10 @@ export class DiveGame extends Component {
       h: this.H,
       seed: this.runSeed,
       sub: SUBS[Math.max(0, Math.min(SUBS.length - 1, this.subIndex))],
+      // 未解锁的武器/遗物**不进抽池**（解锁引擎唯一动局内的点，见 unlocks.ts filterPool）
+      pool: filterPool(this.profile),
+      // 永久强化：满级总增幅被红线锁在"两个遗物"量级（见 unlocks.ts PERKS）
+      perk: perkBonus(this.profile),
     })
   }
 
@@ -280,6 +335,8 @@ export class DiveGame extends Component {
 
     this.started = true
     this.runRecord = null
+    this.runBanked = 0
+    this.runUnlocked = []
     this.runSaved = false
     this.clearFx()
     this.bgLayer = -1              // 强制重设背景（换层/重开都可能换了图）
@@ -298,6 +355,7 @@ export class DiveGame extends Component {
     this.clearFx()
     this.hideWorld()
     this.title.setRecords(depthLabel(this.profile), this.profile.runs > 0)
+    this.title.refreshWallet()
     this.title.pick(this.subIndex)
     this.title.setVisible(true)
   }
@@ -403,7 +461,26 @@ export class DiveGame extends Component {
     // 标题期间 HUD 每个 label/button 都被 begin() 关掉，战斗期间 Title 整根隐藏。
     this.title = new Title(host, this.W, this.H, this.art, {
       onStart: (sub) => this.startRun(sub),
+      getMeta: () => this.profile,
+      onBuyPerk: (id) => this.buyPerk(id),
+      onOpenCodex: () => this.codex.show(),
     })
+    // 图鉴建在 Title 之后 = 在它之上（这样它的 scrim 能挡住标题屏的按钮）
+    this.codex = new Codex(host, this.W, this.H, this.art, () => this.profile)
+  }
+
+  /**
+   * 花沉淀生物质买一项永久强化。
+   *
+   * ⚠️ 返回**布尔**而不是 void：Title 靠它决定"要不要重画装置坞"（买失败不重画）。
+   * 买成之后主动 `refreshWallet()`，否则顶部的钱包要点开装置坞才更新。
+   */
+  private buyPerk(id: PerkId): boolean {
+    if (!canBuyPerk(this.profile, id)) return false
+    this.profile = buyPerkPure(this.profile, id)
+    saveProfile(this.profile)
+    this.title.refreshWallet()
+    return true
   }
 
   // =========================================================================
@@ -416,6 +493,11 @@ export class DiveGame extends Component {
     // 这里必须**整体接管并 return**：否则 ←→ 会被记成移动键（下一局开局时
     // 玩家会"莫名其妙一直在往左漂"），ESC 会直接开局。
     if (!this.started) {
+      // 图鉴开着时整体接管：ESC 关闭，其余键不透传（否则 ←→ 会在背后换潜航器）
+      if (this.codex.open) {
+        if (k === KeyCode.ESCAPE) this.codex.hide()
+        return
+      }
       if (k >= KeyCode.DIGIT_1 && k <= KeyCode.DIGIT_3) this.title.pick(k - KeyCode.DIGIT_1)
       else if (k >= KeyCode.NUM_1 && k <= KeyCode.NUM_3) this.title.pick(k - KeyCode.NUM_1)
       else if (k === KeyCode.ARROW_LEFT) this.title.move(-1)
@@ -427,6 +509,15 @@ export class DiveGame extends Component {
     if (this.isBurstKey(k) && !this.keys['burst']) this.burstEdge = true
     this.keys[this.keyName(k)] = true
     if (k === KeyCode.ESCAPE) this.restartRun()
+
+    // ---- 商店：数字直购 ----
+    // 2026-10-13 补：DIGIT_1..3 此前**只在标题界面**有分支，商店阶段的副标题却写着
+    // 「点卡片或按 1 / 2 / 3 购买」—— 那句话是完整的两张空头支票。这里兑现键盘那一半。
+    // `buyCard()` 自带 phase / 越界 / sold / 买不起 四重守卫，所以无脑转发即可。
+    if (this.world.phase === 'shop') {
+      if (k >= KeyCode.DIGIT_1 && k <= KeyCode.DIGIT_3) this.world.buyCard(k - KeyCode.DIGIT_1)
+      else if (k >= KeyCode.NUM_1 && k <= KeyCode.NUM_3) this.world.buyCard(k - KeyCode.NUM_1)
+    }
   }
 
   private onKeyUp(e: EventKeyboard): void {
@@ -462,6 +553,7 @@ export class DiveGame extends Component {
   // =========================================================================
   update(dtSec: number): void {
     const dt = Math.min(dtSec, MAX_DT)
+    this.codex?.update()
 
     // ---- 标题界面：世界不跑、HUD 不画，只更新主界面自己 ----
     // 注意**照样要清 Graphics**：不清的话上一局最后一帧的图形会原地留在屏幕上
@@ -510,8 +602,12 @@ export class DiveGame extends Component {
     } else if (w.phase === 'decide') {
       this.hud.drawDecide(w, { onDive: () => w.diveDeeper(), onSurface: () => w.surface() })
     } else if (w.phase === 'result') {
-      this.hud.drawResult(w, { onRestart: () => this.restartRun(), onTitle: () => this.toTitle() },
-        this.runRecord)
+      this.hud.drawResult(w, { onRestart: () => this.restartRun(), onTitle: () => this.toTitle() }, {
+        record: this.runRecord,
+        banked: this.runBanked,
+        bio: this.profile.bio,
+        unlocked: this.runUnlocked,
+      })
     }
   }
 
@@ -664,24 +760,17 @@ export class DiveGame extends Component {
     this.bgNode.node.active = true
   }
 
-  /** 潜航器机体：位置 / 朝向每帧更新；贴图只在换艇时换 */
-  private syncSub(w: DiveWorld): void {
-    const sf = this.art.get('sub_' + w.sub.id) ?? this.art.get('sub_body')
-    if (!sf) {
-      this.subNode.node.active = false
-      return
-    }
-    if (this.subNode.spriteFrame !== sf) {
-      this.subNode.spriteFrame = sf
-      const ut = this.subNode.node.getComponent(UITransform)!
-      ut.setContentSize(sf.rect.width, sf.rect.height)
-      // 三张变体的"圆盘半径"已由素材处理脚本统一成 SUB_ART_R，
-      // 所以这一个缩放比能让三台机体的圆盘在屏幕上一样大（含突出件也不变）。
-      this.subNode.node.setScale(SUB_SCALE, SUB_SCALE, 1)
-    }
-    this.subNode.node.active = true
-    this.subNode.node.setPosition(w.px, this.H - w.py)
-    this.subNode.node.angle = -(w.aim * 180) / Math.PI
+  /**
+   * 潜航器机体**贴图**节点 —— 2026-10-13 起机体改由 `drawBody()` **矢量实时绘制**，
+   * 这张正俯视贴图不再参与战斗渲染，所以这里把它**恒定关闭**（`hideWorld` 里也关一次）。
+   *
+   * 为什么保留节点而不删：`subNode` 是 `Dive.scene` 里已序列化的结构，
+   * 删节点要同步改场景文件 + uuid 引用（收益低、风险高）；留着还保有一个口子 ——
+   * 以后若要给机体叠一层贴图（涂装 / 贴花 / 受伤纹理）可以直接复用这个 Sprite。
+   * 三台潜航器的**立绘**仍用同一批贴图 —— 那是选艇界面（`Title.ts`）在用，与本函数无关。
+   */
+  private syncSub(_w: DiveWorld): void {
+    this.subNode.node.active = false
   }
 
   /**
@@ -759,7 +848,10 @@ export class DiveGame extends Component {
           ev.kind === 'boss' ? 200 : 120, ev.kind === 'boss' ? 280 : 160, ev.kind === 'boss' ? 2.4 : 1.6, ev.color)
         break
       case 'pickup':
-        this.pushRadialSparks(ev.x, ev.y, 3, 60, 0, 1.5, UI.cyan)
+        // 拾取反馈原来只有 3 颗火花 —— 磁吸**收割一串**鱼骨时几乎看不见。
+        // 补一圈扩散环：环是"已进账"的确认信号，在余光里比火花更容易被感知到。
+        this.pushShock(ev.x, ev.y, 30, 0.24, UI.cyan, 2, 14, 1)
+        this.pushRadialSparks(ev.x, ev.y, 6, 70, 30, 1.6, UI.cyan)
         break
       case 'float':
         this.pushFloat(ev.x, ev.y, ev.text, ev.color, ev.size)
@@ -807,16 +899,30 @@ export class DiveGame extends Component {
     if (this.runSaved) return
     this.runSaved = true
     const w = this.world
+    // ① 纪录 + 沉淀 + 图鉴（纯函数，见 profile.ts applyRun）
     const out = applyRun(this.profile, {
       biomass: w.win ? Math.floor(w.biomass * w.mult) : 0,
       layer: w.layerIdx,
       wave: w.waveInLayer,
       bossDown: w.bossDown,
       sub: w.sub.id,
+      surfaced: w.win,
+      seen: codexGains({
+        spawned: w.spawned,
+        bossDown: w.bossDown,
+        weaponIds: w.weapons.map(x => x.id),
+        relicIds: w.relics.slice(),
+      }),
     })
-    this.profile = out.profile
+    // ② 解锁 + 里程碑（要读武器/遗物表，所以是独立一步，见 unlocks.ts settleProgress）
+    const prog = settleProgress(out.profile)
+    this.profile = prog.profile
     this.runRecord = recordLabel(out)
+    this.runBanked = out.banked
+    this.runUnlocked = prog.unlocked.map(unlockName)
     saveProfile(this.profile)
+    // 结算后立刻刷新标题屏的钱包（否则要点开装置坞才更新）
+    this.title?.refreshWallet()
   }
 
   private pushShock(x: number, y: number, rMax: number, dur: number, color: number, width: number, core: number, rings: number): void {
@@ -897,6 +1003,12 @@ export class DiveGame extends Component {
       const l = n.addComponent(Label)
       l.horizontalAlign = Label.HorizontalAlign.CENTER
       l.verticalAlign = Label.VerticalAlign.CENTER
+      // 2026-10-13：飘字**加粗 + 深色描边**。深海背景 + 满屏火花/拖尾/爆环里，
+      // 细体无描边的数字会被背景吃掉 —— 这是"小了点"的**真正成因**（只放大不加描边，
+      // 边缘仍会被亮特效用同化）。描边宽度随字号走，见下方 outlineWidth。
+      l.isBold = true
+      l.enableOutline = true
+      l.outlineColor = col(0x040810)
       f = { x, y, vy: -34, life: 0.9, text, color, size, delay: 0, label: l }
       this.floatSlots[idx] = f
     }
@@ -905,6 +1017,8 @@ export class DiveGame extends Component {
     f.label.string = text
     f.label.fontSize = size
     f.label.lineHeight = size + 2
+    // 描边宽随字号比例走（≈0.16×字号，下限 2）—— 固定值会在小字上糊成一圈、大字上又太细
+    f.label.outlineWidth = Math.max(2, Math.round(size * 0.16))
     f.label.color = col(color)
     f.label.node.active = true
     f.label.node.setPosition(x, this.H - y)
@@ -1060,14 +1174,35 @@ export class DiveGame extends Component {
       this.gBack.line(0xc4fff0, 0.35, 1); this.gBack.strokeCircle(a.x, a.y, a.r)
     }
 
-    // ---- 鱼骨 ----
+    // ---- 鱼骨（击杀掉落 · 氧气 + 骨币）----
+    // 旧版是「一个白点 + 一根斜线」：在暗海里既读不出"这是个能捡的东西"，更读不出是"鱼骨"。
+    // 重画成**真鱼骨**（脊柱 + 4 对肋骨），整体吃 `b.rot` ——
+    //   模拟层一直在积 `spin` 做自旋，旧渲染层**根本没接**（白算），接上后"漂着的碎骨"才活。
+    // 外面罩两层氧青 + 一层骨白辉光：它是本作**唯一可拾取的东西**，
+    //   "会发光 = 能捡"是玩家唯一能依赖的读法 —— 光晕不是装饰，是功能。
     for (const b of w.bones) {
       const s = b.size * 0.5
       const blinking = b.fade < 0.35 && Math.sin(b.fade * 30) > 0
-      this.gBack.fill(0xdcfffb, blinking ? 0.3 : 0.95)
-      this.gBack.fillCircle(b.x, b.y, Math.max(2, s * 0.26))
-      this.gBack.line(0xdcfffb, 0.85, 1.4)
-      this.gBack.strokeSeg(b.x - s * 0.7, b.y - s * 0.2, b.x + s * 0.7, b.y + s * 0.2)
+      const al = blinking ? 0.35 : 1
+      const ca = Math.cos(b.rot), sa = Math.sin(b.rot)
+      // ① 辉光：氧青（外两层）→ 骨白（内层）
+      this.gBack.fill(0x4fe8ff, 0.10 * al); this.gBack.fillCircle(b.x, b.y, s * 1.30)
+      this.gBack.fill(0x4fe8ff, 0.16 * al); this.gBack.fillCircle(b.x, b.y, s * 1.02)
+      this.gBack.fill(BONE, 0.14 * al); this.gBack.fillCircle(b.x, b.y, s * 0.78)
+      // ② 脊柱（贯穿全身）
+      this.gBack.line(BONE, 0.95 * al, Math.max(1.2, s * 0.16))
+      this.gBack.strokeSeg(b.x - s * ca, b.y - s * sa, b.x + s * ca, b.y + s * sa)
+      // ③ 肋骨 ×4：`|k-1.5|` 让中间两根最长、两端收 —— 剪影才读作"鱼骨"而不是"梯子"
+      this.gBack.line(BONE, 0.80 * al, Math.max(1, s * 0.11))
+      for (let k = 0; k < 4; k++) {
+        const lx = (-0.55 + k * 0.32) * s
+        const len = (0.62 - Math.abs(k - 1.5) * 0.12) * s
+        this.gBack.strokeSeg(b.x + lx * ca - len * sa, b.y + lx * sa + len * ca,
+          b.x + lx * ca + len * sa, b.y + lx * sa - len * ca)
+      }
+      // ④ 头端亮核：给鱼骨一个"头"，扫视时视线先落在这里
+      this.gBack.fill(0xffffff, 0.95 * al)
+      this.gBack.fillCircle(b.x + s * 0.92 * ca, b.y + s * 0.92 * sa, Math.max(1.6, s * 0.18))
     }
 
     // ---- 声呐波前 ----
@@ -1223,20 +1358,17 @@ export class DiveGame extends Component {
   private drawPlayer(w: DiveWorld): void {
     const R = SUB_D / 2
 
-    // ---- 机体 ----
-    // 有贴图时由 subNode 画；没有才用矢量兜底。半径取 R×0.85 而不是更小，
-    // 是为了和贴图版的机体外径（= R）大致对齐，切换时不会"忽然胖一圈"。
-    if (!this.subNode.node.active) {
-      this.gPlayer.fill(UI.panelHi, 0.95); this.gPlayer.fillCircle(w.px, w.py, R * 0.85)
-      this.gPlayer.line(w.hurtFlash > 0 ? UI.danger : UI.cyan, 0.9, 2)
-      this.gPlayer.strokeCircle(w.px, w.py, R * 0.85)
-    }
-    this.gPlayer.line(UI.cyanHi, 0.45, 1)
-    this.gPlayer.strokeCircle(w.px, w.py, R * 0.95)
+    // ---- 机体：矢量「球形深潜核」（方案 B · 俯角 60°）----
+    // 2026-10-13：机体由 `sub_body.png` 正俯视平面贴图**改为矢量实时绘制**（用户拍板方案 A），
+    // 所以这里不再依赖 `subNode`（syncSub 已把它常关）。朝向 = 移动方向 `w.aim`，
+    // 机体随之转动，舷窗 / 稳定鳍 / 挂载带一起转 → "移动时能看到不同角度的装载"。
+    this.drawBody(w)
 
     // ---- 艏部探照灯（朝向指示）----
-    const hx = w.px + Math.cos(w.aim) * (R * 0.95 + 16)
-    const hy = w.py + Math.sin(w.aim) * (R * 0.95 + 16)
+    // 也走 3/4 投影（y 压扁），否则它会飘在机体椭圆之外、读不出"艏在哪个方向"。
+    const bow = R * 1.02 + 16
+    const hx = w.px + Math.cos(w.aim) * bow
+    const hy = w.py + Math.sin(w.aim) * bow * SEAT_RATIO
     this.gPlayer.fill(UI.cyanHi, 0.95)
     this.gPlayer.fillCircle(hx, hy, EMITTER_SIZE * 0.3)
 
@@ -1269,6 +1401,203 @@ export class DiveGame extends Component {
   }
 
   /**
+   * 机体 —— 矢量「球形深潜核」（方案 B）· 俯角 60° 的 3/4 斜视。
+   *
+   * -----------------------------------------------------------------------
+   * 为什么改成矢量（用户 2026-10-13 拍板方案 A）
+   * -----------------------------------------------------------------------
+   *   `sub_body.png` 是**正俯视**平面贴图 —— 任何角度都读作"平贴的圆盘"，没有体积。
+   *   要做出 3/4 斜视（俯角 60°）的体积感，就得有**受光面 + 赤道椭圆 + 破剪影的穹顶**
+   *   这一整套随俯角走的结构；一张斜视贴图又没法 `setRotation` 复用（转 180° 后
+   *   "厚度朝下、受光在左上"整条立体线索穿帮）。矢量绘制把"球面明暗"算成参数，
+   *   与朝向彻底解耦 ⇒ 怎么摆都成立。代价只是每帧几十个图元（88px 尺寸可控）。
+   *
+   *   ⚠️ 注意：**机体本身不参与航向旋转**（见下面 v3 段）。
+   *      "矢量"在这里买到的是"立体感可参数化"，不是"可以随便转"。
+   *
+   * -----------------------------------------------------------------------
+   * 立体感 = 七条线索，少一条就"平"（v2 定稿 2026-10-13）
+   * -----------------------------------------------------------------------
+   *   ⓪ 悬浮光晕（多层同心椭圆，机体**下方**）—— 先让机体"离地"
+   *   ① 底部稳定鳍 ×4 —— 打破正圆的"靶盘感"
+   *   ② 球体主舱：34 层同心**正圆**逐层换色 ＋ 暗部地板抬高 ＋ 受光点左上偏
+   *   ②b 水下反光弧（右下）—— 水体散射光打回球的下缘，暗部不再是死黑
+   *   ③ 下腹暗带 —— 坐实"下方是船腹"
+   *   ④ 赤道挂载带：**前半粗亮 / 后半细暗**（3/4 椭圆环，这条是"球面成立"的关键）
+   *   ⑤ 霓虹外圈（halo + core 两层）
+   *   ⑥ 顶部穹顶观察舱（**突破剪影** + 暗描边）+ 发光核心
+   *   ⑦ 舷窗灯带（沿船腹一条微弯的弧，**吃 K**）
+   *
+   * -----------------------------------------------------------------------
+   * v3 · 机体**整机不与 `aim` 挂钩**（2026-10-13 用户反馈后定稿）
+   * -----------------------------------------------------------------------
+   *   用户原话：「机体感觉大了一点点 移动的过程中 武器一直在换位置也不太合适」。
+   *   ① 尺寸：视觉半径由 `SEAT_RING_R`(48) 收成 `SEAT_RING_R * BODY_VIS`(43.2) —— 见 BODY_VIS。
+   *   ② 站位：座圈**不再随航向旋转**（改在 `world.ts seatPos()`），机体自身也一并冻结 ——
+   *      鳍、舷窗、挂载带全部固定。**回转体的转动看不见**，转它只会让"炮在自己滑动"更明显。
+   *      航向提示改由**艏部探照灯**（`drawPlayer`）单独承担。
+   *   ⇒ 现在整个 `drawBody` **不读 `w.aim`**，只读位置与潜航器配色。
+   *
+   * -----------------------------------------------------------------------
+   * v2 修掉的 5 个"看着不对但参数都对"的坑（2026-10-13）
+   * -----------------------------------------------------------------------
+   *   1. 球体最外层明度 `0.55` 太暗 → 暗部与背景暗水融成一体，**球看着只有 0.6R**；
+   *      抬到 `0.68` 且衰减指数 0.85→0.72，整圆剪影才读得满。
+   *   2. 球（正圆）＋霓虹圈（正圆）＋挂载带（椭圆）**三层同圆心**且带子整圈同亮 →
+   *      读作"靶盘"。改**前半粗亮/后半细暗**，前后分离一出，球面立刻成立。
+   *   3. **舷窗 y 半径忘了乘 K** → 6 个白点围成竖椭圆并跑出球外（真 bug）；
+   *      改成船腹一排窗、`u²` 微弯、全程吃 K。
+   *   4. 穹顶只比球亮一点、无描边、落在剪影内 → 只是一个浅色斑；改**抬高破剪影 + 暗描边**。
+   *   5. 霓虹 `bloom` 的 `+24px` 线宽挂在 48px 半径上 ≈ 半径 +50% → 一大圈光环抢戏；
+   *      **关掉 bloom**，只留 halo + core。
+   *
+   * ⚠️ 光源**固定在屏幕左上**：全部明暗一律用世界固定方向，**没有任何部件吃 `aim`**。
+   *    与 drawTurret 的铁律同源 —— **形状的朝向不该进它自己的明暗参数**。
+   *
+   * 配色：机体基调用通用水青 `BODY_METAL`，**主题色只落在挂载带**（`w.sub.color`）——
+   * 三台潜航器一眼可分，但机体本身不染艇种色（否则"这座台能换装"就说不通了）。
+   */
+  private drawBody(w: DiveWorld): void {
+    const g = this.gPlayer
+    const cx = w.px, cy = w.py
+    const K = SEAT_RATIO                    // 3/4 俯视压扁率（只压"赤道带"，不压球）
+    // 视觉半径 = 座圈半径 × BODY_VIS（见 BODY_VIS 注释：用户反馈"机体大了一点点"）。
+    // ⚠️ 机体**不再读取 `w.aim`** —— 回转体的转动看不出变化，只会让"炮在自己滑动"更明显
+    //    （见 world.ts seatPos 的说明）。航向提示由艏部探照灯承担。
+    const rb = SEAT_RING_R * BODY_VIS
+    const tint = w.sub.color                // 潜航器主题色（只用于挂载带）
+
+    // ⓪ 悬浮光晕 —— 机体下方的一片青色光池
+    for (let i = 8; i >= 1; i--) {
+      const k = i / 8
+      g.fill(UI.cyanHi, 0.024)
+      g.ellipse(cx, cy + rb * K * 1.00, (rb * 2.35 * k) / 2, (rb * 2.35 * K * 0.55 * k) / 2)
+      g.fillPath()
+    }
+
+    // ① 底部稳定鳍 ×4 —— 打破"正圆靶盘感"，给机体一个下盘。
+    //    ⚠️ 与座圈同步**冻结**：机体是回转体，固定 45°/135°/225°/315° 四个方位。
+    //    若鳍还跟着 `aim` 转，就会出现"炮不动、鳍在转"的自相矛盾，更怪。
+    for (let k = 0; k < 4; k++) {
+      const a = Math.PI / 4 + (k * Math.PI) / 2
+      const ca = Math.cos(a), sa = Math.sin(a)
+      const bx = cx + ca * rb * 0.50, by = cy + sa * rb * K * 0.50
+      const tx = cx + ca * rb * 1.16, ty = cy + sa * rb * K * 1.16 + rb * K * 0.40
+      const wd = rb * 0.26
+      g.fill(UI.abyss, 0.94)                       // 暗底（整片）
+      g.moveTo(bx, by)
+      g.lineTo(tx - sa * wd, ty + ca * wd * K)
+      g.lineTo(tx + sa * wd, ty - ca * wd * K)
+      g.close(); g.fillPath()
+      g.fill(shade(BODY_METAL, 0.82), 1)           // 亮面（受光半边）
+      g.moveTo(bx, by)
+      g.lineTo(tx - sa * wd, ty + ca * wd * K)
+      g.lineTo(tx, ty)
+      g.close(); g.fillPath()
+    }
+
+    // ② 球体主舱 —— **正圆**逐层换色（球的剪影恒为圆，压扁就成"盘子"），受光点向左上偏
+    //    暗部地板抬到 0.68（原 0.55 太暗，最外几层与背景暗水糊成一体 → 球看着只有 0.6R），
+    //    衰减指数 0.72（原 0.85）让亮度更快爬到中调，整圆剪影读得满。
+    const N = 34
+    for (let i = N; i >= 1; i--) {
+      const t = i / N
+      const ox = cx - rb * 0.34 * (1 - t)
+      const oy = cy - rb * 0.34 * (1 - t)
+      const rr = rb * t
+      g.fill(shade(BODY_METAL, 0.68 + 1.02 * Math.pow(1 - t, 0.72)), 1)
+      g.ellipse(ox, oy, rr, rr)
+      g.fillPath()
+    }
+
+    // ②b 水下反光弧（右下 1/4）—— 水体自身的散射光打回球的下缘，
+    //     是"这颗球浸在发光水体里"的物理线索；缺了它，暗部只有一片死黑。
+    g.line(UI.cyanHi, 0.29, rb * 0.075)
+    g.arc(cx, cy, rb * 0.93, (18 * Math.PI) / 180, (96 * Math.PI) / 180)
+    g.stroke()
+
+    // ③ 下腹暗带 —— 球的下 1/3 压暗，坐实"下方是船腹"（不是一整颗漂浮的球）
+    g.line(UI.abyss, 0.38, rb * 0.30)
+    g.arc(cx, cy, rb * 0.97, (24 * Math.PI) / 180, (156 * Math.PI) / 180)
+    g.stroke()
+
+    // ④ 赤道挂载带 —— 6 挺机枪嵌入的环。**这里是 3/4 椭圆的唯一落点**：
+    //    短轴吃 K，与 `seatPos()` 的投影同源，所以炮位天然落在带上。
+    //
+    //    ⚠️ 2026-10-13 v2：带子**拆成前半/后半分别描边** —— 这是整颗球"转起来"的关键。
+    //    前半（下半，靠近观察者）粗而亮、后半（上半，远离观察者）细而暗；
+    //    两半同圆心同半径、只有线宽与明度不同，眼睛立刻读成"一条环绕球面的带子"。
+    //    旧版整圈一样粗一样亮 → 读作平面上两个同心圆（"靶盘"）。
+    //    可行性已实证：引擎 `moveTo` 会推进 `pathOffset`，两次 `stroke()` 互不覆盖。
+    //    后半（远）：π→2π，sin≤0 ⇒ 画在 cy 之上
+    g.line(UI.abyss, 0.78, rb * 0.110)
+    g.ellipseArc(cx, cy, rb, rb * K, Math.PI, Math.PI * 2); g.stroke()
+    g.line(shade(tint, 0.68), 1, rb * 0.075)
+    g.ellipseArc(cx, cy, rb, rb * K, Math.PI, Math.PI * 2); g.stroke()
+    // 前半（近）：0→π，sin≥0 ⇒ 画在 cy 之下
+    g.line(UI.abyss, 0.94, rb * 0.135)
+    g.ellipseArc(cx, cy, rb, rb * K, 0, Math.PI); g.stroke()
+    g.line(shade(tint, 1.18), 1, rb * 0.095)
+    g.ellipseArc(cx, cy, rb, rb * K, 0, Math.PI); g.stroke()
+
+    // ⑤ 霓虹外圈（三层公式）—— 玩家机体必须是画面里最亮的青系
+    //    ⚠️ v2 关掉 bloom：`+24px` 的线宽挂在 rb=48 上等于半径的 +50%，
+    //    在屏幕上是一圈比机体还大的光环，既抢戏又盖掉球体边缘的明暗过渡。
+    //    只留 halo(+8px) + core(±0) —— 发光仍在，但轮廓归机体自己。
+    neonCircle(g, cx, cy, rb, UI.cyan, { width: 1.4, alpha: 0.90, bloom: false })
+
+    // ⑥ 顶部穹顶观察舱 + 发光核心
+    //    v2：抬到 `cy - rb*0.86` 让穹顶**突破球体剪影**、并补一圈暗描边 ——
+    //    旧版落在剪影内、只比球亮一点点，读出来只是一个浅色圆斑，不是"舱"。
+    const db = cy - rb * 0.86
+    const dome = (ox: number, oy: number, rx: number, ry: number, c: number, oc: number, oa: number) => {
+      g.fill(c, 1)
+      g.moveTo(ox - rx, oy)
+      for (let i = 0; i <= 16; i++) {
+        const a = Math.PI + (Math.PI * i) / 16      // π→2π：sin≤0 ⇒ 画在 oy 之上
+        g.lineTo(ox + Math.cos(a) * rx, oy + Math.sin(a) * ry)
+      }
+      g.close(); g.fillPath()
+      g.line(oc, oa, rb * 0.026)
+      g.moveTo(ox - rx, oy)
+      for (let i = 0; i <= 16; i++) {
+        const a = Math.PI + (Math.PI * i) / 16
+        g.lineTo(ox + Math.cos(a) * rx, oy + Math.sin(a) * ry)
+      }
+      g.close(); g.stroke()
+    }
+    dome(cx, db, rb * 0.36, rb * 0.36 * K, shade(BODY_METAL, 1.10), UI.abyss, 0.67)
+    dome(cx - rb * 0.10, db - rb * 0.06 * K, rb * 0.19, rb * 0.19 * K, shade(BODY_METAL, 1.62), UI.abyss, 0.55)
+    // 核心光晕**必须收进球体轮廓内**：半径堆到 0.4R 会戳出球外，
+    // 在暗底上读成"机体头上顶着一块灰斑"（本项目踩过）。
+    const gy = db - rb * 0.14
+    for (let i = 6; i >= 1; i--) {
+      g.fill(UI.cyanHi, 0.10)
+      g.fillCircle(cx, gy, rb * 0.035 * i)
+    }
+    g.fill(0xffffff, 0.95); g.fillCircle(cx, gy, rb * 0.030)
+
+    // ⑦ 舷窗灯带 —— **船腹一排窗**，横向排布且**吃 K**
+    //    ⚠️ v2 修 bug：旧版 y 半径写死 `rb*0.78` **忘了乘 K**，脱离 3/4 投影几何 ——
+    //    6 个白点围成一个竖椭圆、还跑到球体剪影之外，越看越像"漂浮的杂点"。
+    //    现在沿船腹一条微微下弯的弧排开（`u²` 项），与俯角同源。
+    for (let i = 0; i < 5; i++) {
+      const u = (i - 2) / 2
+      const px = cx + u * rb * 0.60
+      const py = cy + rb * 0.34 + (u * u) * rb * 0.22 * K
+      g.fill(UI.cyanHi, 0.92)
+      g.fillCircle(px, py, Math.max(1, rb * 0.048))
+    }
+
+    // 受击反馈：整机泛红（机体改矢量后没有"红描边"了，改整机压色）
+    if (w.hurtFlash > 0) {
+      g.fill(UI.danger, 0.30 * Math.min(1, w.hurtFlash / 0.2))
+      g.ellipse(cx, cy, rb, rb)
+      g.fillPath()
+    }
+  }
+
+  /**
    * 局部坐标 → 世界坐标的**旋转**（sim 语义：原点左上、y 向下、`ang` 顺时针为正）。
    *
    * 为什么手算而不是用引擎的 `translate/rotate`：Cocos 3.8.8 的 `Graphics`
@@ -1281,36 +1610,32 @@ export class DiveGame extends Component {
   }
 
   /**
-   * 发射塔 = **圆形装载器 + 镶嵌其上的发射器**。
+   * 发射机枪总成 = **赤道挂载带上的挂点 + 镶嵌其上的发射器**。
    *
    * -----------------------------------------------------------------------
-   * 立体感 = **四条线索，缺一条就平**（32px 的盘子上只有这四样读得出来）
+   * 2026-10-13 重做（用户拍板「A2 层叠 + 装填环去掉」）
    * -----------------------------------------------------------------------
-   *   ⓪ 投影   —— 右下偏移的暗盘。**第一条**，没有它塔就是贴在艇上的一块贴纸；
-   *   ① 侧壁   —— 底盘画两遍、下移 R*0.13 且更暗 → 2~3px 的"厚度"；
-   *   ② 受光弧 —— 左上一条粗弧（弧宽 R*0.30）＝ 圆柱侧面被打亮；
-   *   ③ 暗弧   —— 右下一条粗弧 ＝ 终结线。②③一亮一暗，体积才闭合。
-   * 在这之上才是纹样：内凹槽（凹）、外缘亮环（发光语言）、中心毂（凸）、装填进度环（施法可见）。
+   *   ① 塔座**不再是独立的圆形底盘**：6 个挂点直接嵌在机体的赤道挂载带上
+   *      （`drawBody` ④ 那条椭圆环）。座圈位置由 `seatPos()` 给出，**已含 3/4 投影**，
+   *      所以"炮位 = 炮口 = 子弹出生点"天然对齐（改投影只需改那一处）。
+   *   ② **装填进度环整条删掉**（用户明确要求）。"还要等多久"的信息交给 HUD 的冷却环，
+   *      战斗里不再有塔座外圈那条转动的小弧。
+   *   ③ 层叠走 **A2**：机体先画、6 挺机枪全画在机体**之上**（不按远近做遮挡排序）——
+   *      这样"我装了几门炮"任何朝向都一眼可见（用户硬要求：机枪必须清晰可见）。
    *
    * -----------------------------------------------------------------------
-   * ⚠️ 光源**固定在屏幕左上**，不随塔转 —— 这是本次重画改掉的一处旧错
+   * ⚠️ 光源**固定在屏幕左上**，不随炮管转
    * -----------------------------------------------------------------------
-   *   旧版所有明暗弧都写成 `ang + π*1.08` 之类，等于**受光面跟着塔一起转**：
-   *   塔转向哪边，亮面就转到哪边 —— 视觉上就是"贴纸在打折"。
-   *   正确做法：**旋转的只有炮管**；塔座 / 凹槽 / 中心毂的明暗一律用**世界固定角**
-   *   （左上 = 180°~266°，右下 = 0°~86°）。
+   *   **旋转的只有发射器**；挂点的明暗一律用**世界固定角**（左上 180°~266°）。
+   *   判据：形状的朝向不该进它自己的明暗参数 —— 否则炮管一转亮面跟着转，
+   *   视觉上就是"贴纸在打折"（旧版踩过，且**不报错**，只有盯着连续转向才看得出）。
    *
    * -----------------------------------------------------------------------
-   * 动效：后坐 + 待机微浮（用户要「给点立体感 在移动」）
+   * 动效（用户要「给点立体感 在移动」）
    * -----------------------------------------------------------------------
-   *   · 后坐：开火瞬间沿炮管**反方向**退 `3px`，随 `fireFlash` 衰减归位。
-   *     只推发射器与中心毂 —— 塔座是焊在艇体上的，跟着抖会像整台机器在跳。
-   *   · 待机微浮：`sin(t*1.6 + i*2.3) * 0.7px`，每座错相位。
-   *     幅值 0.7px 是刻意的：再大就从"活着"变成"整体抖动"。
-   *   · 索敌转向本身由 `slewTurretAims`（sim 层，TURRET_SPIN 限速）驱动，渲染层不重复做。
-   *
-   * 塔座用**通用色**（cyanDim）、不带武器色 —— 座是艇上的固定设施，武器才是可换的。
-   * 若塔座也染武器色，"这座塔能换装别的炮"就说不通了。武器色只出现在发射器上。
+   *   · 后坐：开火瞬间沿炮管**反方向**退 `3px`，随 `fireFlash` 衰减归位（只推发射器）；
+   *   · 待机微浮：`sin(t*1.6 + i*2.3) * 0.7px`，每座错相位；
+   *   · 索敌转向由 `slewTurretAims`（sim 层，`TURRET_SPIN` 限速）驱动，渲染层不重复做。
    */
   private drawTurret(w: DiveWorld, i: number): void {
     const wp = w.weapons[i]
@@ -1318,84 +1643,27 @@ export class DiveGame extends Component {
     if (!wp || !pose) return
     const g = this.gPlayer
     const cx = pose.x, cy = pose.y, ang = pose.ang
-    // ext = 容器扩容解锁出来的第 5、6 座：琥珀外环 + 略大 15%，
+    // ext = 容器扩容解锁出来的第 5、6 座：挂点略大 10% + 琥珀描边，
     // 让"我的艇变强了"在**剪影**上直接看得见，而不是只能读 HUD 数字。
     const ext = i >= BASE_SEATS
-    const R = TURRET_R * (ext ? 1.15 : 1)
+    const pad = TURRET_R * 0.55 * (ext ? 1.10 : 1)
     const hot = wp.fireFlash > 0
     // 后坐位移（沿炮管局部 x，负 = 后退）。fireFlash 寿命 0.15~0.25s，
     // 这里按 0.15 归一化 → 开火瞬间满行程，随后线性归位。
     const kick = hot ? 3.0 * Math.min(1, wp.fireFlash / 0.15) : 0
     const bob = Math.sin(w.t * 1.6 + i * 2.3) * 0.7
     const fore = -kick - bob
-    // 局部 → 世界（只给**发射器**用；塔座一律世界固定）
-    const P = (lx: number, ly: number) => this.rot(cx, cy, ang, lx + fore, ly)
 
-    // 光源固定角（屏幕左上 / 右下）
-    const L0 = Math.PI * 1.02, L1 = Math.PI * 1.48
-    const D0 = Math.PI * 0.02, D1 = Math.PI * 0.48
+    // 挂点：投影（右下偏移）→ 暗底顶面 → 左上受光弧 → 描边。
+    // 顶面刻意压暗，让**本色发射器**从挂点上跳出来（"机枪清晰可见"的第一条）。
+    g.fill(UI.abyss, 0.45); g.fillCircle(cx + pad * 0.16, cy + pad * 0.26, pad)
+    g.fill(UI.abyss, 0.62); g.fillCircle(cx, cy, pad)
+    g.line(UI.cyanHi, 0.55, Math.max(1, pad * 0.24))
+    g.arc(cx, cy, pad * 0.76, Math.PI * 1.02, Math.PI * 1.48); g.stroke()
+    g.line(ext ? UI.amber : UI.cyanHi, hot ? 1 : 0.8, 1.4)
+    g.strokeCircle(cx, cy, pad)
 
-    // ⓪ 投影：右下偏移的暗盘 —— 立体感第一条
-    g.fill(UI.abyss, 0.28); g.fillCircle(cx + R * 0.16, cy + R * 0.22, R * 0.98)
-
-    // ① 侧壁：底盘画两遍，下面那遍下移 + 更暗 → 厚度
-    g.fill(UI.abyss, 0.50); g.fillCircle(cx, cy + R * 0.13, R)
-
-    // ② 顶面（受光面）：中亮青实底 —— **不填黑**（近黑在明亮水层下就是一块黑斑）
-    g.fill(UI.cyanDim, 0.66); g.fillCircle(cx, cy, R)
-
-    // ③ 左上粗弧 = 圆柱侧面被打亮
-    g.line(UI.cyanHi, 0.50, R * 0.30)
-    g.arc(cx, cy, R * 0.82, L0, L1); g.stroke()
-    // ④ 右下暗弧 = 终结线
-    g.line(UI.abyss, 0.38, R * 0.26)
-    g.arc(cx, cy, R * 0.86, D0, D1); g.stroke()
-
-    // ⑤ 内凹槽（发射器的安装位）：暗面 + **向下偏移** = 凹进去
-    g.fill(UI.abyss, 0.42); g.fillCircle(cx, cy + R * 0.12, R * 0.70)
-    g.line(UI.cyanHi, 0.45, R * 0.16)   // 凹槽内壁：上缘受光
-    g.arc(cx, cy + R * 0.12, R * 0.64, L0, L1); g.stroke()
-    g.line(UI.abyss, 0.28, R * 0.16)    // 凹槽外沿投影：下缘加深
-    g.arc(cx, cy + R * 0.08, R * 0.76, D0, D1); g.stroke()
-
-    // ⑥ 外缘亮环 + 左上金属高光弧
-    neonCircle(g, cx, cy, R, hot ? 0xffffff : UI.cyan, { width: 2.2, alpha: 0.95, bloom: hot })
-    g.line(0xffffff, 0.55, 1.6)
-    g.arc(cx, cy, R * 0.92, L0, L0 + Math.PI * 0.44); g.stroke()
-
-    // ⑦ 扩容座：琥珀环 + 4 卡榫。环半径压到 R*1.16 —— 必须让开外圈的装填环（R*1.42），
-    //    两条环交叉会读成"一个乱掉的表盘"。
-    if (ext) {
-      neonCircle(g, cx, cy, R * 1.16, UI.amber, { width: 1.4, alpha: 0.8, bloom: false })
-      g.fill(UI.amber, 0.9)
-      for (let k = 0; k < 4; k++) {
-        const a = (k * Math.PI) / 2 + Math.PI / 4
-        g.fillCircle(cx + Math.cos(a) * R * 1.02, cy + Math.sin(a) * R * 1.02, 1.6)
-      }
-    }
-
-    // ⑧ 装填进度环（最外，12 点起顺时针）—— "施法过程可见"的主件。
-    // 分母用**上一发的实际间隔**（含等级/齐射/高压供能）：升级后环的转速仍与真实开火节奏一致。
-    const ivD = wp.ivLast > 0 ? wp.ivLast : wp.iv
-    const charge = Math.max(0, Math.min(1, 1 - wp.timer / Math.max(0.001, ivD)))
-    const a0 = -Math.PI / 2
-    const progCol = hot ? 0xffffff : (charge > 0.985 ? UI.cyanHi : charge > 0.55 ? UI.cyan : UI.amber)
-    neon(g, progCol, () => {
-      g.arc(cx, cy, R * 1.42, a0, a0 + Math.PI * 2 * Math.max(0.001, charge)); g.stroke()
-    }, { width: 2.0, alpha: 0.92, bloom: hot || charge > 0.985 })
-    // 12 点刻度 —— **不随塔转**：圆是旋转对称的，刻度留在正上方才有"表盘"的读感
-    g.fill(UI.cyanDim, 0.85); g.fillRect(cx - 1.0, cy - R * 1.54, 2.0, 4)
-
-    // ⑨ 中心毂（凸起，吃 60% 的后坐）：暗影 → 亮面 → 左上高光点
-    const hx = cx + Math.cos(ang) * fore * 0.6
-    const hy = cy + Math.sin(ang) * fore * 0.6
-    g.fill(UI.abyss, 0.45); g.fillCircle(hx + R * 0.06, hy + R * 0.07, R * 0.30)
-    g.fill(hot ? 0xffffff : UI.cyanHi, 0.95); g.fillCircle(hx, hy, R * 0.26)
-    g.fill(0xffffff, 0.9); g.fillCircle(hx - R * 0.09, hy - R * 0.09, R * 0.08)
-
-    // ⑩ 发射器：嵌在凹槽里，随索敌角旋转（子弹与枪口闪光也以它为准）
-    const tip = P(R * 0.92, 0)
-    neonLine(g, cx, cy, tip.x, tip.y, hot ? 0xffffff : UI.cyanHi, { width: 2.2, alpha: 0.95, bloom: false })
+    // 发射器：嵌在挂点上，随索敌角旋转（子弹与枪口闪光也以它为准）
     this.drawEmitter(wp.id, cx, cy, ang, hot, fore)
   }
 
@@ -1416,54 +1684,152 @@ export class DiveGame extends Component {
     const ox = cx + Math.cos(ang) * fore
     const oy = cy + Math.sin(ang) * fore
 
-    if (id === 'sonar') {
-      // 声呐：三层同心弧，开口朝局部 +x（喇叭形辐射面）
-      for (let i = 1; i <= 3; i++) {
-        g.line(c, firing ? 1 : 0.7, 1.8)
-        g.arc(ox, oy, s * 0.26 * i, ang - 1.0, ang + 1.0); g.stroke()
+    // ⚠️ 一律按**族**路由（`weaponFamily`），不是 `id === 'xxx'` 严格相等 ——
+    //    之前用严格相等时，8 个进化形态（gun_gl/torp_hv/sonar_fc…）全都掉进最后的
+    //    `else`（电弧造型），即"进化了但外观没变、还都长成电弧"。2026-10-13 修。
+    const fam = weaponFamily(id)
+    if (fam === 'sonar') {
+      // 声呐族：同心弧。定向聚焦改"短而粗"；共振炮额外三颗散射点。
+      const fc = id === 'sonar_fc'
+      const arcs = fc ? 2 : 3
+      for (let i = 1; i <= arcs; i++) {
+        g.line(c, firing ? 1 : 0.7, fc ? 2.6 : 1.8)
+        g.arc(ox, oy, s * (fc ? 0.2 : 0.26) * i, ang - (fc ? 0.62 : 1.0), ang + (fc ? 0.62 : 1.0))
+        g.stroke()
       }
       g.fill(c, 0.9); g.fillCircle(ox, oy, s * 0.12)
-    } else if (id === 'gun') {
-      // 机关枪：三根平行枪管
-      for (let i = -1; i <= 1; i++) {
-        const yy = i * s * 0.3
+      if (id === 'sonar_rs') {
+        for (const da of [-0.9, 0, 0.9]) {
+          const p = P(Math.cos(da) * s * 0.5, Math.sin(da) * s * 0.5)
+          g.fill(c, 0.85); g.fillCircle(p.x, p.y, s * 0.09)
+        }
+      }
+    } else if (fam === 'gun') {
+      // 机关枪族：平行枪管。加特林 5 管；霰弹 3 管 + 外扩喇叭口。
+      const n = id === 'gun_gl' ? 5 : 3
+      for (let i = 0; i < n; i++) {
+        const yy = (i - (n - 1) / 2) * (id === 'gun_gl' ? s * 0.16 : s * 0.3)
         const p1 = P(-s * 0.35, yy), p2 = P(s * 0.8, yy)
-        g.line(c, i === 0 ? 1 : 0.65, 2.4)
+        g.line(c, i === ((n - 1) >> 1) ? 1 : 0.65, 2.2)
         g.strokeSeg(p1.x, p1.y, p2.x, p2.y)
       }
-      // 枪口亮点：开火瞬间烧白，给"它在射击"的反馈
+      if (id === 'gun_sg') {
+        const m0 = P(s * 0.8, 0), m1 = P(s * 1.0, -s * 0.34), m2 = P(s * 1.0, s * 0.34)
+        g.line(c, 0.9, 1.8)
+        g.strokeSeg(m0.x, m0.y, m1.x, m1.y)
+        g.strokeSeg(m0.x, m0.y, m2.x, m2.y)
+      }
       const mz = P(s * 0.8, 0)
       g.fill(firing ? 0xffffff : c, 0.95); g.fillCircle(mz.x, mz.y, s * 0.11)
-    } else if (id === 'torpedo') {
-      // 鱼雷发射管：本色半透明管身 + 亮描边 + 亮管口环（任何背景下都是"发光炮管"）。
-      // ⚠️ 管身**绝不能填近黑**：web 侧曾用近黑填管身，在明亮水层下就是一块纯黑矩形 ——
+    } else if (fam === 'torpedo') {
+      // 鱼雷族：管身 + 管口环。集束三管口；重型更粗 + 双环。
+      // ⚠️ 管身**绝不能填近黑**：曾经用近黑填管身，在明亮水层下就是一块纯黑矩形 ——
       //    那正是用户反复反馈的"击杀之后有一个黑色方块"的真凶。
-      // 旋转后的圆角矩形没有等价的引擎 API，用四角多边形代替（14px 尺寸下圆角差异不可见）。
-      const q = [P(-s * 0.4, -s * 0.3), P(s * 0.6, -s * 0.3), P(s * 0.6, s * 0.3), P(-s * 0.4, s * 0.3)]
+      const wide = id === 'torp_hv'
+      const hh = wide ? s * 0.42 : s * 0.3
+      const q = [P(-s * 0.4, -hh), P(s * 0.6, -hh), P(s * 0.6, hh), P(-s * 0.4, hh)]
       const quad = () => {
         g.moveTo(q[0].x, q[0].y); g.lineTo(q[1].x, q[1].y)
         g.lineTo(q[2].x, q[2].y); g.lineTo(q[3].x, q[3].y); g.close()
       }
       g.fill(c, 0.32); quad(); g.fillPath()
       g.line(c, 0.95, 1.6); quad(); g.stroke()
-      // 管口环 + 内壁高光（让"这是个管口"有体积感，而不是一块实心色板）
-      const m1 = P(s * 0.55, -s * 0.32), m2 = P(s * 0.55, s * 0.32)
-      g.line(firing ? 0xffffff : c, 0.95, 2)
-      g.strokeSeg(m1.x, m1.y, m2.x, m2.y)
-      const mo = P(s * 0.42, 0)
-      g.fill(0xffffff, firing ? 0.9 : 0.35); g.fillCircle(mo.x, mo.y, s * 0.16)
-    } else {
-      // 电弧：两根电极柱 + 中间跳跃的弧光
+      if (id === 'torp_cl') {
+        for (const yy of [-s * 0.22, 0, s * 0.22]) {
+          const p = P(s * 0.55, yy)
+          g.line(c, 0.9, 1.4); g.strokeCircle(p.x, p.y, s * 0.12)
+        }
+      } else {
+        const m1 = P(s * 0.55, -hh * 0.9), m2 = P(s * 0.55, hh * 0.9)
+        g.line(firing ? 0xffffff : c, 0.95, wide ? 2.6 : 2)
+        g.strokeSeg(m1.x, m1.y, m2.x, m2.y)
+        if (wide) {
+          const m3 = P(s * 0.72, -s * 0.3), m4 = P(s * 0.72, s * 0.3)
+          g.line(c, 0.7, 1.6); g.strokeSeg(m3.x, m3.y, m4.x, m4.y)
+        }
+        const mo = P(s * 0.42, 0)
+        g.fill(0xffffff, firing ? 0.9 : 0.35); g.fillCircle(mo.x, mo.y, s * (wide ? 0.2 : 0.16))
+      }
+    } else if (fam === 'arc') {
+      // 电弧族：两根电极柱 + 跳跃弧光。过载加一段；定点雷暴向四周放射。
       const e1a = P(-s * 0.2, -s * 0.36), e1b = P(s * 0.5, -s * 0.36)
       const e2a = P(-s * 0.2, s * 0.36), e2b = P(s * 0.5, s * 0.36)
       g.line(c, 0.95, 2)
       g.strokeSeg(e1a.x, e1a.y, e1b.x, e1b.y)
       g.strokeSeg(e2a.x, e2a.y, e2b.x, e2b.y)
-      const z = [P(s * 0.5, -s * 0.36), P(s * 0.26, -s * 0.06), P(s * 0.62, s * 0.06), P(s * 0.38, s * 0.36)]
-      neon(g, firing ? 0xffffff : c, () => {
-        g.moveTo(z[0].x, z[0].y); g.lineTo(z[1].x, z[1].y)
-        g.lineTo(z[2].x, z[2].y); g.lineTo(z[3].x, z[3].y); g.stroke()
-      }, { width: 1.6, bloom: firing })
+      if (id === 'arc_st') {
+        for (let i = 0; i < 8; i++) {
+          const a = (i / 8) * Math.PI * 2
+          const p = P(Math.cos(a) * s * 0.66, Math.sin(a) * s * 0.66)
+          g.line(firing ? 0xffffff : c, 0.85, 1.4)
+          g.strokeSeg(ox, oy, p.x, p.y)
+        }
+      } else {
+        const z = id === 'arc_ov'
+          ? [P(s * 0.5, -s * 0.36), P(s * 0.2, -s * 0.16), P(s * 0.62, -s * 0.02), P(s * 0.28, s * 0.14), P(s * 0.62, s * 0.36)]
+          : [P(s * 0.5, -s * 0.36), P(s * 0.26, -s * 0.06), P(s * 0.62, s * 0.06), P(s * 0.38, s * 0.36)]
+        neon(g, firing ? 0xffffff : c, () => {
+          g.moveTo(z[0].x, z[0].y)
+          for (let i = 1; i < z.length; i++) g.lineTo(z[i].x, z[i].y)
+          g.stroke()
+        }, { width: 1.6, bloom: firing })
+      }
+    } else if (fam === 'harpoon') {
+      // 鱼叉族（V6.29 新增造型）：一根长矛 + 前端倒钩。三重鱼叉三根平行；回旋鱼叉尾端带环。
+      const shafts = id === 'harp_tr' ? [-1, 0, 1] : [0]
+      for (const k of shafts) {
+        const yy = k * s * 0.28
+        const a1 = P(-s * 0.42, yy), a2 = P(s * 0.86, yy)
+        g.line(c, k === 0 ? 1 : 0.7, 2.2)
+        g.strokeSeg(a1.x, a1.y, a2.x, a2.y)
+        const t0 = P(s * 0.86, yy), t1 = P(s * 0.64, yy - s * 0.16), t2 = P(s * 0.64, yy + s * 0.16)
+        g.line(c, 0.95, 1.6)
+        g.strokeSeg(t0.x, t0.y, t1.x, t1.y)
+        g.strokeSeg(t0.x, t0.y, t2.x, t2.y)
+      }
+      if (id === 'harp_cb') {
+        const lp = P(-s * 0.62, 0)
+        g.line(firing ? 0xffffff : c, 0.9, 1.6)
+        g.strokeCircle(lp.x, lp.y, s * 0.22)
+      }
+    } else if (fam === 'echo') {
+      // 回声族（V6.29 新增造型）：后方发射盘 + 前方聚焦点。多重三点；聚焦一个大点 + 双环。
+      const bp = P(-s * 0.12, 0)
+      g.fill(c, 0.85); g.fillCircle(bp.x, bp.y, s * (id === 'echo_fo' ? 0.3 : 0.22))
+      if (id === 'echo_mu') {
+        for (const k of [-1, 0, 1]) {
+          const p = P(s * 0.55, k * s * 0.34)
+          g.fill(firing ? 0xffffff : c, 0.95); g.fillCircle(p.x, p.y, s * 0.13)
+        }
+      } else if (id === 'echo_fo') {
+        const p = P(s * 0.62, 0)
+        g.fill(firing ? 0xffffff : c, 0.95); g.fillCircle(p.x, p.y, s * 0.22)
+        g.line(c, 0.8, 1.6); g.strokeCircle(p.x, p.y, s * 0.36)
+      } else {
+        const p = P(s * 0.55, 0)
+        g.fill(firing ? 0xffffff : c, 0.9); g.fillCircle(p.x, p.y, s * 0.15)
+        g.line(c, 0.6, 1.2); g.strokeCircle(p.x, p.y, s * 0.26)
+      }
+    } else {
+      // 酸液族（V6.29 新增造型）：朝前的喷嘴锥。持久酸池尾端带池环；酸雨三点。
+      const n0 = P(-s * 0.4, -s * 0.34), n1 = P(-s * 0.4, s * 0.34), n2 = P(s * 0.7, 0)
+      g.fill(c, 0.28)
+      g.moveTo(n0.x, n0.y); g.lineTo(n1.x, n1.y); g.lineTo(n2.x, n2.y); g.close(); g.fillPath()
+      g.line(c, 0.95, 1.6)
+      g.moveTo(n0.x, n0.y); g.lineTo(n1.x, n1.y); g.lineTo(n2.x, n2.y); g.close(); g.stroke()
+      if (id === 'acid_ra') {
+        for (const k of [-1, 0, 1]) {
+          const p = P(s * 0.95, k * s * 0.3)
+          g.fill(firing ? 0xffffff : c, 0.95); g.fillCircle(p.x, p.y, s * 0.1)
+        }
+      } else {
+        if (id === 'acid_fd') {
+          const p = P(-s * 0.5, 0)
+          g.line(c, 0.8, 1.4); g.strokeCircle(p.x, p.y, s * 0.24)
+        }
+        const mz = P(s * 0.7, 0)
+        g.fill(firing ? 0xffffff : c, 0.9); g.fillCircle(mz.x, mz.y, s * (id === 'acid_fd' ? 0.12 : 0.14))
+      }
     }
   }
 

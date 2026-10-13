@@ -47,8 +47,42 @@ export function artPaths(): Record<string, string> {
   out.sub_body = 'sub/sub_body'   // 变体图缺失时的兜底机体
 
   // 商店立绘：武器与遗物的贴图键**统一**是 `item_<id>`（模拟层只给 id）
-  for (const id of Object.keys(WEAPON_DEF)) out['item_' + id] = 'items/item_' + id
-  for (const id of Object.keys(RELIC_DEF)) out['item_' + id] = 'items/item_' + id
+  // V6.30：6 条新进化立绘**已全部出图**（鱼叉/回声/酸液 三族各 2 条），
+  //        回退表已清空；下次清理时整个 `EVO_ART_FALLBACK` 可直接删。
+  for (const id of Object.keys(WEAPON_DEF)) {
+    out['item_' + id] = 'items/item_' + (EVO_ART_FALLBACK[id] ?? id)
+  }
+  // V6.33：遗物同样支持**临时立绘回退**（新遗物未出图时先复用语义相近的已有图）
+  for (const id of Object.keys(RELIC_DEF)) {
+    out['item_' + id] = 'items/item_' + (RELIC_ART_FALLBACK[id] ?? id)
+  }
 
   return out
+}
+
+/**
+ * 进化形态的**临时立绘回退**（V6.29 引入，V6.30 清空）。
+ *
+ * 用途：尚未出图的新进化，先复用其**基础武器**的立绘 —— 这样美术 key 表与磁盘
+ * 一致、管线不报错，也不会静默缺图（症状是商店卡的立绘框里显示基础武器的图）。
+ *
+ * **V6.30 批 4 六条进化立绘全部出图 → 本表已清空。** 保留常量只为不动上面的
+ * `artPaths()` 取用写法；下个版本清理时可直接删掉本常量与那行 `?? EVO_ART_FALLBACK[id]`。
+ */
+const EVO_ART_FALLBACK: Record<string, string> = {}
+
+/**
+ * 遗物的**临时立绘回退**（V6.33 引入）。
+ *
+ * 与 `EVO_ART_FALLBACK` 同款：新遗物机制先落地、立绘后补，先复用**语义相近**的
+ * 已有遗物图，让 `artPaths()` 与磁盘一致、管线不报缺失，也不静默缺图。
+ *
+ * ⚠️ 出图后处理：把对应条目从这里删掉，并在 `items/` 放入 `item_<id>.png`
+ *   （走 `tools/process_item_art.py` → `tools/sync_art.py`）。
+ */
+const RELIC_ART_FALLBACK: Record<string, string> = {
+  conductor_coil: 'resonance_core',   // 都是"能量耦合"意象
+  bleeding_anchor: 'abyss_mark',      // 都是"尖锐/撕裂"意象
+  resonance_chamber: 'echo_heart',    // 同属回声家族
+  overload_core: 'gluttony',          // 都是"核心件"意象
 }

@@ -45,7 +45,8 @@ import type {
 } from './types'
 import {
   O2, BONE_O2, PLAYER, WEAPON_DEF, STAT_CAP, NEW_STATS, RELIC_DEF, RELIC_SLOTS,
-  LAYERS, LAYER_WAVES, SEAT_ANGLES_DEG, SEAT_RING_R, TURRET_R, TURRET_SPIN,
+  LAYERS, LAYER_WAVES, SEAT_ANGLES_DEG, SEAT_RING_R, SEAT_RATIO, TURRET_R, TURRET_SPIN,
+  SEAT_SWAY_MAX, SEAT_SWAY_FOLLOW, SEAT_SWAY_DECAY,
   MAX_SEATS, BASE_SEATS, REROLL_BASE, REROLL_STEP, BONE, ENEMY_TEX, TEX_BASE_ROT, weaponFamily,
 } from './tables'
 import { CARD_POOL } from './pool'
@@ -62,6 +63,11 @@ export interface WorldOptions {
   sub?: SubDef
   /** 商店卡池（默认完整卡池；测试里可传 `[]` 跳过商店） */
   pool?: UpgradeDef[]
+  /**
+   * 永久强化（meta）注入的三项加成。缺省 = 全 0（无 meta 的纯模拟）。
+   * 见 `unlocks.ts` 的 `perkBonus()` —— 满级总增幅被红线锁死在"两个遗物"量级。
+   */
+  perk?: { rate?: number; o2Bonus?: number; pickup?: number }
 }
 
 /** 单帧最大步长（秒）—— 与 `DiveScene`: `Math.min(deltaMs, 50) / 1000` 一致 */
@@ -84,6 +90,14 @@ export class DiveWorld implements ShopTarget {
   biomass = 0
   /** 朝向（弧度）：艇身朝移动方向，静止时保持上一次 */
   aim = 0
+  /**
+   * 炮圈**摆动角**（弧度）。2026-10-13 新增。
+   * 阻尼跟随航向的**增量**、限幅 ±`SEAT_SWAY_MAX`：转向时 6 座炮略微滞后偏一点，
+   * 停转后弹簧回中。**与 `seatPos()` 同源** ⇒ 炮位、炮口闪光、子弹出生点三者一致，弹道不劈叉。
+   */
+  sway = 0
+  /** 上一帧航向（仅用于算摆动增量，绕到最短弧） */
+  private prevAim = 0
   burstTimer = 0
   st: Stats = NEW_STATS()
   sub: SubDef
@@ -154,12 +168,28 @@ export class DiveWorld implements ShopTarget {
   /** 世界时间（秒）—— 暗流/漂移的相位用它 */
   t = 0
 
+  /**
+   * 本局**刷怪计数**（按 kind）。只增不减，用于图鉴"遇见次数"（`codexGains()`）。
+   *
+   * 为什么放在模拟层而不是渲染层去数敌人数：一是确定性（同 seed ⇒ 同计数，
+   * 能在无头测试里断言），二是渲染层会因为"贴图池复用"根本数不准。
+   */
+  spawned: Record<string, number> = {}
+
+  /** 永久强化注入的三项（见 WorldOptions.perk） */
+  private readonly perkRate: number
+  private readonly perkO2: number
+  private readonly perkPickup: number
+
   constructor(opts: WorldOptions) {
     this.W = opts.w
     this.H = opts.h
     this.rng = new Rng(opts.seed ?? 0xc0ffee)
     this.sub = opts.sub ?? SUBS[0]
     this.pool = opts.pool ?? CARD_POOL
+    this.perkRate = opts.perk?.rate ?? 0
+    this.perkO2 = opts.perk?.o2Bonus ?? 0
+    this.perkPickup = opts.perk?.pickup ?? 0
     this.px = this.W / 2
     this.py = this.H / 2
     this.o2 = O2.max
@@ -202,8 +232,14 @@ export class DiveWorld implements ShopTarget {
     this.st = NEW_STATS()
     this.st.speed += this.sub.speed
     this.st.pickup += this.sub.pickup
+    // 永久强化：并进 `st` 而不是直接加 `o2Max` —— 因为 `equipRelic()` 会
+    // 用 `layer().o2Max + st.o2Bonus` **整份重算** o2Max，若只加到 o2Max 上，
+    // 玩家一装"骨殖转化"（o2Bonus −15）就会把永久强化的氧气加成一起冲掉。
+    this.st.rate += this.perkRate
+    this.st.o2Bonus += this.perkO2
+    this.st.pickup += this.perkPickup
     this.ramT = 0
-    this.o2Max = LAYERS[0].o2Max + this.sub.o2Max
+    this.o2Max = LAYERS[0].o2Max + this.sub.o2Max + this.st.o2Bonus
     this.o2 = this.o2Max
     this.o2Shown = this.o2Max
     this.maxWeapons = 4 + (this.sub.slots - 4)
@@ -315,6 +351,7 @@ export class DiveWorld implements ShopTarget {
       texRot: TEX_BASE_ROT[kind] ?? 0,
     })
     this.eid++
+    this.spawned[kind] = (this.spawned[kind] ?? 0) + 1
   }
 
   /**
@@ -376,6 +413,7 @@ export class DiveWorld implements ShopTarget {
       tex: ENEMY_TEX.boss,
       texRot: TEX_BASE_ROT.dash ?? 0,
     })
+    this.spawned.boss = (this.spawned.boss ?? 0) + 1
   }
 
   /** DiveScene.ts:1664-1681 */
@@ -426,6 +464,8 @@ export class DiveWorld implements ShopTarget {
       this.movePlayer(dt, input)
       // 转塔必须在 movePlayer 之后（座圈世界坐标依赖本帧的 px/py/aim），
       // 又必须在 autoFire 之前（开火时读的就是这一帧算好的炮口朝向）。
+      // 炮圈摆动夹在两者中间：先按本帧航向摆到位，再让炮管对着（摆动后的）原点索敌。
+      this.slewSeatSway(dt)
       this.slewTurretAims(dt)
       this.updateEnemies(dt)
       this.updatePulses(dt)
@@ -603,7 +643,7 @@ export class DiveWorld implements ShopTarget {
     this.plateT = 1.5
     this.hurtDirX = dirX; this.hurtDirY = dirY; this.hurtDirT = 0.6
     this.emit({ t: 'playerHurt', dirX, dirY, amount: d })
-    this.emit({ t: 'float', x: this.px, y: this.py - 30, text: `-${Math.round(d)}`, color: UI.danger, size: 16 })
+    this.emit({ t: 'float', x: this.px, y: this.py - 30, text: `-${Math.round(d)}`, color: UI.danger, size: 18 })
   }
 
   /** DiveScene.ts:2005-2014 */
@@ -652,7 +692,7 @@ export class DiveWorld implements ShopTarget {
   updateEchoes(dt: number): void {
     for (const e of this.echoes) {
       e.t -= dt
-      if (e.t <= 0) this.explode(e.x, e.y, 130, e.dmg)
+      if (e.t <= 0) this.explode(e.x, e.y, e.r ?? 130, e.dmg, e.o2per ?? 0, e.depth ?? 0)
     }
     this.echoes = this.echoes.filter(e => e.t > 0)
   }
@@ -702,7 +742,7 @@ export class DiveWorld implements ShopTarget {
       // 命中震屏：只给暴击（普通命中频率太高，每次都震会变廉价且让人晕）
       this.emit({ t: 'shake', ms: 90, intensity: 0.0022 })
       e.flash = 0.14
-      this.emit({ t: 'float', x: e.x, y: e.y - e.r - 14, text: `暴击 ${Math.round(d)}`, color: UI.violet, size: 17 })
+      this.emit({ t: 'float', x: e.x, y: e.y - e.r - 14, text: `暴击 ${Math.round(d)}`, color: UI.violet, size: 22 })
       // 共振核心：暴击溅射到最近的另一只
       if (this.hasRelic('resonance_core')) {
         let best: Enemy | null = null, bd = 220
@@ -718,8 +758,25 @@ export class DiveWorld implements ShopTarget {
         }
       }
     } else {
-      this.emit({ t: 'float', x: e.x, y: e.y - e.r - 12, text: `${Math.round(d)}`, color: 0xe8f4ff, size: 12 })
+      // ---- 伤害飘字字号阶梯（2026-10-13 用户「伤害飘字小了点 字体改下」）----
+      // 层级：普通 16 = 击破回氧 16 ＜ 玩家受伤 18 ＜ 暴击 22 ＜ BOSS 击破 26
+      // 依据：① 普通伤害是**最高频**的一条，12px 在满屏火花/拖尾里读不出，16 是「扫一眼就能读到数字」的下限；
+      //       ② 暴击 22 = 普通的 1.375 倍，让玩家**不看颜色也知道这刀更重**（原来 17 vs 12 差得不够）；
+      //       ③ 玩家自己掉血（18）优先级高于打怪，因为它直接关联生死。
+      // 加粗 + 深色描边在渲染层（DiveGame.pushFloat）统一加，描边宽随字号比例走。
+      this.emit({ t: 'float', x: e.x, y: e.y - e.r - 12, text: `${Math.round(d)}`, color: 0xe8f4ff, size: 16 })
     }
+    this.tryKill(e)
+  }
+
+  /**
+   * 死亡结算：血量归零 → 掉骨 / 击杀回氧 / 震屏 / 事件。
+   *
+   * **V6.33 从 `hurt()` 抽出**：破血锚的穿透补刀走独立轻量结算（`rendTick()`，
+   * 刻意不吃暴击与共振核心以防连锁），但它**必须**能触发死亡 —— 抽成共用函数，
+   * 避免"补刀打死了怪却不掉骨头"这类静默错。
+   */
+  tryKill(e: Enemy): void {
     if (e.hp <= 0 && e.alive) {
       e.alive = false
       this.biomass += e.kind === 'boss' ? 20 : 1
@@ -738,11 +795,11 @@ export class DiveWorld implements ShopTarget {
         const before = this.o2
         this.o2 = Math.min(this.o2Max, this.o2 + kO2)
         if (this.o2 - before > 0.5) {
-          this.emit({ t: 'float', x: e.x, y: e.y - e.r - 6, text: `+${Math.round(this.o2 - before)}`, color: UI.cyanHi, size: 15 })
+          this.emit({ t: 'float', x: e.x, y: e.y - e.r - 6, text: `+${Math.round(this.o2 - before)}`, color: UI.cyanHi, size: 16 })
         }
       }
       if (e.kind === 'boss') {
-        this.emit({ t: 'float', x: e.x, y: e.y - 40, text: 'BOSS 击破', color: UI.violet, size: 24 })
+        this.emit({ t: 'float', x: e.x, y: e.y - 40, text: 'BOSS 击破', color: UI.violet, size: 26 })
       }
     }
   }
@@ -806,9 +863,9 @@ export class DiveWorld implements ShopTarget {
         if (gained > 0.5) {
           this.emit({ t: 'float', x: b.x, y: b.y - 8, text: `+${Math.round(gained)} O₂`, color: UI.cyan, size: 17 })
         } else {
-          this.emit({ t: 'float', x: b.x, y: b.y - 8, text: '氧气已满', color: UI.cyanDim, size: 14 })
+          this.emit({ t: 'float', x: b.x, y: b.y - 8, text: '氧气已满', color: UI.cyanDim, size: 15 })
         }
-        this.emit({ t: 'float', x: b.x, y: b.y - 26, text: `+${coin} 骨`, color: BONE, size: 14 })
+        this.emit({ t: 'float', x: b.x, y: b.y - 26, text: `+${coin} 骨`, color: BONE, size: 15 })
       }
     }
     this.bones = this.bones.filter(b => b.alive)
@@ -835,7 +892,8 @@ export class DiveWorld implements ShopTarget {
     const k = lvl - 1
     return {
       iv: d.iv / (1 + k * 0.12),
-      dmg: d.dmg * (1 + k * 0.35),
+      // 过载核心：满级 +12% / 未满级 −8%（无该遗物时 = 1）。V6.33
+      dmg: d.dmg * (1 + k * 0.35) * this.relicDmgMul(lvl),
       range: d.range + k * 26,
     }
   }
@@ -884,14 +942,35 @@ export class DiveWorld implements ShopTarget {
     return plan
   }
 
-  /** 第 i 座塔座的世界坐标。DiveScene.ts:2489-2496 */
+  /**
+   * 第 i 座塔座的世界坐标。DiveScene.ts:2489-2496
+   *
+   * ⚠️ 2026-10-13 定了两轮：
+   *   ① 用户「移动的过程中武器一直在换位置也不太合适」→ 座圈**不再整体随 `aim` 旋转**；
+   *   ② 用户「完成轻微摆动」→ 改成**阻尼跟随 + 限幅 ±20°**（见 `slewSeatSway`）。
+   *
+   *    为什么不能整体跟随 `aim`：机体是**回转体**，转动它本身在屏幕上毫无变化，
+   *    于是观感变成"炮在自己沿着船壳滑动"，而不是"潜艇转了向"；且角度完全跟随 `aim`，
+   *    玩家一转向（survivors 里每秒都在转）就整体甩一圈，非常吵。
+   *    为什么"轻微摆动"是对的：A2 层叠后"6 挺任何朝向都可见"已成目标，
+   *    炮圈只需**一点点**生命感 —— 滞后偏角当"有重量的炮塔环"读，站住即回正，不换舷。
+   *    航向提示由**艏部探照灯**（`DiveGame.drawPlayer`）与摆动共同承担。
+   *
+   *    注意：这是**站位**层面的改动，`turretPose().ang` 的索敌转向不受影响 ——
+   *    炮管照样转过去打最近的敌人。
+   *
+   * ⚠️ 摆动加在这里（而非渲染层）的原因同 `SEAT_RATIO`：`seatPos()` 同时决定
+   *    「炮塔画在哪」与「子弹从哪出生」（`autoFire` 取 `turretPose`）。
+   */
   seatPos(i: number): { x: number; y: number } | null {
     const slot = this.mountPlan()[i]
     if (!slot) return null
-    const ca = Math.cos(this.aim), sa = Math.sin(this.aim)
-    const sx = SEAT_RING_R * Math.cos(slot.ang)
-    const sy = SEAT_RING_R * Math.sin(slot.ang)
-    return { x: this.px + sx * ca - sy * sa, y: this.py + sx * sa + sy * ca }
+    const a = slot.ang + this.sway               // 站位 + 炮圈摆动滞后
+    const sx = SEAT_RING_R * Math.cos(a)
+    const sy = SEAT_RING_R * Math.sin(a)
+    // 3/4 俯视投影：座圈在机体平面内定死（含摆动），再按 SEAT_RATIO 压扁**屏幕纵向**。
+    // 见 tables.ts SEAT_RATIO：炮位与子弹出生点共用这一处，改这里等于同时改两者。
+    return { x: this.px + sx, y: this.py + sy * SEAT_RATIO }
   }
 
   /** 第 i 座在射程内最近的目标（以**塔座**为原点）。DiveScene.ts:2499-2507 */
@@ -909,6 +988,24 @@ export class DiveWorld implements ShopTarget {
    * 以 TURRET_SPIN 的角速度转过去；无目标就回到艇首方向待机。
    * DiveScene.ts:2522-2537
    */
+  /**
+   * 炮圈摆动（2026-10-13，用户「完成轻微摆动」）。
+   *
+   * 阻尼跟随 + 限幅：每帧把航向增量的一部分**滞留给**炮圈（船向右转 → 炮圈落后 → 读作轻微左偏），
+   * 再以弹簧回中；整体限幅 ±`SEAT_SWAY_MAX`（20°）。
+   *
+   * ⚠️ 必须在 `slewTurretAims` **之前**：后者的瞄准原点取自 `seatPos()`，
+   *    炮圈先摆到位，炮管的索敌转向才对着正确的原点算。
+   * ⚠️ 与 `seatPos()` 同源 ⇒ 子弹出生点跟着摆，弹道不会与画面劈叉。
+   */
+  slewSeatSway(dt: number): void {
+    const dAim = wrapAngle(this.aim - this.prevAim)   // 本帧转向增量（绕到最短弧）
+    this.prevAim = this.aim
+    this.sway -= dAim * SEAT_SWAY_FOLLOW              // 一部分转角滞留给炮圈
+    this.sway -= this.sway * Math.min(1, dt * SEAT_SWAY_DECAY)  // 弹簧回中
+    this.sway = clamp(this.sway, -SEAT_SWAY_MAX, SEAT_SWAY_MAX)
+  }
+
   slewTurretAims(dt: number): void {
     for (let i = 0; i < this.weapons.length; i++) {
       const w = this.weapons[i]
@@ -1014,26 +1111,55 @@ export class DiveWorld implements ShopTarget {
         const base = pose ? pose.ang : Math.atan2(e.y - this.py, e.x - this.px)
         const ox = pose ? pose.x + Math.cos(base) * MUZ : this.px
         const oy = pose ? pose.y + Math.sin(base) * MUZ : this.py
-        this.bullets.push({
-          x: ox, y: oy,
-          vx: Math.cos(base) * 900, vy: Math.sin(base) * 900,
-          life: rng / 900, dmg: w.dmg, kind: 'harpoon',
-          hit: new Set<number>(), alive: true,
-        })
+        // V6.29 三重鱼叉：3 叉扇形；回旋鱼叉：单叉 + 到程掉头 + 命中回氧
+        const pikes = w.id === 'harp_tr' ? 3 : 1
+        const spread = 0.30
+        for (let p = 0; p < pikes; p++) {
+          const a = pikes > 1 ? base + (p / (pikes - 1) - 0.5) * spread * 2 : base
+          const life0 = rng / 900
+          const b: Bullet = {
+            x: ox, y: oy,
+            vx: Math.cos(a) * 900, vy: Math.sin(a) * 900,
+            life: life0, dmg: w.dmg, kind: 'harpoon',
+            hit: new Set<number>(), alive: true,
+          }
+          if (w.id === 'harp_cb') { b.o2 = 1; b.boomerAt = life0 * 0.5 }
+          this.bullets.push(b)
+        }
         this.emit({ t: 'muzzle', x: ox, y: oy, ang: base, color: wcol })
       } else if (fam === 'echo') {
         const e = this.nearestEnemy(rng); if (!e) continue
         const LEAD = 0.5, DLY = 0.75
-        const ex = e.x + e.vx * DLY * LEAD
-        const ey = e.y + e.vy * DLY * LEAD
-        this.echoes.push({ x: ex, y: ey, t: DLY, dmg: w.dmg })
+        const big = w.id === 'echo_fo'
+        // V6.29 多重回声：落点三点三角分布；聚焦回声：单个大半径回声
+        const spots = w.id === 'echo_mu'
+          ? [[0, -70], [-62, 40], [62, 40]]
+          : [[0, 0]]
+        for (const [dx, dy] of spots) {
+          const ec: Echo = {
+            x: e.x + e.vx * DLY * LEAD + dx,
+            y: e.y + e.vy * DLY * LEAD + dy,
+            t: big ? 1.2 : DLY,
+            dmg: w.dmg,
+          }
+          if (big) ec.r = 286
+          if (w.id === 'echo_mu') ec.o2per = 0.6
+          this.echoes.push(ec)
+        }
         const base = pose ? pose.ang : Math.atan2(e.y - this.py, e.x - this.px)
         const ox = pose ? pose.x + Math.cos(base) * MUZ : this.px
         const oy = pose ? pose.y + Math.sin(base) * MUZ : this.py
         this.emit({ t: 'muzzle', x: ox, y: oy, ang: base, color: wcol })
       } else if (fam === 'acid') {
         const e = this.nearestEnemy(rng); if (!e) continue
-        this.acids.push({ x: e.x, y: e.y, r: 62, life: 3.0, tick: 0, dmg: w.dmg })
+        // V6.29 持久酸池：更大更久；酸雨：落点三池成排
+        const big = w.id === 'acid_fd'
+        const ar = big ? 100 : 62
+        const alife = big ? 5.0 : 3.0
+        const spots = w.id === 'acid_ra' ? [[-70, 0], [0, 0], [70, 0]] : [[0, 0]]
+        for (const [dx, dy] of spots) {
+          this.acids.push({ x: e.x + dx, y: e.y + dy, r: ar, life: alife, tick: 0, dmg: w.dmg })
+        }
         const base = pose ? pose.ang : Math.atan2(e.y - this.py, e.x - this.px)
         const ox = pose ? pose.x + Math.cos(base) * MUZ : this.px
         const oy = pose ? pose.y + Math.sin(base) * MUZ : this.py
@@ -1043,7 +1169,7 @@ export class DiveWorld implements ShopTarget {
         this.fireArc(first, w, pose)
       }
       // 射速：高压供能（st.rate）在这里生效；记下这一发的**实际间隔**
-      w.ivLast = def.iv / ((1 + (w.lvl - 1) * 0.12) * seatBoost * (1 + this.st.rate))
+      w.ivLast = def.iv / ((1 + (w.lvl - 1) * 0.12) * seatBoost * (1 + this.st.rate)) * this.relicIvMul(w.lvl)
       w.timer = w.ivLast
       w.fireFlash = 0.15
     }
@@ -1056,11 +1182,14 @@ export class DiveWorld implements ShopTarget {
     const pts = [{ x: pose ? pose.x : this.px, y: pose ? pose.y : this.py }]
     const hit = new Set<Enemy>()
     let cur: Enemy | null = first
+    let o2Gain = 0
     while (cur && hit.size < chain) {
       hit.add(cur)
       pts.push({ x: cur.x, y: cur.y })
       cur.flash = 0.08
       this.hurt(cur, w.dmg)
+      // 导体缠绕：每跳回氧。V6.33 —— 把「续航」接到「电弧跳数」上
+      if (this.hasRelic('conductor_coil')) o2Gain += 0.8
       let next: Enemy | null = null, bd = 190
       for (const e of this.enemies) {
         if (!e.alive || hit.has(e)) continue
@@ -1070,6 +1199,15 @@ export class DiveWorld implements ShopTarget {
       cur = next
     }
     this.emit({ t: 'arc', pts })
+    // 单次开火回氧上限 4（防止 arc_ov 的 11 跳一次灌满 → 氧又用不完）
+    if (o2Gain > 0) {
+      o2Gain = Math.min(o2Gain, 4)
+      const before = this.o2
+      this.o2 = Math.min(this.o2Max, this.o2 + o2Gain)
+      if (this.o2 - before > 0.5) {
+        this.emit({ t: 'float', x: this.px, y: this.py - 34, text: `+${Math.round(this.o2 - before)}`, color: UI.cyanHi, size: 15 })
+      }
+    }
   }
 
   /** 通用弹更新：机关枪直线、鱼雷追踪 + 命中爆炸。DiveScene.ts:2740-2791 */
@@ -1078,6 +1216,13 @@ export class DiveWorld implements ShopTarget {
       if (!b.alive) continue
       b.life -= dt
       if (b.life <= 0) { b.alive = false; continue }
+
+      // 回旋鱼叉：到程掉头（清 hit ⇒ 回程可对同一目标二次穿刺）。V6.29
+      if (b.boomerAt !== undefined && !b.reversed && b.life <= b.boomerAt) {
+        b.reversed = true
+        b.vx = -b.vx; b.vy = -b.vy
+        b.hit.clear()
+      }
 
       if (b.kind === 'torpedo') {
         const tgt = this.nearestEnemy(WEAPON_DEF.torpedo.range)
@@ -1112,6 +1257,16 @@ export class DiveWorld implements ShopTarget {
             const dd = dist(e.x, e.y, this.px, this.py) || 1
             e.kx -= (e.x - this.px) / dd * 300
             e.ky -= (e.y - this.py) / dd * 300
+            // 回旋鱼叉：每次穿刺回氧。V6.29 氧耦合 A
+            if (b.o2) {
+              const before = this.o2
+              this.o2 = Math.min(this.o2Max, this.o2 + b.o2)
+              if (this.o2 - before > 0.5) {
+                this.emit({ t: 'float', x: e.x, y: e.y - e.r - 6, text: `+${Math.round(this.o2 - before)}`, color: UI.cyanHi, size: 16 })
+              }
+            }
+            // 破血锚：对本发**已穿过的其他敌人**补刀。V6.33
+            this.rendTick(b, i)
           }
         }
       }
@@ -1120,9 +1275,12 @@ export class DiveWorld implements ShopTarget {
   }
 
   /** 鱼雷爆炸：范围伤害随距离衰减。DiveScene.ts:2955-2988 */
-  explode(x: number, y: number, r: number, dmg: number): void {
+  /** `o2per` = 每炸到一个敌人回氧（多重回声 0.6）。缺省 0 = 不回氧。V6.29 氧耦合 A */
+  /** `depth` = 连锁深度：0 = 武器直接投放（可触发共鸣腔）；≥1 = 小回声（不再连锁）。V6.33 */
+  explode(x: number, y: number, r: number, dmg: number, o2per = 0, depth = 0): void {
     this.emit({ t: 'shake', ms: 130, intensity: 0.006 })
     this.emit({ t: 'blast', x, y, r })
+    let o2gain = 0
     for (const e of this.enemies) {
       if (!e.alive) continue
       const d = dist(x, y, e.x, e.y)
@@ -1130,6 +1288,28 @@ export class DiveWorld implements ShopTarget {
         e.flash = 0.08
         const falloff = 1 - clamp(d / (r + e.r), 0, 1) * 0.5
         this.hurt(e, dmg * falloff)
+        o2gain += o2per
+      }
+    }
+    if (o2gain > 0) {
+      const before = this.o2
+      this.o2 = Math.min(this.o2Max, this.o2 + o2gain)
+      if (this.o2 - before > 0.5) {
+        this.emit({ t: 'float', x, y: y - 10, text: `+${Math.round(this.o2 - before)}`, color: UI.cyanHi, size: 16 })
+      }
+    }
+    // 共鸣腔：**大回声**（depth 0）引爆时，在最近 2 个未被波及的敌人处各生成一个小回声。V6.33
+    // ⚠️ 必须限深：三敌互相指向会无限递归。
+    if (depth === 0 && this.hasRelic('resonance_chamber')) {
+      const cands: Enemy[] = []
+      for (const e of this.enemies) {
+        if (!e.alive) continue
+        if (dist(x, y, e.x, e.y) < r + e.r) continue   // 已被这次爆炸波及的跳过
+        cands.push(e)
+      }
+      cands.sort((a, b) => dist(x, y, a.x, a.y) - dist(x, y, b.x, b.y))
+      for (const t of cands.slice(0, 2)) {
+        this.echoes.push({ x: t.x, y: t.y, r: r * 0.55, dmg: dmg * 0.4, t: 0.4, o2per: 0, depth: 1 })
       }
     }
   }
@@ -1139,6 +1319,11 @@ export class DiveWorld implements ShopTarget {
     let net = this.layer().drain
     if (this.hasRelic('gluttony')) net += 0.6
     net -= this.st.regen
+    // 持久酸池：站在自己的酸池里，环境氧耗减半。V6.29 氧耦合 C（场地换氧）
+    if (net > 0 && this.weapons.some(w => w.id === 'acid_fd')
+      && this.acids.some(a => dist(this.px, this.py, a.x, a.y) < a.r)) {
+      net *= 0.5
+    }
     this.o2 -= net * dt
     if (this.o2 > this.o2Max) this.o2 = this.o2Max
     if (this.o2 <= 0) { this.o2 = 0; this.showResult(false) }
@@ -1161,6 +1346,9 @@ export class DiveWorld implements ShopTarget {
     if (r.onEquip) this.addStat(r.onEquip.stat, r.onEquip.delta)
     this.o2Max = this.layer().o2Max + this.st.o2Bonus
     if (this.o2 > this.o2Max) this.o2 = this.o2Max
+    // 过载核心：`w.dmg` 是装备武器时算好的**缓存值** —— 遗物买得晚，就必须重算已有武器，
+    // 否则"先挂的武器不吃加成"。不报错，只是数值悄悄不对。V6.33
+    this.refreshWeaponDmg()
   }
 
   /** 这个遗物的条件**此刻**是否满足（HUD 呼吸光用）。DiveScene.ts:4872-4880 */
@@ -1187,6 +1375,54 @@ export class DiveWorld implements ShopTarget {
     if (this.hasRelic('echo_heart') && this.o2 / this.o2Max < 0.3) m *= 1.5
     if (this.hasRelic('abyss_mark')) m *= 1 + 0.12 * this.layerIdx
     return m
+  }
+
+  // ---------------------------------------------------------------------------
+  // V6.33 机制型遗物：绑武器行为的四条（导体缠绕 / 破血锚 / 共鸣腔 / 过载核心）
+  // ---------------------------------------------------------------------------
+  /** 过载核心 · 伤害：满级（Lv5）+12%，未满级 −8%。无该遗物 = 1。V6.33 */
+  private relicDmgMul(lvl: number): number {
+    if (!this.hasRelic('overload_core')) return 1
+    return lvl >= 5 ? 1.12 : 0.92
+  }
+
+  /** 过载核心 · 射速：满级武器间隔 ×0.8（= 射速 +25%）。未满级不惩罚。V6.33 */
+  private relicIvMul(lvl: number): number {
+    if (!this.hasRelic('overload_core')) return 1
+    return lvl >= 5 ? 1 / 1.25 : 1
+  }
+
+  /**
+   * 重算所有武器的**缓存伤害**。遗物一旦影响武器数值（过载核心），
+   * 装备后必须调用 —— 否则"先挂的武器不吃加成"。V6.33
+   */
+  refreshWeaponDmg(): void {
+    for (const w of this.weapons) w.dmg = this.weaponStats(w.id, w.lvl).dmg
+  }
+
+  /**
+   * 破血锚：鱼叉命中时，对本发**已穿过的其他敌人**各补一刀。V6.33
+   *
+   * 伤害 = 本发伤害 × 当前暴击倍率 × 30%（**固定值**，不再吃随机暴击）。
+   *
+   * ⚠️ 刻意**不走 `hurt()`**：否则每次补刀都会命中 `resonance_core` 的暴击溅射分支，
+   *    两个遗物同时装会互相引爆。死亡结算复用 `tryKill()`，保证掉骨 / 回氧正常。
+   */
+  private rendTick(b: Bullet, curIdx: number): void {
+    if (!this.hasRelic('bleeding_anchor')) return
+    if (b.hit.size <= 1) return
+    const rend = b.dmg * (1 + this.st.critMul) * 0.3 * this.dmgMulNow()
+    let n = 0
+    for (const idx of b.hit) {
+      if (idx === curIdx || n >= 3) continue     // 每发最多补 3 次
+      const t = this.enemies[idx]
+      if (!t || !t.alive) continue
+      t.hp -= rend
+      t.flash = Math.max(t.flash, 0.12)
+      this.emit({ t: 'hit', x: t.x, y: t.y, r: t.r, color: UI.violet, crit: true, dmg: rend, nx: 0, ny: 0 })
+      this.tryKill(t)
+      n++
+    }
   }
 
   // ==========================================================================

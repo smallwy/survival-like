@@ -29,6 +29,8 @@ export * from './world'
 // 美术 key→路径 的唯一说明。放这里而不是各引擎各写一份，是为了让离线验证
 // 能 require 运行时同一份表去跟磁盘对账（见 artKeys.ts 头部说明）。
 export * from './artKeys'
-// 跨局纪录（本地档案）。纯函数 + 纯数据，所以进得了无头测试；
-// 真正的存储读写在各引擎的视图层（cocos: view/save.ts）。
+// 跨局纪录 + 解锁 + 图鉴（本地档案 / 元系统）。纯函数 + 纯数据，
+// 所以进得了无头测试；真正的存储读写在各引擎的视图层（cocos: view/save.ts）。
 export * from './profile'
+export * from './unlocks'
+export * from './codex'

@@ -134,6 +134,33 @@ export class Gfx {
     return this
   }
 
+  /**
+   * **椭圆弧**（描边路径）—— 补 `arc()` 只能画正圆所缺的那一半。
+   *
+   * 用例：3/4 俯视下**赤道挂载带**这类"绕球一圈的环"在屏幕上是个压扁的椭圆，
+   * 要做出"前半粗亮 / 后半细暗"的前后分离，就必须能**只画椭圆的半圈** ——
+   * 引擎的 `Graphics.arc` 只收单一半径 `r`，画不出椭圆弧。
+   *
+   * 角度语义与 `arc()` 完全一致（sim 语义：y 向下、角度增加 = 视觉顺时针）。
+   * 从 `a0` 扫到 `a1`，采样密度同 `arc()`（每 π 分 24 段）。
+   *
+   * ⚠️ 起手用 `moveTo`（不是 `lineTo`）**不是随手写的**：Cocos 的 `Graphics`
+   * 靠 `moveTo` 推进 `impl.pathOffset` 来隔离"上一次 `stroke()`/`fill()` 画过的路径"，
+   * 而 assembler 只遍历 `[pathOffset, pathLength)`（读过 `impl.moveTo` 与
+   * `graphics-assembler.stroke`）。所以**连续画多条弧不会互相覆盖** —— 这正是
+   * "前半/后半分开描边"能成立的前提。
+   */
+  ellipseArc(x: number, y: number, rx: number, ry: number, a0: number, a1: number): this {
+    const sweep = a1 - a0
+    const n = Math.max(2, Math.ceil(Math.abs(sweep) / (Math.PI / 24)))
+    this.g.moveTo(x + Math.cos(a0) * rx, this.y(y + Math.sin(a0) * ry))
+    for (let i = 1; i <= n; i++) {
+      const a = a0 + sweep * (i / n)
+      this.g.lineTo(x + Math.cos(a) * rx, this.y(y + Math.sin(a) * ry))
+    }
+    return this
+  }
+
   /** 线段 */
   seg(x1: number, y1: number, x2: number, y2: number): this {
     this.g.moveTo(x1, this.y(y1))

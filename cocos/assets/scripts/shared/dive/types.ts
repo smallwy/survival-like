@@ -80,6 +80,9 @@ export type WeaponId = 'sonar' | 'gun' | 'torpedo' | 'arc'
   | 'arc_ov' | 'arc_st'        // 过载电弧 / 定点雷暴
   | 'sonar_rs' | 'sonar_fc'    // 共振炮 / 定向聚焦
   | 'harpoon' | 'echo' | 'acid'  // V6.18 新增三种基础武器（鱼叉 / 回声 / 酸液）
+  | 'harp_tr' | 'harp_cb'        // V6.29 三重鱼叉 / 回旋鱼叉
+  | 'echo_mu' | 'echo_fo'        // V6.29 多重回声 / 聚焦回声
+  | 'acid_fd' | 'acid_ra'        // V6.29 持久酸池 / 酸雨
 
 export type WeaponFamily = 'sonar' | 'gun' | 'torpedo' | 'arc' | 'harpoon' | 'echo' | 'acid'
 
@@ -108,6 +111,12 @@ export interface Bullet {
   alive: boolean
   /** 爆炸半径倍率：重型鱼雷 1.5、其余默认 1 */
   er?: number
+  /** 命中**每个**敌人回氧（回旋鱼叉 = 1）。缺省 0 = 不回氧。V6.29 氧耦合 A */
+  o2?: number
+  /** 回旋鱼叉：剩余寿命降到此值即掉头（发射时 = 初始寿命的一半）。缺省 = 不回旋 */
+  boomerAt?: number
+  /** 已掉头（防反复掉头） */
+  reversed?: boolean
 }
 
 /** 回声标记：落在目标位置，延迟 0.75s 后爆发 */
@@ -115,6 +124,12 @@ export interface Echo {
   x: number; y: number
   t: number          // 剩余时间，归零即爆
   dmg: number
+  /** 爆炸半径。缺省 130（聚焦回声 286）。V6.29 */
+  r?: number
+  /** 每炸到一个敌人回氧（多重回声 0.6）。缺省 0。V6.29 氧耦合 A */
+  o2per?: number
+  /** 连锁深度：共鸣腔生成的小回声 = 1；缺省 0 = 由武器直接投放。≥1 不再连锁。V6.33 */
+  depth?: number
 }
 
 /** 酸液云：在目标位置持续 3s，每 0.35s 结算一次伤害 */
@@ -199,6 +214,11 @@ export type RelicId =
   | 'abyss_mark'      // 深潜印记：每层 +12% 伤害，敌人 +10% 移速
   | 'current_fin'     // 洋流鳍：3 秒不受击 → 移速 +30%
   | 'silent_plating'  // 静默装甲：受击后 1.5s 闪避 +40%
+  // ---- V6.33 机制型遗物 4 条（P1-#4：绑武器行为，做「遗物 × 武器」乘法空间）----
+  | 'conductor_coil'    // 导体缠绕：链式电弧每跳回 0.8 氧，氧气上限 −10
+  | 'bleeding_anchor'   // 破血锚：鱼叉命中 → 对已穿过的敌人各补 30% 暴击伤害
+  | 'resonance_chamber' // 共鸣腔：回声爆炸 → 最近 2 个未被波及的敌人各生成小回声
+  | 'overload_core'     // 过载核心：满级武器射速 +25% / 伤害 +12%，未满级 −8%
 
 export interface RelicDef {
   id: RelicId
@@ -274,6 +294,14 @@ export interface UpgradeDef {
   dead?: (s: ShopTarget) => boolean
   /** 遗物卡专用：卡面对应的遗物 id */
   relicId?: RelicId
+  /**
+   * 武器卡专用：这张卡属于哪个**武器族**。
+   *
+   * 用途只有一个 —— 解锁过滤（`unlocks.ts` 的 `filterPool`）：族没解锁就把它
+   * 连同它的进化卡一起从抽池里摘掉。不带此字段的武器卡（如"弹药改良"）永远保留。
+   * ⚠️ 加了新武器卡**必须**补这个字段，否则它会绕过解锁、锁了也照抽。
+   */
+  family?: WeaponFamily
 }
 
 /**

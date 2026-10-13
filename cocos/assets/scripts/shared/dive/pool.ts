@@ -16,30 +16,33 @@ import type { UpgradeDef, ShopTarget, RelicId } from './types'
 import { RELIC_DEF, RELIC_SLOTS } from './tables'
 
 export const CARD_POOL: UpgradeDef[] = [
+  // ⚠️ 武器卡都带 `family`（解锁过滤用，见 `unlocks.ts` filterPool）。
+  //    新加武器卡**必须**补 `family`，否则它会绕过解锁、锁了也照抽。
   // —— 器械卡（V6.3）——
-  { id: 'w_sonar', name: '声呐共振', desc: '环形波前 · 群体伤害', kind: 'weapon',
+  { id: 'w_sonar', name: '声呐共振', desc: '环形波前 · 群体伤害', kind: 'weapon', family: 'sonar',
     cost: 32, apply: s => s.addWeapon('sonar') },
 
   // —— V6.18 新增三种基础武器。——
-  { id: 'w_harp', name: '穿透鱼叉', desc: '直线穿透 · 命中拉拽', kind: 'weapon',
+  { id: 'w_harp', name: '穿透鱼叉', desc: '直线穿透 · 命中拉拽', kind: 'weapon', family: 'harpoon',
     cost: 34, apply: s => s.addWeapon('harpoon') },
-  { id: 'w_echo', name: '回声炮', desc: '延迟爆发 · 需预判', kind: 'weapon',
+  { id: 'w_echo', name: '回声炮', desc: '延迟爆发 · 需预判', kind: 'weapon', family: 'echo',
     cost: 36, apply: s => s.addWeapon('echo') },
-  { id: 'w_acid', name: '酸液喷射', desc: '地面持续伤害区', kind: 'weapon',
+  { id: 'w_acid', name: '酸液喷射', desc: '地面持续伤害区', kind: 'weapon', family: 'acid',
     cost: 34, apply: s => s.addWeapon('acid') },
 
-  { id: 'w_gun', name: '脉冲机关枪', desc: '高频连射 · 单体', kind: 'weapon',
+  { id: 'w_gun', name: '脉冲机关枪', desc: '高频连射 · 单体', kind: 'weapon', family: 'gun',
     cost: 30,
     apply: s => s.addWeapon('gun'),
   },
-  { id: 'w_torp', name: '追踪鱼雷', desc: '低频追踪 · 范围爆炸', kind: 'weapon',
+  { id: 'w_torp', name: '追踪鱼雷', desc: '低频追踪 · 范围爆炸', kind: 'weapon', family: 'torpedo',
     cost: 38,
     apply: s => s.addWeapon('torpedo'),
   },
-  { id: 'w_arc', name: '链式电弧', desc: '瞬发连锁 · 多目标', kind: 'weapon',
+  { id: 'w_arc', name: '链式电弧', desc: '瞬发连锁 · 多目标', kind: 'weapon', family: 'arc',
     cost: 34,
     apply: s => s.addWeapon('arc'),
   },
+  // 弹药改良不带 family —— 它作用于"全部已拥有武器"，永远可用
   { id: 'w_all', name: '弹药改良', desc: '全部器械 +1 级', kind: 'weapon',
     cost: 26,
     apply: s => s.levelAllWeapons(),
@@ -47,33 +50,55 @@ export const CARD_POOL: UpgradeDef[] = [
   },
 
   // —— 进化卡（V6.17）：每把武器 2 条分支，满级（Lv5）后才会出现在池里 ——
-  { id: 'e_gun_gl', name: '进化 · 加特林', desc: '射速翻倍 · 射程腰斩', kind: 'weapon',
+  { id: 'e_gun_gl', name: '进化 · 加特林', desc: '射速翻倍 · 射程腰斩', kind: 'weapon', family: 'gun',
     cost: 66, apply: s => s.evolveWeapon('gun', 'gun_gl'),
     dead: s => !s.weapons.some(w => w.id === 'gun' && w.lvl >= 5) },
-  { id: 'e_gun_sg', name: '进化 · 霰弹散射', desc: '一次 5 弹扇形 · 近距', kind: 'weapon',
+  { id: 'e_gun_sg', name: '进化 · 霰弹散射', desc: '一次 5 弹扇形 · 近距', kind: 'weapon', family: 'gun',
     cost: 66, apply: s => s.evolveWeapon('gun', 'gun_sg'),
     dead: s => !s.weapons.some(w => w.id === 'gun' && w.lvl >= 5) },
 
-  { id: 'e_torp_cl', name: '进化 · 集束鱼雷', desc: '一次 3 枚 · 覆盖面', kind: 'weapon',
+  { id: 'e_torp_cl', name: '进化 · 集束鱼雷', desc: '一次 3 枚 · 覆盖面', kind: 'weapon', family: 'torpedo',
     cost: 74, apply: s => s.evolveWeapon('torpedo', 'torp_cl'),
     dead: s => !s.weapons.some(w => w.id === 'torpedo' && w.lvl >= 5) },
-  { id: 'e_torp_hv', name: '进化 · 重型鱼雷', desc: '单发重击 · 爆炸更大', kind: 'weapon',
+  { id: 'e_torp_hv', name: '进化 · 重型鱼雷', desc: '单发重击 · 爆炸更大', kind: 'weapon', family: 'torpedo',
     cost: 74, apply: s => s.evolveWeapon('torpedo', 'torp_hv'),
     dead: s => !s.weapons.some(w => w.id === 'torpedo' && w.lvl >= 5) },
 
-  { id: 'e_arc_ov', name: '进化 · 过载电弧', desc: '跳跃 +4 · 串得更远', kind: 'weapon',
+  { id: 'e_arc_ov', name: '进化 · 过载电弧', desc: '跳跃 +4 · 串得更远', kind: 'weapon', family: 'arc',
     cost: 70, apply: s => s.evolveWeapon('arc', 'arc_ov'),
     dead: s => !s.weapons.some(w => w.id === 'arc' && w.lvl >= 5) },
-  { id: 'e_arc_st', name: '进化 · 定点雷暴', desc: '一次电击全部目标', kind: 'weapon',
+  { id: 'e_arc_st', name: '进化 · 定点雷暴', desc: '一次电击全部目标', kind: 'weapon', family: 'arc',
     cost: 70, apply: s => s.evolveWeapon('arc', 'arc_st'),
     dead: s => !s.weapons.some(w => w.id === 'arc' && w.lvl >= 5) },
 
-  { id: 'e_sonar_rs', name: '进化 · 共振炮', desc: '命中后向邻近弹射', kind: 'weapon',
+  { id: 'e_sonar_rs', name: '进化 · 共振炮', desc: '命中后向邻近弹射', kind: 'weapon', family: 'sonar',
     cost: 70, apply: s => s.evolveWeapon('sonar', 'sonar_rs'),
     dead: s => !s.weapons.some(w => w.id === 'sonar' && w.lvl >= 5) },
-  { id: 'e_sonar_fc', name: '进化 · 定向聚焦', desc: '短距强波 · 高伤', kind: 'weapon',
+  { id: 'e_sonar_fc', name: '进化 · 定向聚焦', desc: '短距强波 · 高伤', kind: 'weapon', family: 'sonar',
     cost: 70, apply: s => s.evolveWeapon('sonar', 'sonar_fc'),
     dead: s => !s.weapons.some(w => w.id === 'sonar' && w.lvl >= 5) },
+
+  // —— V6.29：鱼叉 / 回声 / 酸液 的进化（三把此前零进化的武器）——
+  { id: 'e_harp_tr', name: '进化 · 三重鱼叉', desc: '一次 3 叉扇形 · 群体拉拽', kind: 'weapon', family: 'harpoon',
+    cost: 68, apply: s => s.evolveWeapon('harpoon', 'harp_tr'),
+    dead: s => !s.weapons.some(w => w.id === 'harpoon' && w.lvl >= 5) },
+  { id: 'e_harp_cb', name: '进化 · 回旋鱼叉', desc: '到程掉头 · 二次穿刺回氧', kind: 'weapon', family: 'harpoon',
+    cost: 68, apply: s => s.evolveWeapon('harpoon', 'harp_cb'),
+    dead: s => !s.weapons.some(w => w.id === 'harpoon' && w.lvl >= 5) },
+
+  { id: 'e_echo_mu', name: '进化 · 多重回声', desc: '三点延时爆炸 · 群爆回氧', kind: 'weapon', family: 'echo',
+    cost: 72, apply: s => s.evolveWeapon('echo', 'echo_mu'),
+    dead: s => !s.weapons.some(w => w.id === 'echo' && w.lvl >= 5) },
+  { id: 'e_echo_fo', name: '进化 · 聚焦回声', desc: '大半径延时爆发 · 高伤', kind: 'weapon', family: 'echo',
+    cost: 72, apply: s => s.evolveWeapon('echo', 'echo_fo'),
+    dead: s => !s.weapons.some(w => w.id === 'echo' && w.lvl >= 5) },
+
+  { id: 'e_acid_fd', name: '进化 · 持久酸池', desc: '更大更久 · 池内省氧', kind: 'weapon', family: 'acid',
+    cost: 66, apply: s => s.evolveWeapon('acid', 'acid_fd'),
+    dead: s => !s.weapons.some(w => w.id === 'acid' && w.lvl >= 5) },
+  { id: 'e_acid_ra', name: '进化 · 酸雨', desc: '三池成排 · 封锁一线', kind: 'weapon', family: 'acid',
+    cost: 70, apply: s => s.evolveWeapon('acid', 'acid_ra'),
+    dead: s => !s.weapons.some(w => w.id === 'acid' && w.lvl >= 5) },
 
   // —— 挂载位扩容卡（V6.6 / V6.10）：顺序很重要，必须先 5 再 6 ——
   { id: 't_slot5', name: '挂载扩容 I', desc: '座圈解锁第 5 座 · 尾侧新增炮位', kind: 'mount',

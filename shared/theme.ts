@@ -110,7 +110,7 @@ export const TXT = {
  * 之前多次出现"你改了但我这边没变化"，排查全耗在确认代码版本上。
  * 改一次代码就 +1，用户看一眼右下角就知道 pull 生效没有。
  */
-export const BUILD_TAG = 'v6.27'
+export const BUILD_TAG = 'v6.37'
 
 /**
  * 菜单/弹窗专用"实底色"（V6.25）。

@@ -42,6 +42,16 @@ export const ITEM_ART_PATH: Record<string, string> = {
   arc_st: 'items/item_arc_st.png',
   sonar_rs: 'items/item_sonar_rs.png',
   sonar_fc: 'items/item_sonar_fc.png',
+  // —— V6.30 批 4：6 条新进化（鱼叉/回声/酸液 三族各 2 条）——
+  // harp_tr 三重鱼叉 / echo_fo 聚焦回声 / acid_fd 持久酸池（第一批）
+  // harp_cb 回旋鱼叉 / echo_mu 多重回声 / acid_ra 酸雨（第二批）
+  // 全部 image-to-image 由基础武器改造，`EVO_ART_FALLBACK` 已清空。
+  harp_tr: 'items/item_harp_tr.png',
+  echo_fo: 'items/item_echo_fo.png',
+  acid_fd: 'items/item_acid_fd.png',
+  harp_cb: 'items/item_harp_cb.png',
+  echo_mu: 'items/item_echo_mu.png',
+  acid_ra: 'items/item_acid_ra.png',
   // —— 遗物（独立物件，键 = RelicId，立绘不带炮台底座）——
   // 它们**不是**装在炮座上的武器，而是独立物件（器官 / 结晶 / 铭牌…），
   // 所以立绘不带炮台底座 —— 玩家一眼能分清"这是装备"和"这是挂载武器"。
