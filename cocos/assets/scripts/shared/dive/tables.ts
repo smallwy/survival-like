@@ -28,14 +28,26 @@ import type { LayerDef, WaveShape, Stats, RelicDef, RelicId, Kind, WeaponId } fr
 /** 座圈角度刻意避开艏（0°）与艉（180°）。DiveScene.ts:104 */
 export const SEAT_ANGLES_DEG = [30, -30, 90, -90, 150, -150]
 
-/** 座圈半径（px，机体中心到塔座中心）。DiveScene.ts:109 */
-export const SEAT_RING_R = 40
+/**
+ * 座圈半径（px，机体中心到塔座中心）。DiveScene.ts:109
+ *
+ * ⚠️ 2026-10-13 由 40 上调到 48。原因（用户报「炮塔感觉不太好」）：
+ *   机体贴图半径 `SUB_D/2 = 44`，而原来座圈半径只有 40 —— 塔座中心**落在机体轮廓之内**，
+ *   整座塔被那张亮青色圆盘吃掉，剪影上根本认不出"艇上装了炮"。
+ *   48 让塔座中心落在机体外缘（44）之外 4px，塔盘正好压在舷侧，读作"镶嵌在艇缘"。
+ */
+export const SEAT_RING_R = 48
 
-/** 圆形塔座半径（px）。DiveScene.ts:111 */
-export const TURRET_R = 12
+/**
+ * 圆形塔座半径（px）。DiveScene.ts:111
+ *
+ * ⚠️ 2026-10-13 由 12 上调到 16。12 → 直径 24px，在这个尺寸上**放不下任何体积线索**
+ *   （投影 / 侧壁 / 受光弧 / 暗弧 四条，每条至少 2px）。16 → 直径 32px 才有像素预算。
+ */
+export const TURRET_R = 16
 
-/** 发射器（插在塔座上的那件武器）基准尺寸。DiveScene.ts:113 */
-export const EMITTER_SIZE = 14
+/** 发射器（插在塔座上的那件武器）基准尺寸。DiveScene.ts:113 —— 14 → 18，同上：炮管要能被认出来 */
+export const EMITTER_SIZE = 18
 
 /** 发射器转塔角速度上限（弧度/秒）。DiveScene.ts:122 */
 export const TURRET_SPIN = 16

@@ -109,18 +109,18 @@ interface BtnStyle {
 const BTN_DARK: BtnStyle = {}
 const BTN_BRIGHT_PRIMARY: BtnStyle = {
   fill: BRIGHT.accent, edge: BRIGHT.accentEdge, text: TXT_LIGHT.onAccent,
-  offFill: 0xd7e6ee, offEdge: 0xa9c4d3, offText: '#93aab8', r: 10, size: 17,
+  offFill: 0x33586a, offEdge: 0x4d7183, offText: '#7c9aa8', r: 10, size: 17,
 }
 const BTN_BRIGHT_SECONDARY: BtnStyle = {
-  fill: 0xffffff, edge: BRIGHT.edge, text: TXT_LIGHT.dim,
-  offFill: 0xeaf1f5, offEdge: 0xc2d5e0, offText: '#9db2bf', r: 10, size: 16,
+  fill: 0x578ba0, edge: BRIGHT.edge, text: TXT_LIGHT.main,
+  offFill: 0x33586a, offEdge: 0x4d7183, offText: '#7c9aa8', r: 10, size: 16,
 }
 const BTN_BRIGHT_DISABLED: BtnStyle = {
-  fill: 0xe4edf2, edge: 0xc2d5e0, text: '#9db2bf',
-  offFill: 0xe4edf2, offEdge: 0xc2d5e0, offText: '#9db2bf', r: 9, size: 16,
+  fill: 0x35586a, edge: 0x53798c, text: TXT_LIGHT.mute,
+  offFill: 0x35586a, offEdge: 0x53798c, offText: TXT_LIGHT.mute, r: 9, size: 16,
 }
-const BTN_BRIGHT_TINY: BtnStyle = { fill: 0xffffff, edge: BRIGHT.edge, text: TXT_LIGHT.dim, r: 6, size: 12 }
-const BTN_BRIGHT_LOCKED: BtnStyle = { fill: BRIGHT.lockHi, edge: BRIGHT.mount, text: '#8a5a00', r: 6, size: 12 }
+const BTN_BRIGHT_TINY: BtnStyle = { fill: 0x4f7f94, edge: 0x8fb2c4, text: TXT_LIGHT.dim, r: 6, size: 12 }
+const BTN_BRIGHT_LOCKED: BtnStyle = { fill: BRIGHT.lockHi, edge: BRIGHT.mount, text: '#ffd894', r: 6, size: 12 }
 
 /** 购买按钮按**类型色**着色：器械青 / 挂载琥珀 / 属性紫 / 遗物靛 —— 与卡的描边同一色，一眼对上 */
 function lightBuyBtn(accent: number): BtnStyle {
@@ -213,12 +213,12 @@ export class Hud {
    */
   private brightPanel(x: number, y: number, w: number, h: number): void {
     const g = this.g
-    g.fill(0x000000, 0.28); g.fillRoundRect(x + 5, y + 8, w, h, 16)
+    g.fill(0x000000, 0.38); g.fillRoundRect(x + 5, y + 8, w, h, 16)
     g.fill(BRIGHT.surface, 1); g.fillRoundRect(x, y, w, h, 16)
     g.fill(BRIGHT.header, 1)
     g.fillRoundRect(x, y, w, 48, 16)      // 顶栏带（上圆角）
     g.fillRect(x, y + 32, w, 16)          // 把顶栏带下缘补成方角
-    g.fill(0xffffff, 0.55); g.fillRoundRect(x + 18, y + 3, w - 36, 2, 1)  // 面板上缘高光
+    g.fill(0xffffff, 0.22); g.fillRoundRect(x + 18, y + 3, w - 36, 2, 1)  // 面板上缘高光
     g.line(BRIGHT.edge, 0.9, 2); g.strokeRoundRect(x + 1, y + 1, w - 2, h - 2, 15)
   }
 
@@ -981,17 +981,26 @@ export class Hud {
    * 波间商店。
    *
    * -----------------------------------------------------------------------
-   * V7 重做：全屏暗色实底 → **半透明暗幕 + 居中亮色面板**
+   * V7 重做：全屏暗色实底 → **半透明暗幕 + 居中面板**（2026-10-13 上午）
    * -----------------------------------------------------------------------
    * 用户原话：「商店你最好重新用UI概念图 现在是全屏的 太大了 我需要亮色的 现在画风很暗」。
-   * 三处不合意逐条对应到改动：
    *   · 「全屏的」   → 旧版 `pageFill(MENU.page, 1)` 是一整块**不透明**近黑，等于把游戏切走。
-   *                    改成 α.58 的暗幕 + 一块只占屏约 54% 宽的面板，深海与机体留在四周 ——
-   *                    "这是浮在游戏上的潜水终端"，不是"另一个界面"。
-   *   · 「太大了」   → 卡片 300×330 → 204×264；面板整体宽 948 → 700、高 442。
-   *   · 「画风很暗」 → 面板走 `BRIGHT` 亮色皮肤（近白水青）+ 深藏青文字。
+   *                    改成暗幕 + 一块只占屏约 54% 宽的面板，深海与机体留在四周。
+   *   · 「太大了」   → 卡片 300×330 → 204×350；面板整体宽 948 → 700。
+   *   · 「画风很暗」 → 面板走 `BRIGHT` 皮肤。
    *                    ⚠️ 换底色必须**同时换文字色**（`TXT` → `TXT_LIGHT`），
    *                    只换底会得到"白字白底"，是这类改版最经典的事故。
+   *
+   * -----------------------------------------------------------------------
+   * V8 回调：近白 → **中调**；卡片改成**立绘主导**（2026-10-13 下午）
+   * -----------------------------------------------------------------------
+   * 用户原话：「商店又太亮了 要中等色差 最要有立绘UI布局感」。两条改动：
+   *   · 「太亮 / 中等色差」 → `BRIGHT` 由近白（对比 15:1）降到中调水青（对比 ~5:1），
+   *     文字翻成浅色。见 `theme.ts` 的 V8 注释。
+   *   · 「立绘 UI 布局感」   → 卡片从"信息为主、立绘是 84px 的小条"改成
+   *     **立绘占卡面上半 148px（约 42%）**，且立绘位顶部压一条类型色、
+   *     内侧做三层递减暗带伪内凹 —— 视觉上先看到"这是个什么东西"，再读数字。
+   *     价格行并进购买按钮（`购买 · 45`），把省下的行高让给立绘。
    */
   drawShop(w: DiveWorld, cbs: {
     onBuy: (i: number) => void
@@ -1003,12 +1012,12 @@ export class Hud {
     const g = this.g
 
     // 底幕：半透明（不是实黑）—— 让深海透出来，弹窗感才立得住
-    this.scrim(0.58)
+    this.scrim(0.66)
 
     // 面板几何：宽度跟随卡片总宽（自适应设计分辨率），高度是各分区之和
     const cw = 204, gap = 18, pad = 26
     const pw = cw * 3 + gap * 2 + pad * 2
-    const headerH = 56, cardH = 292, footH = 56, vpad = 20
+    const headerH = 56, cardH = 356, footH = 56, vpad = 20
     const ph = vpad * 2 + headerH + 12 + cardH + 14 + footH
     const px = (W - pw) / 2
     const py = (H - ph) / 2
@@ -1025,7 +1034,7 @@ export class Hud {
     const pillW = 34 + bankStr.length * 11 + 42
     const pillX = px + pw - pad - pillW
     const pillY = iy + 15
-    g.fill(0xffffff, 1); g.fillRoundRect(pillX, pillY, pillW, 28, 14)
+    g.fill(BRIGHT.card, 1); g.fillRoundRect(pillX, pillY, pillW, 28, 14)
     g.line(BRIGHT.edge, 0.8, 1); g.strokeRoundRect(pillX + 0.5, pillY + 0.5, pillW - 1, 27, 14)
     g.line(BRIGHT.relic, 0.95, 1.8); g.strokeCircle(pillX + 17, pillY + 14, 7)
     this.text(pillX + 29, pillY + 14, bankStr, 17, TXT_LIGHT.main)
@@ -1064,17 +1073,18 @@ export class Hud {
         : up.kind === 'mount' ? BRIGHT.mount
           : up.kind === 'weapon' ? BRIGHT.weapon : BRIGHT.stat
 
-    // 卡体：亮色实底。三态靠"卡面压暗 + 描边亮度"分档（买不起整张压一档）
+    // 卡体：中调实底。三态靠"卡面压暗 + 描边亮度"分档（买不起整张压一档）
     g.fill(sold ? BRIGHT.slot : (afford ? BRIGHT.card : BRIGHT.cardOff), 1)
     g.fillRoundRect(x, y, cw, ch, 12)
-    g.fill(0xffffff, sold ? 0.25 : 0.8); g.fillRoundRect(x + 12, y + 2, cw - 24, 2, 1)
+    // 上缘高光：中调底上压到 α.30 —— 再亮就成了一条白边
+    g.fill(0xffffff, sold ? 0.08 : 0.30); g.fillRoundRect(x + 12, y + 2, cw - 24, 2, 1)
     g.line(typeCol, sold ? 0.35 : (afford ? 0.95 : 0.45), 2)
     g.strokeRoundRect(x + 1, y + 1, cw - 2, ch - 2, 11)
 
     // ---- 键帽 1/2/3（暗示"这个键可以按"）----
     const kc = 22
-    g.fill(0x000000, 0.06); g.fillRoundRect(x + 12, y + 13, kc, kc, 6)
-    g.fill(0xffffff, 1); g.fillRoundRect(x + 12, y + 12, kc, kc, 6)
+    g.fill(0x000000, 0.22); g.fillRoundRect(x + 12, y + 13, kc, kc, 6)
+    g.fill(0x578ba0, 1); g.fillRoundRect(x + 12, y + 12, kc, kc, 6)
     g.line(afford ? typeCol : BRIGHT.edge, afford ? 0.95 : 0.55, 1)
     g.strokeRoundRect(x + 12.5, y + 12.5, kc - 1, kc - 1, 6)
     this.center(x + 12 + kc / 2, y + 12 + kc / 2, `${i + 1}`, 13,
@@ -1096,33 +1106,39 @@ export class Hud {
       return
     }
 
-    // ---- 立绘槽（比卡面深）----
+    // ---- 立绘区（**卡片主体**：148px ≈ 卡高的 42%）----
+    // 立体感用与战斗里炮塔**同一套语言**：内凹 + 左上受光 + 硬边。
+    // 两层递减暗带代替渐变（引擎无渐变填充），让这块读作"凹进去的展示窗"。
     const cxm = x + cw / 2
-    const ax = x + 14, ay = y + 44, aw = cw - 28, ah = 84
-    g.fill(BRIGHT.slot, 1); g.fillRoundRect(ax, ay, aw, ah, 8)
-    g.line(BRIGHT.divider, 0.9, 1); g.strokeRoundRect(ax + 0.5, ay + 0.5, aw - 1, ah - 1, 8)
+    const ax = x + 14, ay = y + 46, aw = cw - 28, ah = 148
+    g.fill(BRIGHT.slot, 1); g.fillRoundRect(ax, ay, aw, ah, 10)
+    g.fill(UI.abyss, 0.18); g.fillRect(ax + 1, ay + 1, aw - 2, 8)
+    g.fill(UI.abyss, 0.10); g.fillRect(ax + 1, ay + 9, aw - 2, 5)
+    // 顶端压一条**类型色**：扫视时先读到"这是什么类型"，再读名字
+    g.fill(typeCol, sold ? 0.35 : 0.9); g.fillRect(ax + 4, ay + 3, aw - 8, 3)
+    g.line(BRIGHT.divider, 0.9, 1); g.strokeRoundRect(ax + 0.5, ay + 0.5, aw - 1, ah - 1, 10)
     const artKey = this.cardArtKey(up)
     const artSf = artKey ? this.art.get(artKey) : undefined
-    this.putArt(cxm, ay + ah / 2, aw - 12, ah - 12, artSf, sold ? 0.4 : 1)
+    this.putArt(cxm, ay + ah / 2 + 4, aw - 20, ah - 26, artSf, sold ? 0.4 : 1)
 
     // 没有立绘的卡**按类型补代码图形** —— 旧版这里一律画一个"—"，
     // 属性卡 / 挂载卡整张看起来像"资源没加载出来"。这才是"商店资源不对"的实质。
     const wid = this.cardWeaponId(up)
-    const artCy = ay + ah / 2
+    const artCy = ay + ah / 2 + 4
     if (!artSf) {
       if (up.kind === 'mount') {
-        this.mountDiagram(cxm, artCy - 2, up.id, ah, w)
+        this.mountDiagram(cxm, artCy - 6, up.id, ah, w)
       } else if (up.kind === 'relic') {
-        this.relicIcon((up.relicId ?? 'echo_heart') as RelicId, cxm, artCy, 20)
+        this.relicIcon((up.relicId ?? 'echo_heart') as RelicId, cxm, artCy, 30)
       } else if (up.kind === 'weapon') {
         // w_all（弹药改良）没有武器 id，用 gun 的形状签名兜底
-        this.weaponIcon(wid ?? 'gun', cxm, artCy, 24)
+        this.weaponIcon(wid ?? 'gun', cxm, artCy, 34)
       } else {
         const sk = STAT_CARD[up.id]
         if (sk) {
           const gcol = STAT_META.find(m => m.k === sk)?.col ?? UI.cyan
-          this.statGlyph(sk, cxm, artCy - 13, 42, gcol)
-          this.statGauge(cxm, artCy + 25, up.id, w)
+          this.statGlyph(sk, cxm, artCy - 22, 56, gcol)
+          this.statGauge(cxm, artCy + 42, up.id, w)
         }
       }
     }
@@ -1138,8 +1154,10 @@ export class Hud {
     }
 
     // ---- 名称 / 描述 ----
-    this.center(cxm, y + 146, up.name, 16, sold ? TXT_LIGHT.mute : TXT_LIGHT.main)
-    this.center(cxm, y + 166, fitText(up.desc, 12, cw - 22), 12, TXT_LIGHT.dim)
+    // 行位全部**从卡底往上排**（`ch - N`）而不是写死绝对值 —— 改卡高时下半区整体跟着走，
+    // 不会出现"立绘变高了、名字还钉在原地"的错位。
+    this.center(cxm, y + ch - 130, up.name, 16, sold ? TXT_LIGHT.mute : TXT_LIGHT.main)
+    this.center(cxm, y + ch - 108, fitText(up.desc, 12, cw - 22), 12, TXT_LIGHT.dim)
 
     // ---- 状态行：**买了会发生什么**必须写死（玩家不该靠猜是"新武器"还是"强化"）----
     let foot = ''
@@ -1165,7 +1183,7 @@ export class Hud {
       footWarn = w.relics.length >= RELIC_SLOTS
     }
     if (foot) {
-      this.center(cxm, y + 186, fitText(foot, 12, cw - 20), 12,
+      this.center(cxm, y + ch - 88, fitText(foot, 12, cw - 20), 12,
         sold ? TXT_LIGHT.mute : (footWarn ? TXT_LIGHT.warn : TXT_LIGHT.dim))
     }
 
@@ -1173,18 +1191,16 @@ export class Hud {
     if (up.kind === 'relic' && up.relicId) {
       const cost2 = RELIC_DEF[up.relicId]?.cost2
       if (cost2) {
-        this.center(cxm, y + 204, fitText(cost2, 12, cw - 20), 12,
+        this.center(cxm, y + ch - 70, fitText(cost2, 12, cw - 20), 12,
           sold ? TXT_LIGHT.mute : TXT_LIGHT.warn)
       }
     }
 
-    // ---- 价格 ----
-    this.center(cxm, y + 228, sold ? '已购买' : `${up.cost} 鱼骨`, 15,
-      sold ? TXT_LIGHT.mute : (afford ? TXT_LIGHT.main : TXT_LIGHT.warn))
-
     // ---- 购买按钮（按类型色着色，与卡描边同色）----
-    this.button(cxm, y + ch - 24, cw - 28, 34,
-      sold ? '已售出' : (afford ? '购买' : '鱼骨不足'),
+    // 价格**并进按钮**（`购买 · 45`），把省下的那一行让给立绘。
+    // 买不起时直接给**差额**（`缺 7 鱼骨`）—— 「鱼骨不足」这种文案玩家还得自己回顶栏算。
+    this.button(cxm, y + ch - 30, cw - 28, 36,
+      sold ? '已售出' : (afford ? `购买 · ${up.cost}` : `缺 ${up.cost - w.bank} 鱼骨`),
       () => cbs.onBuy(i), !sold && afford,
       (!sold && afford) ? lightBuyBtn(typeCol) : BTN_BRIGHT_DISABLED)
   }

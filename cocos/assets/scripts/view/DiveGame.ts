@@ -1281,88 +1281,122 @@ export class DiveGame extends Component {
   }
 
   /**
-   * 发射塔 = **圆形装载器 + 镶嵌其上的发射器**（web `drawTurret` 的逐值移植）。
+   * 发射塔 = **圆形装载器 + 镶嵌其上的发射器**。
    *
-   * 立体感从哪来（俯视角、光源在左上，纯 Graphics、不依赖贴图）：
-   *   ① 底盘两层 —— 外环带（受光，中亮青实底）+ 内凹槽（背光，暗且**向下偏移**）；
-   *      一亮一暗再加一点错位，就读作"一个有厚度的金属盘，中间凹下去"。
-   *   ② 每道环配**上亮下暗两条弧**（画整圆会平，一段弧就足以骗过眼睛）。
-   *   ③ 中心毂：先投暗影 → 再压亮面 → 最后点一个左上高光点。
-   * 科技感来自装填进度环（12 点起顺时针扫满）—— 它同时是"这台武器在施法"的显式信号。
+   * -----------------------------------------------------------------------
+   * 立体感 = **四条线索，缺一条就平**（32px 的盘子上只有这四样读得出来）
+   * -----------------------------------------------------------------------
+   *   ⓪ 投影   —— 右下偏移的暗盘。**第一条**，没有它塔就是贴在艇上的一块贴纸；
+   *   ① 侧壁   —— 底盘画两遍、下移 R*0.13 且更暗 → 2~3px 的"厚度"；
+   *   ② 受光弧 —— 左上一条粗弧（弧宽 R*0.30）＝ 圆柱侧面被打亮；
+   *   ③ 暗弧   —— 右下一条粗弧 ＝ 终结线。②③一亮一暗，体积才闭合。
+   * 在这之上才是纹样：内凹槽（凹）、外缘亮环（发光语言）、中心毂（凸）、装填进度环（施法可见）。
    *
-   * 塔座用**通用色**（cyanDim）、不带武器色 —— 这是刻意的：座是艇上的固定设施，
-   * 武器是可换的。若塔座也染武器色，"这座塔能换装别的炮"就说不通了。武器色只出现在发射器上。
+   * -----------------------------------------------------------------------
+   * ⚠️ 光源**固定在屏幕左上**，不随塔转 —— 这是本次重画改掉的一处旧错
+   * -----------------------------------------------------------------------
+   *   旧版所有明暗弧都写成 `ang + π*1.08` 之类，等于**受光面跟着塔一起转**：
+   *   塔转向哪边，亮面就转到哪边 —— 视觉上就是"贴纸在打折"。
+   *   正确做法：**旋转的只有炮管**；塔座 / 凹槽 / 中心毂的明暗一律用**世界固定角**
+   *   （左上 = 180°~266°，右下 = 0°~86°）。
+   *
+   * -----------------------------------------------------------------------
+   * 动效：后坐 + 待机微浮（用户要「给点立体感 在移动」）
+   * -----------------------------------------------------------------------
+   *   · 后坐：开火瞬间沿炮管**反方向**退 `3px`，随 `fireFlash` 衰减归位。
+   *     只推发射器与中心毂 —— 塔座是焊在艇体上的，跟着抖会像整台机器在跳。
+   *   · 待机微浮：`sin(t*1.6 + i*2.3) * 0.7px`，每座错相位。
+   *     幅值 0.7px 是刻意的：再大就从"活着"变成"整体抖动"。
+   *   · 索敌转向本身由 `slewTurretAims`（sim 层，TURRET_SPIN 限速）驱动，渲染层不重复做。
+   *
+   * 塔座用**通用色**（cyanDim）、不带武器色 —— 座是艇上的固定设施，武器才是可换的。
+   * 若塔座也染武器色，"这座塔能换装别的炮"就说不通了。武器色只出现在发射器上。
    */
   private drawTurret(w: DiveWorld, i: number): void {
     const wp = w.weapons[i]
     const pose = w.turretPose(i)
     if (!wp || !pose) return
-    const cx = pose.x, cy = pose.y, ang = pose.ang
     const g = this.gPlayer
+    const cx = pose.x, cy = pose.y, ang = pose.ang
     // ext = 容器扩容解锁出来的第 5、6 座：琥珀外环 + 略大 15%，
     // 让"我的艇变强了"在**剪影**上直接看得见，而不是只能读 HUD 数字。
     const ext = i >= BASE_SEATS
     const R = TURRET_R * (ext ? 1.15 : 1)
     const hot = wp.fireFlash > 0
-    const P = (lx: number, ly: number) => this.rot(cx, cy, ang, lx, ly)
+    // 后坐位移（沿炮管局部 x，负 = 后退）。fireFlash 寿命 0.15~0.25s，
+    // 这里按 0.15 归一化 → 开火瞬间满行程，随后线性归位。
+    const kick = hot ? 3.0 * Math.min(1, wp.fireFlash / 0.15) : 0
+    const bob = Math.sin(w.t * 1.6 + i * 2.3) * 0.7
+    const fore = -kick - bob
+    // 局部 → 世界（只给**发射器**用；塔座一律世界固定）
+    const P = (lx: number, ly: number) => this.rot(cx, cy, ang, lx + fore, ly)
 
-    // ① 底盘外环带（受光面）：中亮青实底 —— **不填黑**（近黑在明亮水层下就是一块黑斑）
-    g.fill(UI.cyanDim, 0.55); g.fillCircle(cx, cy, R)
-    // 环带上缘亮弧 / 下缘暗弧：一趟弧线就做出"圆柱侧面"的受光。弧角随塔一起转。
-    g.line(UI.cyanHi, 0.34, R * 0.22)
-    g.arc(cx, cy, R * 0.86, ang + Math.PI * 1.08, ang + Math.PI * 1.78); g.stroke()
-    g.line(UI.abyss, 0.30, R * 0.22)
-    g.arc(cx, cy, R * 0.86, ang + Math.PI * 0.08, ang + Math.PI * 0.78); g.stroke()
+    // 光源固定角（屏幕左上 / 右下）
+    const L0 = Math.PI * 1.02, L1 = Math.PI * 1.48
+    const D0 = Math.PI * 0.02, D1 = Math.PI * 0.48
 
-    // ② 内凹槽（发射器的安装位）：暗面 + 向下偏移 = 凹进去
-    const d1 = P(0, R * 0.10)
-    g.fill(UI.abyss, 0.40); g.fillCircle(d1.x, d1.y, R * 0.72)
-    g.line(UI.cyanHi, 0.45, R * 0.16)   // 凹槽内壁：左上受光
-    g.arc(d1.x, d1.y, R * 0.66, ang + Math.PI * 1.08, ang + Math.PI * 1.72); g.stroke()
-    const d2 = P(0, R * 0.06)
-    g.line(UI.abyss, 0.28, R * 0.16)    // 凹槽外沿投影：右下加深
-    g.arc(d2.x, d2.y, R * 0.78, ang + Math.PI * 0.12, ang + Math.PI * 0.72); g.stroke()
+    // ⓪ 投影：右下偏移的暗盘 —— 立体感第一条
+    g.fill(UI.abyss, 0.28); g.fillCircle(cx + R * 0.16, cy + R * 0.22, R * 0.98)
 
-    // ③ 外缘亮环 + 左上金属高光弧
+    // ① 侧壁：底盘画两遍，下面那遍下移 + 更暗 → 厚度
+    g.fill(UI.abyss, 0.50); g.fillCircle(cx, cy + R * 0.13, R)
+
+    // ② 顶面（受光面）：中亮青实底 —— **不填黑**（近黑在明亮水层下就是一块黑斑）
+    g.fill(UI.cyanDim, 0.66); g.fillCircle(cx, cy, R)
+
+    // ③ 左上粗弧 = 圆柱侧面被打亮
+    g.line(UI.cyanHi, 0.50, R * 0.30)
+    g.arc(cx, cy, R * 0.82, L0, L1); g.stroke()
+    // ④ 右下暗弧 = 终结线
+    g.line(UI.abyss, 0.38, R * 0.26)
+    g.arc(cx, cy, R * 0.86, D0, D1); g.stroke()
+
+    // ⑤ 内凹槽（发射器的安装位）：暗面 + **向下偏移** = 凹进去
+    g.fill(UI.abyss, 0.42); g.fillCircle(cx, cy + R * 0.12, R * 0.70)
+    g.line(UI.cyanHi, 0.45, R * 0.16)   // 凹槽内壁：上缘受光
+    g.arc(cx, cy + R * 0.12, R * 0.64, L0, L1); g.stroke()
+    g.line(UI.abyss, 0.28, R * 0.16)    // 凹槽外沿投影：下缘加深
+    g.arc(cx, cy + R * 0.08, R * 0.76, D0, D1); g.stroke()
+
+    // ⑥ 外缘亮环 + 左上金属高光弧
     neonCircle(g, cx, cy, R, hot ? 0xffffff : UI.cyan, { width: 2.2, alpha: 0.95, bloom: hot })
     g.line(0xffffff, 0.55, 1.6)
-    g.arc(cx, cy, R * 0.92, ang + Math.PI * 1.12, ang + Math.PI * 1.56); g.stroke()
+    g.arc(cx, cy, R * 0.92, L0, L0 + Math.PI * 0.44); g.stroke()
 
-    // ④ 装填进度环（最外，12 点起顺时针）—— "施法过程可见"的主件。
+    // ⑦ 扩容座：琥珀环 + 4 卡榫。环半径压到 R*1.16 —— 必须让开外圈的装填环（R*1.42），
+    //    两条环交叉会读成"一个乱掉的表盘"。
+    if (ext) {
+      neonCircle(g, cx, cy, R * 1.16, UI.amber, { width: 1.4, alpha: 0.8, bloom: false })
+      g.fill(UI.amber, 0.9)
+      for (let k = 0; k < 4; k++) {
+        const a = (k * Math.PI) / 2 + Math.PI / 4
+        g.fillCircle(cx + Math.cos(a) * R * 1.02, cy + Math.sin(a) * R * 1.02, 1.6)
+      }
+    }
+
+    // ⑧ 装填进度环（最外，12 点起顺时针）—— "施法过程可见"的主件。
     // 分母用**上一发的实际间隔**（含等级/齐射/高压供能）：升级后环的转速仍与真实开火节奏一致。
     const ivD = wp.ivLast > 0 ? wp.ivLast : wp.iv
     const charge = Math.max(0, Math.min(1, 1 - wp.timer / Math.max(0.001, ivD)))
     const a0 = -Math.PI / 2
     const progCol = hot ? 0xffffff : (charge > 0.985 ? UI.cyanHi : charge > 0.55 ? UI.cyan : UI.amber)
     neon(g, progCol, () => {
-      g.arc(cx, cy, R * 1.38, a0, a0 + Math.PI * 2 * Math.max(0.001, charge)); g.stroke()
+      g.arc(cx, cy, R * 1.42, a0, a0 + Math.PI * 2 * Math.max(0.001, charge)); g.stroke()
     }, { width: 2.0, alpha: 0.92, bloom: hot || charge > 0.985 })
     // 12 点刻度 —— **不随塔转**：圆是旋转对称的，刻度留在正上方才有"表盘"的读感
-    g.fill(UI.cyanDim, 0.85); g.fillRect(cx - 1.0, cy - R * 1.50, 2.0, 4)
+    g.fill(UI.cyanDim, 0.85); g.fillRect(cx - 1.0, cy - R * 1.54, 2.0, 4)
 
-    // ⑤ 中心毂（凸起）：暗影 → 亮面 → 左上高光点
-    const h1 = P(0, R * 0.07)
-    g.fill(UI.abyss, 0.45); g.fillCircle(h1.x, h1.y, R * 0.30)
-    g.fill(hot ? 0xffffff : UI.cyanHi, 0.95); g.fillCircle(cx, cy, R * 0.26)
-    const h2 = P(-R * 0.08, -R * 0.08)
-    g.fill(0xffffff, 0.9); g.fillCircle(h2.x, h2.y, R * 0.08)
+    // ⑨ 中心毂（凸起，吃 60% 的后坐）：暗影 → 亮面 → 左上高光点
+    const hx = cx + Math.cos(ang) * fore * 0.6
+    const hy = cy + Math.sin(ang) * fore * 0.6
+    g.fill(UI.abyss, 0.45); g.fillCircle(hx + R * 0.06, hy + R * 0.07, R * 0.30)
+    g.fill(hot ? 0xffffff : UI.cyanHi, 0.95); g.fillCircle(hx, hy, R * 0.26)
+    g.fill(0xffffff, 0.9); g.fillCircle(hx - R * 0.09, hy - R * 0.09, R * 0.08)
 
-    // ⑥ 扩容座：琥珀环 + 4 卡榫（和基础座一眼分开）
-    if (ext) {
-      neonCircle(g, cx, cy, R * 1.30, UI.amber, { width: 1.4, alpha: 0.8, bloom: false })
-      g.fill(UI.amber, 0.9)
-      for (let k = 0; k < 4; k++) {
-        const a = (k * Math.PI) / 2 + Math.PI / 4
-        const q = P(Math.cos(a) * R * 1.20, Math.sin(a) * R * 1.20)
-        g.fillCircle(q.x, q.y, 1.4)
-      }
-    }
-
-    // ⑦ 发射器：嵌在凹槽里，随索敌角旋转（子弹与枪口闪光也以它为准）
-    const tip = P(R * 0.9, 0)
-    neonLine(g, cx, cy, tip.x, tip.y, hot ? 0xffffff : UI.cyanHi, { width: 2.0, alpha: 0.95, bloom: false })
-    neonCircle(g, cx, cy, R * 0.46, hot ? 0xffffff : UI.cyanDim, { width: 1.2, alpha: 0.8, bloom: false })
-    this.drawEmitter(wp.id, cx, cy, ang, hot)
+    // ⑩ 发射器：嵌在凹槽里，随索敌角旋转（子弹与枪口闪光也以它为准）
+    const tip = P(R * 0.92, 0)
+    neonLine(g, cx, cy, tip.x, tip.y, hot ? 0xffffff : UI.cyanHi, { width: 2.2, alpha: 0.95, bloom: false })
+    this.drawEmitter(wp.id, cx, cy, ang, hot, fore)
   }
 
   /**
@@ -1371,19 +1405,24 @@ export class DiveGame extends Component {
    *
    * 新增武器 = 新增一个分支，装载器那套完全不用动 —— 这就是"通用安装"的落点。
    */
-  private drawEmitter(id: WeaponId, cx: number, cy: number, ang: number, firing: boolean): void {
+  private drawEmitter(id: WeaponId, cx: number, cy: number, ang: number, firing: boolean, fore = 0): void {
     const g = this.gPlayer
     const s = EMITTER_SIZE
     const c = WEAPON_DEF[id].color
-    const P = (lx: number, ly: number) => this.rot(cx, cy, ang, lx, ly)
+    // `fore` = 后坐 / 待机微浮的位移（沿炮管局部 x）。整个发射器**整体平移**、形状不变 ——
+    // 这样"炮在动"读起来是机械行程，而不是零件被拉伸。
+    const P = (lx: number, ly: number) => this.rot(cx, cy, ang, lx + fore, ly)
+    // 少数图元（同心弧）直接以塔心为圆心，也得吃同一份位移，否则弧和管会错开
+    const ox = cx + Math.cos(ang) * fore
+    const oy = cy + Math.sin(ang) * fore
 
     if (id === 'sonar') {
       // 声呐：三层同心弧，开口朝局部 +x（喇叭形辐射面）
       for (let i = 1; i <= 3; i++) {
         g.line(c, firing ? 1 : 0.7, 1.8)
-        g.arc(cx, cy, s * 0.26 * i, ang - 1.0, ang + 1.0); g.stroke()
+        g.arc(ox, oy, s * 0.26 * i, ang - 1.0, ang + 1.0); g.stroke()
       }
-      g.fill(c, 0.9); g.fillCircle(cx, cy, s * 0.12)
+      g.fill(c, 0.9); g.fillCircle(ox, oy, s * 0.12)
     } else if (id === 'gun') {
       // 机关枪：三根平行枪管
       for (let i = -1; i <= 1; i++) {
