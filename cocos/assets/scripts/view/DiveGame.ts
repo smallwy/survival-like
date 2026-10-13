@@ -638,20 +638,30 @@ export class DiveGame extends Component {
   // =========================================================================
   // 美术接入
   // =========================================================================
-  /** 背景：按层换图。cover 铺满世界（等比放大到盖住，多出来的居中裁掉） */
+  /**
+   * 背景：按层换图。cover 铺满世界（等比放大到盖住，多出来的居中裁掉）。
+   *
+   * ⚠️ **激活与否不能只在"换层"时决定**：弹窗相位（商店/决策/结算）会走
+   * `hideWorld()` 把 `bgNode` 关掉，而同层内 `layerIdx` 不变 —— 如果这里
+   * 只在层变化时才 `active = true`，那么**第一次进商店之后，同层内背景图就再也不会
+   * 出现**（只剩 `gBase` 的近黑底色，看起来就是"画面又黑了"）。
+   * 所以贴图只在换层时换，`active` 每帧按"当前该不该显示"设置。
+   */
   private syncBg(w: DiveWorld): void {
-    if (!this.artLoaded || this.bgLayer === w.layerIdx) return
-    const sf = this.art.get('env' + w.layerIdx)
-    if (!sf) return
-    this.bgLayer = w.layerIdx
-    this.bgNode.spriteFrame = sf
+    if (!this.artLoaded) return
+    if (this.bgLayer !== w.layerIdx) {
+      const sf = this.art.get('env' + w.layerIdx)
+      if (!sf) return
+      this.bgLayer = w.layerIdx
+      this.bgNode.spriteFrame = sf
+      const iw = sf.rect.width
+      const ih = sf.rect.height
+      const s = Math.max(this.W / iw, this.H / ih)
+      const ut = this.bgNode.node.getComponent(UITransform)!
+      ut.setContentSize(iw * s, ih * s)
+      this.bgNode.node.setPosition(this.W / 2, this.H / 2)
+    }
     this.bgNode.node.active = true
-    const iw = sf.rect.width
-    const ih = sf.rect.height
-    const s = Math.max(this.W / iw, this.H / ih)
-    const ut = this.bgNode.node.getComponent(UITransform)!
-    ut.setContentSize(iw * s, ih * s)
-    this.bgNode.node.setPosition(this.W / 2, this.H / 2)
   }
 
   /** 潜航器机体：位置 / 朝向每帧更新；贴图只在换艇时换 */

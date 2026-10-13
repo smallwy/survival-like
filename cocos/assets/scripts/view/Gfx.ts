@@ -113,6 +113,27 @@ export class Gfx {
     this.roundRect(x, y, w, h, r); this.g.stroke(); return this
   }
 
+  /**
+   * 圆弧（描边路径）。角度取 **sim 语义**：y 向下、角度增加 = 视觉顺时针（与 Phaser 的
+   * `arc` 一致）。引擎的 `Graphics.arc` 在 y 翻转之后方向会镜像，所以这里用**分段折线**
+   * 自己画 —— 冷却环 / 倒计时环的方向不会因引擎差异而反。用完记得 `.stroke()`。
+   *
+   * `cont = true` 时从当前点**连一段直线**到弧起点（与 Phaser `arc` 的行为一致），
+   * 用于"线 + 弧"拼成的复合图标（心形、回声弧）。默认 false＝另起子路径。
+   */
+  arc(x: number, y: number, r: number, a0: number, a1: number, cont = false): this {
+    const sweep = a1 - a0
+    const n = Math.max(2, Math.ceil(Math.abs(sweep) / (Math.PI / 24)))
+    const px0 = x + Math.cos(a0) * r, py0 = this.y(y + Math.sin(a0) * r)
+    if (cont) this.g.lineTo(px0, py0)
+    else this.g.moveTo(px0, py0)
+    for (let i = 1; i <= n; i++) {
+      const a = a0 + sweep * (i / n)
+      this.g.lineTo(x + Math.cos(a) * r, this.y(y + Math.sin(a) * r))
+    }
+    return this
+  }
+
   /** 线段 */
   seg(x1: number, y1: number, x2: number, y2: number): this {
     this.g.moveTo(x1, this.y(y1))
