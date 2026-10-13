@@ -1,0 +1,12 @@
+{
+  "name": "deep-echo-cocos",
+  "uuid": "b6a0c4e2-1f3d-4a7e-9b2c-0d4e5f6a7b8c",
+  "version": "0.1.0",
+  "description": "深海回响 survivors-game —— Cocos Creator 前端工程（从 Phaser 迁移的目标工程，基于 cocos 分支）",
+  "main": "main.ts",
+  "dependencies": {
+    "cc": "3.8.5"
+  },
+  "devDependencies": {},
+  "scripts": {}
+}

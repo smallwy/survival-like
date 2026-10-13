@@ -1,0 +1,15 @@
+# ===== Cocos Creator 生成/缓存目录（不要入库） =====
+/library/        # 资源数据库缓存，编辑器自动生成
+/temp/           # 临时构建产物
+/local/          # 本地设置（每台机器不同）
+/build/          # 构建输出
+/profiles/       # 构建 profile
+/.creator/       # 编辑器内部
+
+# ===== 系统/编辑器垃圾 =====
+.DS_Store
+*.log
+Thumbs.db
+
+# ===== 依赖（Cocos 引擎由编辑器解析，不提交 node_modules） =====
+node_modules/
