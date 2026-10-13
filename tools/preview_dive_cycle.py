@@ -140,11 +140,35 @@ def draw_bubbles(img, d, bubbles):
     img.paste(Image.alpha_composite(img.convert('RGBA'), ov).convert('RGB'), (0, 0))
 
 
+def render_gif(step=0.3):
+    """按真实速度出一个循环的 GIF（`step` 秒/帧，0.3 ⇒ 48 帧 = 14.4s）。"""
+    gw, gh = 360, 464
+    sx = (gw - SHAFT_W) / 2 - SHAFT_X0
+    sy = 36 - SHAFT_Y0
+    frames = []
+    n = int(round(DIVE_T / step))
+    for i in range(n):
+        t = i * step
+        y, _boost, _mode, _gap, _name = phase_at(t)
+        cell = Image.new('RGB', (gw, gh), BG)
+        cd = ImageDraw.Draw(cell)
+        draw_cell(cell, cd, simulate(t), sx, sy)
+        draw_diver(cell, cd, (gw - SHAFT_W) / 2 + SHAFT_W / 2, y + sy, 1.0)
+        frames.append(cell)
+    out = os.path.join(ROOT, 'docs', 'shots', 'dive_cycle.gif')
+    frames[0].save(out, save_all=True, append_images=frames[1:],
+                   duration=int(step * 1000), loop=0, optimize=True)
+    print('saved', out, '%d 帧' % n)
+
+
 def main():
     n = 8
     for i, a in enumerate(sys.argv):
         if a == '--frames' and i + 1 < len(sys.argv):
             n = int(sys.argv[i + 1])
+    if '--gif' in sys.argv:
+        render_gif()
+        return
 
     # 重点帧：每段至少 2 帧，其中上浮段 3 帧（本轮改的就是它）
     times = [0.5, 3.5, 6.5, 8.0, 9.2, 10.6, 12.0, 13.6]
