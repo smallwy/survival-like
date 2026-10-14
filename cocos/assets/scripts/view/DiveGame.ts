@@ -175,6 +175,19 @@ const SPARK_CAP = 260
 const FLOAT_CAP = 32
 /** 敌人贴图池上限。web 侧的阈值是"同屏 >120 条就整体退回矢量" */
 const FISH_CAP = 140
+
+/**
+ * 鱼骨辉光的**同心圈层数**（V6.48 性能）。
+ *
+ * 鱼骨是本作唯一可拾取物，"会发光 = 能捡"是玩家唯一能依赖的读法 ⇒ 辉光是**功能**，不能删。
+ * 能省的只有"同心圈数"：3 圈的观感与 2 圈几乎不可辨（最外圈 0.10 alpha 只负责把中圈边界化开），
+ * 但红线帧（50 块骨）的图元数是 150 → 100。
+ *
+ * `3` = 原来的三圈（0.10@1.30 + 0.16@1.02 + 骨白 0.14@0.78）
+ * `2` = 默认。合并外两圈为 0.20@1.02 + 骨白 0.14@0.78
+ * `1` = 只留骨白圈。**辉光会变硬**，只在帧率实在不够时用
+ */
+const BONE_GLOW = 2
 /** 位图击杀特效同屏上限。一帧十几只同屏死是常事，超了就丢最早的。 */
 const FXBIT_CAP = 28
 /** 单帧最大步长（与模拟层的 MAX_DT 同源，防止后台切回来时世界瞬移） */
@@ -1767,16 +1780,24 @@ export class DiveGame extends Component {
     // 旧版是「一个白点 + 一根斜线」：在暗海里既读不出"这是个能捡的东西"，更读不出是"鱼骨"。
     // 重画成**真鱼骨**（脊柱 + 4 对肋骨），整体吃 `b.rot` ——
     //   模拟层一直在积 `spin` 做自旋，旧渲染层**根本没接**（白算），接上后"漂着的碎骨"才活。
-    // 外面罩两层氧青 + 一层骨白辉光：它是本作**唯一可拾取的东西**，
+    // 外面罩氧青 + 骨白辉光（圈数见 `BONE_GLOW`）：它是本作**唯一可拾取的东西**，
     //   "会发光 = 能捡"是玩家唯一能依赖的读法 —— 光晕不是装饰，是功能。
     for (const b of w.bones) {
       const s = b.size * 0.5
       const blinking = b.fade < 0.35 && Math.sin(b.fade * 30) > 0
       const al = blinking ? 0.35 : 1
       const ca = Math.cos(b.rot), sa = Math.sin(b.rot)
-      // ① 辉光：氧青（外两层）→ 骨白（内层）
-      this.gBack.fill(0x4fe8ff, 0.10 * al); this.gBack.fillCircle(b.x, b.y, s * 1.30)
-      this.gBack.fill(0x4fe8ff, 0.16 * al); this.gBack.fillCircle(b.x, b.y, s * 1.02)
+      // ① 辉光：氧青（外层）→ 骨白（内层）
+      //    ⚠️ **辉光是功能不是装饰** —— "会发光 = 能捡"是本作唯一可拾取物给玩家的读法。
+      //    所以省图元的做法只能是**合并同心圆**，不能是"删掉辉光"。
+      //    实测（V6.48 压测）：三圈 50 块骨 = **150 图元/帧**，是红线帧里仅次于敌人的单项。
+      //    最外圈（0.10 alpha、1.30× 半径）在暗海里几乎不可辨，它的全部作用是把中圈边界"化开" ——
+      //    把中圈 alpha 从 0.16 提到 **0.20** 就能补上同样的观感。
+      //    ⇒ 2 圈（省 50 图元/帧）。改 `BONE_GLOW` 为 1 可再省 50，代价是辉光更硬、边界更清楚。
+      if (BONE_GLOW >= 3) {
+        this.gBack.fill(0x4fe8ff, 0.10 * al); this.gBack.fillCircle(b.x, b.y, s * 1.30)
+      }
+      this.gBack.fill(0x4fe8ff, (BONE_GLOW >= 3 ? 0.16 : 0.20) * al); this.gBack.fillCircle(b.x, b.y, s * 1.02)
       this.gBack.fill(BONE, 0.14 * al); this.gBack.fillCircle(b.x, b.y, s * 0.78)
       // ② 脊柱（贯穿全身）
       this.gBack.line(BONE, 0.95 * al, Math.max(1.2, s * 0.16))
