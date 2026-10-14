@@ -1278,7 +1278,9 @@ export class DiveWorld implements ShopTarget {
     const a = slot.ang + this.sway               // 站位 + 炮圈摆动滞后
     const sx = SEAT_RING_R * Math.cos(a)
     const sy = SEAT_RING_R * Math.sin(a)
-    // 3/4 俯视投影：座圈在机体平面内定死（含摆动），再按 SEAT_RATIO 压扁**屏幕纵向**。
+    // 侧视投影（V6.54）：座圈在机体**水平面内**定死（含摆动），侧视相机只保留两个自由度 ——
+    //   横向（沿艇长）= 满比例 `cos`，纵向（沿艇高）= `sin × SEAT_RATIO`。
+    // 效果：±90° 两座压在机体的高边缘（"镶嵌在艇缘"），±30°/±150° 四座沿艇长铺开。
     // 见 tables.ts SEAT_RATIO：炮位与子弹出生点共用这一处，改这里等于同时改两者。
     return { x: this.px + sx, y: this.py + sy * SEAT_RATIO }
   }
