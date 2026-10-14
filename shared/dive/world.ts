@@ -486,6 +486,9 @@ export class DiveWorld implements ShopTarget {
       phase: 'chase', t: 0, dirX: 0, dirY: 0,
       alive: true, flash: 0,
       texRot: 0,
+      // 初始朝向朝左（贴图基准方向）。**必须给非零值** —— 全零会让渲染层
+      // `Math.hypot(0,0)=0` 掉进"无朝向"分支，出生那一帧方向是空的。
+      fx: -1, fy: 0,
       slowT: 0, slowMul: 1,
       burnT: 0, burnDps: 0, burnTick: 0,
       charmT: 0, charmTick: 0,
@@ -703,6 +706,13 @@ export class DiveWorld implements ShopTarget {
       const da = dist(e.x, e.y, aim.x, aim.y) || 1
       const nx = (aim.x - e.x) / da, ny = (aim.y - e.y) / da
 
+      // ---- 朝向（V6.55）----
+      // 见 types.ts `fx/fy`：这是 sim 里**唯一**一处写"这条鱼面朝哪"的地方，
+      // 供渲染层做左右镜像 + 仰俯限幅。用**朝目标的方向**而不是本帧位移 ——
+      // dash 蓄力/冲刺期间位移会归零或突变，朝向却不该跟着闪。
+      // ⚠️ 绝不能指望 `vx/vy`：那两个字段在这里（以及任何地方）都不会被更新。
+      e.fx = nx; e.fy = ny
+
       // L2「暗流」：加在敌人身上（敌人吃满）
       if (cur > 0 && e.kind !== 'boss') {
         e.x += Math.cos(this.t * 0.28) * cur * dt
@@ -741,6 +751,8 @@ export class DiveWorld implements ShopTarget {
           // ⚠️ 冲刺速度也吃减速：否则"网住了但一个冲刺就飞走"，减速就白给了
           e.x += e.dirX * 460 * slow * dt
           e.y += e.dirY * 460 * slow * dt
+          // 冲刺时朝**冲刺方向**而不是朝玩家 —— 否则它会歪着身子横冲（V6.55 朝向）
+          e.fx = e.dirX; e.fy = e.dirY
           if (e.t >= 0.35) { e.phase = 'rest'; e.t = 0 }
         } else {
           if (e.t >= 0.7) { e.phase = 'chase'; e.t = 0 }

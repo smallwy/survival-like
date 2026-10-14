@@ -507,6 +507,52 @@ export class Hud {
       this.text(dx2 + dw + 8, dy2 - 2, `${Math.round(k * 100)}%`, 12, TXT.dim)
     }
 
+    // ===== ③b 鱼情雷达（右上角，V6.55）=====
+    // 用户 2026-10-13 点名："右上角用圆圈表示当前平面的鱼情，类似地图导航"。
+    //
+    // ⚠️ 用户当时**误把波次倒计时那个圆（里面写 27）当成了鱼情** —— 它其实是
+    //    ③ 里的波次剩余秒数。所以这块是**新增的一段**，不是改旧组件。
+    //
+    // 它补的缺口很具体：侧视画面**看不到"四周"**。从正上方游来的敌人在屏幕上是
+    // "一条斜着游过去的鱼"，玩家据此判断不出"还有几条、从哪个方向压过来"。
+    // 雷达把"平面方位"还给玩家 —— **侧视画面管纵深，雷达管平面**，各说一头。
+    //
+    // ⚠️ 点位**绝不给 2px 发光核**（那是"可瞄准敌人"的铁律，见 `drawEnemies`）：
+    //    雷达点纯信息，给了核会和战斗画面里真正能打的目标混淆。
+    const RCX = W - 88, RCY = 164, RR = 52, RPLOT = 44
+    // 量程比屏幕半对角线（≈752）略大 ⇒ 画面内出现的敌人**必然**落在圈内；
+    // 落在外环上的只可能是"还没进画面"的 —— 那正是"它正从那个方向来"的导航语义。
+    const RANGE = 780
+    g.fill(UI.panel, 0.58); g.fillCircle(RCX, RCY, RR)
+    g.line(UI.cyanDim, 0.5, 1.4); g.strokeCircle(RCX, RCY, RR)
+    // 半量程内环 + 十字准线 —— "导航感"来自这两样，不是来自点位本身
+    g.line(UI.line, 0.32, 1); g.strokeCircle(RCX, RCY, RR * 0.5)
+    g.line(UI.line, 0.22, 1); g.strokeSeg(RCX - RR, RCY, RCX + RR, RCY)
+    g.line(UI.line, 0.22, 1); g.strokeSeg(RCX, RCY - RR, RCX, RCY + RR)
+    this.center(RCX, RCY - RR + 13, '鱼情', 11, TXT.mute)
+
+    for (const e of w.enemies) {
+      if (!e.alive) continue
+      const dx = e.x - w.px, dy = e.y - w.py
+      const d = Math.hypot(dx, dy)
+      const ux = d > 1e-3 ? dx / d : 0, uy = d > 1e-3 ? dy / d : -1
+      const k = Math.min(1, d / RANGE)
+      const px = RCX + ux * k * RPLOT, py = RCY + uy * k * RPLOT
+      if (e.kind === 'boss') {
+        // BOSS 是本作唯一"必须提前知道它从哪来"的目标 ⇒ 大点 + 呼吸环
+        const br = 6 + 2 * Math.abs(Math.sin(t * 3))
+        g.line(UI.violet, 0.7, 1.6); g.strokeCircle(px, py, br)
+        g.fill(UI.violet, 1); g.fillCircle(px, py, 3.4)
+      } else {
+        // 贴边（k=1）的压暗：它还没进画面，只表示"那个方向有东西"
+        g.fill(e.color, k >= 1 ? 0.5 : 0.95)
+        g.fillCircle(px, py, e.kind === 'drift' ? 3.0 : 2.2)
+      }
+    }
+    // 圆心 = 玩家自己，**最后画**，保证永不被点位盖住。小箭头 = 航向（`w.aim` 是 sim 角度）
+    g.fill(UI.cyanHi, 1); g.fillCircle(RCX, RCY, 3)
+    g.fill(UI.cyanHi, 0.8); g.fillTri(RCX, RCY, w.aim, 9, 4.5)
+
     // ===== ④ 生物质（层末才显示）/ 鱼骨（常驻）/ 暂停按钮（常驻·右上角）=====
     // 鱼骨必须**常驻**：玩家要在战斗中就看见数字在涨，才会把"捡鱼骨"和"待会儿能买什么"连起来。
     //

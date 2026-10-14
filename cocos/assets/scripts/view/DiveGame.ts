@@ -138,7 +138,9 @@ interface Mote { x: number; y: number; r: number; vy: number; far: boolean }
  *     `DiveGame.ts` 文件头的层序注释）。破了它，玩家会朝打不到的鱼开火；
  *   · 只表示"水里有别的东西"，**不可瞄准、不碰撞**。
  *
- * 俯视看不到"下"，所以**深度只能用大小 + 明暗表达**（近大亮 / 远小暗）。
+ * 侧视下"远近"没有透视可依（正交视角），所以**深度只能用大小 + 明暗表达**
+ * （近大而实 / 远小而淡）—— 这也是 V6.55 之后必须把体色压成剪影的原因：
+ * 亮色 + 小尺寸在暗水里只读作"雪花"，读不出"那是一条鱼，而且它在远处"。
  */
 interface SchoolFish {
   x: number; y: number
@@ -210,13 +212,47 @@ const FISH_CAP = 140
 const SIDE_TILT = 0.611
 
 /**
- * 远景鱼群的**体色**（按带，V6.53）。
+ * 远景鱼群的**体色**（按带）。V6.53 新增，**V6.55 从"亮色"整组翻成"背光剪影"**。
  *
- * 全部是低饱和浅色 —— 鱼群只是"水里有别的东西"的暗示，**不能比敌人更抢眼**
- * （敌人带 2px 发光核，见 `drawEnemies`）。L1 淡青白 / L2 淡青 / L3 淡紫（生物荧光带）/
- * L4 淡橙（热泉）/ L5 淡靛（深渊巨影）。
+ * ---------------------------------------------------------------------------
+ * 为什么翻（2026-10-14 用户实机反馈）
+ * ---------------------------------------------------------------------------
+ *   v1 用了一组亮色（`0xbfe9ff` 淡青白…），想法是"让玩家看得见水里有东西"。
+ *   实机后果很糟：在深海背景上，46 条亮青椭圆读作**天上飘的云 / 落的雪**，
+ *   完全不像鱼群 —— 用户原话就是「背景的白色」。
+ *
+ *   物理上也站不住：**水下的鱼绝大多数是背光剪影**。光从上方来，你在下面看远处的鱼，
+ *   看到的是"比水体更暗的形状"；只有**自身会发光**的生物才是亮的。所以正确的分档是：
+ *     · L1 / L2 / L4 —— **比水体暗的剪影**（背光）；
+ *     · L3 午夜带 —— 唯一**亮**的一带（生物荧光，正是 V6.51「光的主权转移」给它的主角位）；
+ *     · L5 深渊带 —— 近黑巨影（压迫感来自"一大团黑东西在动"，不是"一团亮"）。
+ *
+ * ⚠️ 这一层画在 `gVeil`（压暗 + 暗角）**之上**（见文件头层序）⇒ **它不吃压暗**。
+ *    选色要按"压暗之后的水色"去配，不要照抄背景图的原始色。
+ * ⚠️ 调观感只动这个数组 + `ATM_FISH_ALPHA`，**不要**去改 `drawAtmo` 里的几何。
  */
-const ATM_FISH_TINT = [0xbfe9ff, 0x9fd8d8, 0xa89ce0, 0xd8a878, 0x6f7bb8]
+const ATM_FISH_TINT = [
+  0x2b5266,   // L1 阳光带 · **背光剪影**（水是亮的 ⇒ 取比水暗一大截的同色系）
+  0x5f97a2,   // L2 弱光带 · 微光轮廓（水已经暗了 ⇒ 再暗就直接消失，只能略亮）
+  0x74f2cc,   // L3 午夜带 · **生物荧光**（唯一亮的一带，V6.51 给它的主角位）
+  0x8a6a48,   // L4 热泉带 · 暖光轮廓（同 L2 的理由，换成热泉的暖色）
+  0x33485c,   // L5 深渊带 · 巨影（近黑水里唯一能读出来的"一团灰蓝"）
+]
+/**
+ * 远景鱼群的**不透明度区间**（按带，`[min, max]`）。
+ *
+ * ⚠️ 这组数是**在 `tools/preview_atmo.py` 的合成图上试出来的**，不是拍脑袋：
+ *   · v1 偏低 ⇒ 暗色剪影在 L2/L4/L5 的暗水里**直接消失**（"没有鱼"也是失败）；
+ *   · v1 又偏高 + 用亮色 ⇒ 读作"飘白云"（用户报的问题）。
+ * 现在按"**比水体偏一点点**"配：能看到有东西在动，但绝不比敌人抢眼。
+ */
+const ATM_FISH_ALPHA: ReadonlyArray<readonly [number, number]> = [
+  [0.26, 0.44],   // L1 背光剪影
+  [0.18, 0.32],   // L2 微光轮廓（亮色，压低免得浮起来）
+  [0.22, 0.40],   // L3 生物荧光
+  [0.16, 0.30],   // L4 暖光轮廓
+  [0.30, 0.48],   // L5 巨影（要"实"，压迫感全靠它）
+]
 
 /**
  * 鱼骨辉光的**同心圈层数**（V6.48 性能）。
@@ -833,7 +869,11 @@ export class DiveGame extends Component {
     }
     this.syncBg(w)               // 换层换背景（只在 layerIdx 变化时真正干活）
 
-    this.gBase.clear(); this.gBg.clear(); this.gVeil.clear(); this.gBack.clear()
+    // ⚠️ **每一层都要在这里 clear** —— Graphics 是累积顶点，漏一个 = 那一层每帧叠加
+    //    成一团拖影。2026-10-14 踩过：`gAtmo`（V6.53 新增）漏在这一行之外，
+    //    46 条远景鱼在几秒内叠成铺满全屏的白色云带，看起来像"背景画错了"，
+    //    实际是漏了一个 clear。**新增任何 Graphics 层，第一件事是加进这张名单。**
+    this.gBase.clear(); this.gBg.clear(); this.gVeil.clear(); this.gAtmo.clear(); this.gBack.clear()
     this.gEnt.clear(); this.gPlayer.clear(); this.gFront.clear()
 
     this.drawBg(w, dt)
@@ -1854,7 +1894,7 @@ export class DiveGame extends Component {
       const L = f.size
       const h = L * 0.40
       // 身体：压扁的椭圆（侧视鱼是长条，不是圆）。**无发光核**。
-      this.gAtmo.fill(ATM_FISH_TINT[idx] ?? 0x9fd8d8, a)
+      this.gAtmo.fill(ATM_FISH_TINT[idx] ?? 0x24455c, a)
       this.gAtmo.fillEllipse(f.x, f.y, L * 0.5, h * 0.5)
       // 尾鳍：摆尾相位逐条错开，否则一群鱼像一块板。尾在身后（贴图基准朝左，这里按游向定）
       const s = f.vx > 0 ? 1 : -1
@@ -1874,20 +1914,44 @@ export class DiveGame extends Component {
   private buildSchools(layerIdx: number): void {
     this.schoolLayer = layerIdx
     const eco = LAYER_ECO[layerIdx]
+    const [aLo, aHi] = ATM_FISH_ALPHA[layerIdx] ?? [0.28, 0.48]
     this.schools.length = 0
-    for (let i = 0; i < eco.school; i++) {
+
+    // 巨影（深渊）要慢：体型越大越慢，否则读作"一条大鱼在冲刺"
+    const big = eco.schoolSize > 2
+    // ⚠️ **必须成团，不能均匀撒满**（2026-10-14）：旧版 `x`/`y` 各自独立随机
+    //    ⇒ 屏幕上是一层**均匀的点**，读作"雪花 / 星星 / 屏幕脏了"，**不是鱼群**。
+    //    真实的鱼群是"几团密集 + 大片空白"。**同样 46 条鱼，成团之后才第一次
+    //    读得出"一群鱼"** —— 用户报的"背景的白色"有一半是这一条（另一半是漏 clear）。
+    const perCluster = big ? 1 : 6
+    const clusters = Math.max(1, Math.round(eco.school / perCluster))
+    const spread = 62
+
+    for (let c = 0; c < clusters; c++) {
+      // 团心留 40px 边距：整团贴在屏幕边上会读作"被裁掉了"
+      const cx0 = 40 + Math.random() * (this.W - 80)
+      const cy0 = 40 + Math.random() * (this.H - 80)
+      // **同团同向**：一群鱼朝同一个方向游才叫群；每条各自随机 = 一锅乱炖
       const dir = Math.random() < 0.5 ? -1 : 1
-      // 巨影（深渊）要慢：体型越大越慢，否则读作"一条大鱼在冲刺"
-      const big = eco.schoolSize > 2
-      this.schools.push({
-        x: Math.random() * this.W,
-        y: Math.random() * this.H,
-        vx: dir * (big ? 6 + Math.random() * 6 : 12 + Math.random() * 20),
-        size: 26 * eco.schoolSize * (0.72 + Math.random() * 0.56),
-        phase: Math.random() * Math.PI * 2,
-        fade: 0,
-        alpha: 0.13 + Math.random() * 0.15,       // ≤ 0.28，低于敌人剪影的可见度
-      })
+      // **同团同速**（±12% 抖动）：速度差太大会把团拉成长条，几秒后就散掉
+      const spd = big ? 6 + Math.random() * 6 : 12 + Math.random() * 20
+      const size0 = 26 * eco.schoolSize
+
+      for (let i = 0; i < perCluster; i++) {
+        // 三角分布（两次均匀求和）≈ 团心密、边缘疏 —— 这**就是**"群"的形状
+        const gx = (Math.random() + Math.random() - 1) * spread
+        const gy = (Math.random() + Math.random() - 1) * spread * 0.7
+        this.schools.push({
+          x: cx0 + gx,
+          y: cy0 + gy,
+          vx: dir * spd * (0.88 + Math.random() * 0.24),
+          size: size0 * (0.78 + Math.random() * 0.44),
+          phase: Math.random() * Math.PI * 2,
+          fade: 0,
+          // 区间随带变化（剪影要"实"、荧光要"稳"，见 ATM_FISH_ALPHA）
+          alpha: aLo + Math.random() * (aHi - aLo),
+        })
+      }
     }
   }
 
@@ -2136,15 +2200,21 @@ export class DiveGame extends Component {
       // 侧视只给两个自由度：**左右镜像** + **±35° 仰俯**（`SIDE_TILT`）。
       // ⚠️ 镜像必须用 `scale.x = -1`，不能用旋转 180° —— 转 180° 会把鱼**肚皮朝上**。
       // ⚠️ 后续新增敌人的贴图**必须与 swarm/dash 同向（头朝左）**，否则镜像基准要改。
-      const spd = Math.hypot(e.vx, e.vy)
+      //
+      // ⚠️ **2026-10-14 修正数据源**：这段原先读 `e.vx / e.vy`，而那两个字段在模拟层
+      //    **从不更新**（`mkEnemy` 归零之后再没人写过）⇒ `spd` 恒为 0 ⇒
+      //    `flip` 恒为 1、`tilt` 恒为 0 ⇒ **屏幕上所有鱼水平朝左**。
+      //    用户报的"鱼游的方向不对"就是这一条。改用 `e.fx / e.fy`
+      //    （`updateEnemies` 每帧写入的朝向单位向量，见 types.ts `fx/fy`）。
+      const fm = Math.hypot(e.fx, e.fy)
       let flip = 1
       let tilt = 0
-      if (spd > 0.5) {
-        const ux = e.vx / spd
-        const uy = e.vy / spd                     // sim 的 y 向上 ⇒ 屏幕上移 = uy > 0
+      if (fm > 0.5) {
+        const ux = e.fx / fm
+        const uy = e.fy / fm                      // **sim 与屏幕同为 y 向下** ⇒ uy > 0 = 往下游
         flip = ux > 0 ? -1 : 1                    // 朝右游 ⇒ 水平镜像（贴图基准朝左）
-        // 屏幕坐标 y 向下，故"屏幕上移"分量是 `-uy`；`|ux|` 保证仰角落在右半平面、
-        //   天然不翻滚（否则正上/正下方来的敌人会转 90°）。
+        // 抬头的分量是 `-uy`；`|ux|` 让仰角恒落在右半平面 ⇒ 天然不翻滚
+        //   （否则从正上/正下方来的敌人会被转 90°，又退回俯视语义）。
         const a = Math.atan2(-uy, Math.abs(ux) + 1e-4)
         tilt = Math.max(-SIDE_TILT, Math.min(SIDE_TILT, a))
       }
@@ -2159,7 +2229,13 @@ export class DiveGame extends Component {
       if (sp) {
         sp.node.setPosition(e.x, this.H - e.y)
         sp.node.setScale(flip, 1, 1)              // 侧视镜像（贴图基准朝左）
-        sp.node.angle = -(tilt * 180) / Math.PI   // 侧视仰俯（±35°，不翻滚）
+        // ⚠️ 倾角**必须乘上 `flip`**：节点变换是 T·R·S（先缩放、后旋转），
+        //    `scale.x = -1` 会把**旋转的视觉方向一并翻转** —— 同一个 angle 值，
+        //    镜像前后"抬头 / 低头"正好相反。漏掉 `flip` 会出现
+        //    "朝右游的鱼抬着头往水底扎"。
+        //    基准：本项目约定 `node.angle = -θ°`（θ = sim 的 y 向下、顺时针为正的角，
+        //    见本文件顶部坐标约定）⇒ **`node.angle` 正值 = 视觉逆时针**。
+        sp.node.angle = (-flip * tilt * 180) / Math.PI   // 侧视仰俯（±35°，不翻滚）
         sp.color = col(0xffffff, charging ? 0.92 : 0.88)
         // 深层的可读性兜底：只留**描边环**（不填充）。
         // web 明确否掉了"暗色实心椭圆衬底"那版 —— 衬底比小鱼还大，把鱼盖成亮斑。
@@ -2175,9 +2251,11 @@ export class DiveGame extends Component {
         this.gEnt.fill(body, 0.95)
         if (e.kind === 'boss') this.gEnt.fillCircle(e.x, e.y, e.r)
         else {
-          // sim 坐标（y 向上）：沿运动方向、限幅 ±35°，朝左游时反射到左半平面。
-          const ux = spd > 0.5 ? e.vx / spd : 1
-          const uy = spd > 0.5 ? e.vy / spd : 0
+          // 沿朝向、限幅 ±35°、朝左时反射到左半平面 —— 与贴图分支同一套侧视语汇。
+          // ⚠️ `Gfx.tri` 的 `angRad` 收的是 **sim 角度**（y 向下、顺时针为正，
+          //    见 Gfx.ang），所以这里直接喂 sim 分量，**不要**再手动取负。
+          const ux = fm > 0.5 ? e.fx / fm : 1
+          const uy = fm > 0.5 ? e.fy / fm : 0
           let va = Math.atan2(uy, Math.abs(ux) + 1e-4)
           va = Math.max(-SIDE_TILT, Math.min(SIDE_TILT, va))
           this.gEnt.fillTri(e.x, e.y, ux < 0 ? Math.PI - va : va, e.r * 1.25, e.r * 0.85)

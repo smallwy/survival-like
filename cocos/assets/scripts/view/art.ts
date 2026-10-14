@@ -84,12 +84,25 @@ export class SpriteBank {
  * swarm 1.99 / drift 1.54 / dash 0.55，于是"一条 2:1 的长鱼被压成方块"，
  * 玩家看到的是"黑块"，认不出是鱼。
  *
- * `trim = false` + `rect` 才是**含透明边的原图尺寸**，与 web 的
- * `texture.source[0].width/height` 等价；用 `originalSize` 在开了 trim 时
- * 会得到裁剪后的尺寸，比例就错了。
+ * ⚠️ **必须取 `originalSize`，不能取 `rect`（2026-10-14 修正）。**
+ *
+ * 两者口径本就不同，且这段注释原先写反了方向：
+ *   · `rect` = **裁剪后**的矩形。素材导入 meta 默认 `trimType: auto`，
+ *     所以它**小于** `originalSize`（stub 实测 `item_gun`：rect 344×264 vs original 600×300）。
+ *   · `originalSize` = **整张画布**，正是 `Sprite.trim = false` 时引擎算顶点用的尺寸。
+ *
+ * 我们渲染时设的是 `trim = false` + `sizeMode = CUSTOM` + `setContentSize(…)`，
+ * 顶点按 `originalSize` 铺满 contentSize ⇒ 比例也**必须**用 `originalSize` 算。
+ * 用 `rect` 会出现"分子分母来自两张不同尺寸的图"：
+ * 透明边多的素材（`dash.png` 上下鳍撑得很开）rect 比例被裁成 0.55，
+ * 而渲染的是 1.55 的整张图 ⇒ 屏幕上被拉成一块**竖长的方块**。
+ * 这正是用户 2026-10-14 报的"鱼看起来是一坨方块"。
+ *
+ * ⚠️ 同一个坑 `Hud.putArt` 已经踩过一次（那边结论就是"必须用 `originalSize`"）——
+ *    这次是它在敌人贴图路径上的复发。**凡是要拿素材比例的地方，口径只有 `originalSize` 一个。**
  */
 export function frameAspect(sf: SpriteFrame): number {
-  const w = sf.rect.width
-  const h = sf.rect.height
+  const w = sf.originalSize.width
+  const h = sf.originalSize.height
   return h > 0 ? w / h : 1
 }
