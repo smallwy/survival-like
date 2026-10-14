@@ -395,6 +395,23 @@ export const RELIC_DEF: Record<RelicId, RelicDef> = {
  * 常规走位（约 6~7 成拾取率）：0.83 → 0.79 → 0.73 → 0.67 → 0.64
  *
  * ⚠️ 改 LAYER_WAVES 时每层 4 波的总时长必须各自保持 **156s**。
+ *
+ * ---------------------------------------------------------------------------
+ * `tint` / `vis` 的口径（V6.51 §2.2 / §2.3，2026-10-14 重定）
+ * ---------------------------------------------------------------------------
+ * 这两个字段**只被渲染层消费**（全仓已搜：`drawVeil` 的色调/压暗/暗角 + `drawEnemies`
+ * 的 `darkLayer` 分支），**不参与任何模拟** ⇒ 改它们不会动到弹道 / 碰撞 / 氧气。
+ *
+ * 规则从旧版的「**去饱和到黑**」改成「**转色相保饱和**」：
+ *   · 旧值 L3 `0x14203c` / L4 `0x3a1a10` / L5 `0x0a0614` 全是「越来越黑」，
+ *     再叠上压暗层 ⇒ 深层屏幕中央实测亮度 ≈ 9（黑屏），玩家看不见生物。
+ *   · 新值按每一带的**光的主角**定色相：L3 青紫（生物荧光）/ L4 橙红（热泉自发光）/
+ *     L5 靛蓝（**不是黑** —— 深渊要有颜色，只是暗）。
+ *
+ * `vis` 是**能见度**（只喂压暗与暗角强度），旧值一路降到 0.10 ⇒ 压暗几乎拉满。
+ * 新值整体抬高（L2 0.92 / L3 0.68 / L4 0.60 / L5 0.46）：**暗要靠"雾"而不是靠"黑"**
+ * （见 DiveGame.ts 的 `drawFog`）。⚠️ 抬 `vis` = 减压暗 ⇒ 背景图会更显底噪，
+ * 所以它与 env 图重出（`docs/资源重出规格_V6.58.md`）是同一件事的两半。
  */
 export const LAYERS: LayerDef[] = [
   // L1 阳光带：教学层，**不给机制**
@@ -403,20 +420,20 @@ export const LAYERS: LayerDef[] = [
     ventPush: 0,  current: 0,  pressure: 0,    surge: false, tint: 0x2a6f8a, motes: 34,  hpMul: 1.00, cntMul: 1.00, dashMul: 0.5, driftRatio: 0.00 },
   // L2 弱光带：**暗流**
   { name: '弱光带', sub: 'TWILIGHT', mech: '暗流', tip: '水流在缓慢旋转，鱼群和你都会被带偏',
-    o2Max: 100, drain: 1.35, dropCap: 90,  toll: 20, vis: 0.80, depthTop: 200,   depthBot: 1000,
-    ventPush: 0,  current: 34, pressure: 0,    surge: false, tint: 0x1d5a5a, motes: 48,  hpMul: 1.35, cntMul: 1.25, dashMul: 1.0, driftRatio: 0.12 },
+    o2Max: 100, drain: 1.35, dropCap: 90,  toll: 20, vis: 0.92, depthTop: 200,   depthBot: 1000,
+    ventPush: 0,  current: 34, pressure: 0,    surge: false, tint: 0x1d6b7a, motes: 48,  hpMul: 1.35, cntMul: 1.25, dashMul: 1.0, driftRatio: 0.12 },
   // L3 午夜带：**涌流**
   { name: '午夜带', sub: 'MIDNIGHT', mech: '涌流', tip: '它们从同一个方向压上来 —— 退路只有一条',
-    o2Max: 85,  drain: 1.80, dropCap: 110, toll: 25, vis: 0.40, depthTop: 1000,  depthBot: 4000,
-    ventPush: 0,  current: 0,  pressure: 0,    surge: true,  tint: 0x14203c, motes: 70,  hpMul: 1.80, cntMul: 1.50, dashMul: 1.1, driftRatio: 0.18 },
+    o2Max: 85,  drain: 1.80, dropCap: 110, toll: 25, vis: 0.68, depthTop: 1000,  depthBot: 4000,
+    ventPush: 0,  current: 0,  pressure: 0,    surge: true,  tint: 0x352f6b, motes: 70,  hpMul: 1.80, cntMul: 1.50, dashMul: 1.1, driftRatio: 0.18 },
   // L4 热泉带：**热泉**
   { name: '热泉带', sub: 'HYDROTHERMAL', mech: '热泉', tip: '上升的热流会顶开你 —— 停不住',
-    o2Max: 70,  drain: 2.40, dropCap: 135, toll: 30, vis: 0.25, depthTop: 4000,  depthBot: 6000,
-    ventPush: 190, current: 0, pressure: 0,   surge: false, tint: 0x3a1a10, motes: 90,  hpMul: 2.40, cntMul: 1.80, dashMul: 1.2, driftRatio: 0.15 },
+    o2Max: 70,  drain: 2.40, dropCap: 135, toll: 30, vis: 0.60, depthTop: 4000,  depthBot: 6000,
+    ventPush: 190, current: 0, pressure: 0,   surge: false, tint: 0x7a3a16, motes: 90,  hpMul: 2.40, cntMul: 1.80, dashMul: 1.2, driftRatio: 0.15 },
   // L5 深渊带：**压力**
   { name: '深渊带', sub: 'THE ABYSS', mech: '压力', tip: '每过一波，舱体再压掉一截氧气上限',
-    o2Max: 60,  drain: 3.00, dropCap: 160, toll: 0,  vis: 0.10, depthTop: 6000,  depthBot: 11000,
-    ventPush: 0,  current: 0,  pressure: 0.06, surge: false, tint: 0x0a0614, motes: 110, hpMul: 3.20, cntMul: 2.10, dashMul: 1.3, driftRatio: 0.22 },
+    o2Max: 60,  drain: 3.00, dropCap: 160, toll: 0,  vis: 0.46, depthTop: 6000,  depthBot: 11000,
+    ventPush: 0,  current: 0,  pressure: 0.06, surge: false, tint: 0x1a1740, motes: 110, hpMul: 3.20, cntMul: 2.10, dashMul: 1.3, driftRatio: 0.22 },
 ]
 
 /**

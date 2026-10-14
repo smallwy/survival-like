@@ -166,6 +166,35 @@ interface SchoolFish {
   /** 目标不透明度。**硬上限 0.30**（0.35 已接近敌人剪影的可见度） */
   alpha: number
 }
+
+// ---------------------------------------------------------------------------
+// 光照层的四个元素（V6.59，V6.51 §4.2–§4.5）
+// ---------------------------------------------------------------------------
+/**
+ * 丁达尔光柱的一条（§4.2）。**参数在换带时整批重建**，位置与倾角每帧按 `w.t` 摆动。
+ * 只有 `x` 与底宽 `w` 两个量 —— 亮度由 `w` 反推（**越窄越亮**），不另存一份。
+ */
+interface Beam { x: number; w: number }
+
+/**
+ * 荧光链（§4.3）。锚点缓慢下沉 + 摆动，`pts` 是**相对锚点**的偏移。
+ * 形态是"链"不是"亮一点的点" —— 3–7 个点串成一串才读得出生物。
+ */
+interface FluoChain {
+  x: number; y: number
+  pts: Array<{ dx: number; dy: number }>
+  /** 呼吸相位。每串独立 ⇒ 整屏不同步（同步读作"脉动 bug"）*/
+  ph: number
+  /** 用青绿副色（20%）*/
+  warm: boolean
+}
+
+/** 热泉烟柱（§4.4）：从下方升起、向上扩散的絮状柱 */
+interface Vent { x: number; y: number; w: number; ph: number }
+
+/** 深渊呼吸点阵的一颗（§4.5）*/
+interface AtmoDot { x: number; y: number; r: number; ph: number; halo: boolean }
+
 /** 贴图池里的一条：`key` 让它能被同种敌人复用（与 web 的 fishPool 同构） */
 interface Fish { sp: Sprite; key: string }
 /**
@@ -266,6 +295,101 @@ const ATM_FISH_ALPHA: ReadonlyArray<readonly [number, number]> = [
 ]
 
 // ===========================================================================
+// 光的主权转移（V6.51 §4，2026-10-14 落 V6.59）
+// ===========================================================================
+/**
+ * 大气层的**质量档**（V6.51 §8.2）。低端机只能整体砍这一层，必须留旋钮。
+ *
+ * `2` = 全开
+ * `1` = 关掉"光晕环 / 呼吸环"（L5 点阵光晕、L4 烟柱外段、L3 荧光链光晕）≈ −45 图元
+ * `0` = 只留 鱼群 + 探照灯 + 雾（≈ −160 图元）
+ *
+ * ⚠️ **降级不许动鱼群与探照灯** —— 一个是用户直接点名要的（"不同水域要有海生物、鱼群"），
+ *    一个是"我能看见"的因果来源。砍了它们，这一层就没有存在理由了。
+ *
+ * ⚠️ 显式标 `: number`：不标的话 TS 会把它推成字面量类型 `2`，
+ *    于是下面 `ATMO_QUALITY === 0` 这类判断会报 TS2367（"没有重叠"）。
+ *    它是**旋钮**，本来就该是 `number`。
+ */
+const ATMO_QUALITY: number = 2
+
+// ---- 玩家探照灯（§4.7）----
+/**
+ * 探照灯颜色。冷白但**不是纯白** —— 纯白在深色水里读作"UI 元素"，
+ * 玩家会以为那是可交互的东西。
+ */
+const LAMP_COLOR = 0xbff4ff
+/** 探照灯**基准半径**（屏幕 px）。越深越聚焦 ⇒ L5 = 96 */
+const LAMP_R = 140
+/** 每带收缩步长：`LAMP_R - LAMP_STEP × layerIdx` ⇒ L1 140 → L5 96 */
+const LAMP_STEP = 11
+/**
+ * 探照灯的**淡入深度区间**（`depthM`，m）：120 → 600 线性 0→1。
+ *
+ * L1 是白天（顶光还在），灯亮着反而假；L2 起才是"光不够了，我把灯打开"。
+ * 用深度而不是带的索引 —— 带是离散的，深度是连续的，淡入才不会有台阶。
+ */
+const LAMP_D0 = 120
+const LAMP_D1 = 600
+
+// ---- 能见度雾（§4.6）----
+/**
+ * 各带的**能见度半径**（屏幕 px）。`0` = 该带不画。
+ *
+ * ⚠️ 这里是"雾"而不是"黑"：**雾是亮的暗，黑是暗的暗**。
+ *    玩家看到黑幕会认为"我瞎了"；看到浑浊的**同色**雾才会认为"我看不了太远"
+ *    —— 后者才是潜水感。所以雾取当前带的 `tint`，绝不取 `UI.abyss`。
+ */
+const FOG_R = [0, 640, 480, 380, 300]
+/** 同心环带数（§4.6 原写「8 环」）。**实测加到 12** ——
+ *  8 环在 1304×749 上每环跨 ~75px，环与环之间的 alpha 台阶**肉眼可见**
+ *  （`tools/preview_lights.py` 的合成图直接看出来了）。12 环仍是 12 个图元，代价可忽略。
+ *  ⛔ 仍然禁用径向渐变（会被反复叠加成死黑）—— 环带每像素只覆盖一次。 */
+const FOG_BANDS = 12
+/** 最外圈的峰值不透明度。内圈几乎为 0 —— 幂曲线才能拉开"近处清、远处浊"，
+ *  又不会在 `rIn` 处留下一条硬边（线性会留下一条可见的圆环）。 */
+const FOG_ALPHA = 0.22
+
+// ---- 丁达尔光柱（仅 L1 / L2，§4.2）----
+/** 光柱条数（§4.2「4–6 条」）。取**下限 4** —— 5–6 条在 1304 宽上会把画面铺满，
+ *  读作"一片光幕"而不是"几道透下来的光柱"（预览图实测）。**宽度必须不等**，等宽读作栅栏 */
+const BEAM_N = 4
+/** 光柱倾角基准（弧度 ≈ 18°；§4.2 取 14°–22°）*/
+const BEAM_TILT = 0.314
+/** 摆动周期（s）。**不能静止 —— 静止读作贴图** */
+const BEAM_SWAY_T = 11
+/** 光柱随 `depthM` 淡出：900 → 1200 归零（再深就照不进太阳了）*/
+const BEAM_D0 = 900
+const BEAM_D1 = 1200
+
+// ---- 生物荧光群（仅 L3，§4.3）----
+/** 荧光链条数（§4.3「6–8 串」）*/
+const FLUO_CHAINS = 7
+/** 主色 · 青紫 */
+const FLUO_COLOR = 0xa88cff
+/** 20% 用青绿打破单一 —— 整屏一个色会读作"贴图重复" */
+const FLUO_COLOR2 = 0x6ff0d0
+
+// ---- 热泉烟柱（仅 L4，§4.4）----
+/** 烟柱条数 */
+const VENT_N = 6
+/** 核心色（暖）*/
+const VENT_HOT = 0xff8a3c
+/** 外缘色（浊）*/
+const VENT_EDGE = 0x8a3a18
+
+// ---- 深渊呼吸点阵（仅 L5，§4.5）----
+/** 点阵颗数 */
+const DOTS_N = 48
+/**
+ * 点阵的**同步呼吸周期**（s）。3.2 与主循环 14.4 取**非整数比**（4.5）——
+ * 与其它周期同步会读作"画面在闪"，非整数比才读作"底下有个巨大的东西在呼吸"。
+ */
+const DOTS_PERIOD = 3.2
+/** 点阵避开屏幕中央的半径（px）—— 给战斗留一块干净区域 */
+const DOTS_SAFE_R = 260
+
+// ===========================================================================
 // 下潜滚动与换带（V6.52 §3.1 / §3.2 / §3.3，2026-10-14 落 V6.56）
 // ===========================================================================
 /**
@@ -274,6 +398,10 @@ const ATM_FISH_ALPHA: ReadonlyArray<readonly [number, number]> = [
  * V6.52 §3.2：现状 `vy = 6~20` 慢了一个数量级 —— 屏幕上几乎看不出在动，
  * 所以"我在下潜"这件事**只有深度数字在说**，画面不说。46 px/s 是
  * "一眼能看出在动、又不至于晕"的档位（≈ 屏幕高的 6%/s，13s 扫过一屏）。
+ *
+ * ⚠️ **符号约定（极易写反）**：`scrollV` 恒为**正数**，消费者一律用 **`y -= scrollV × …`**
+ *    —— sim 坐标 y 向下，只有"减小"才是**向上掠过**。写成 `y += …` 会得到
+ *    "颗粒往下飘"（= 上浮），与下潜完全相反，且**不报任何错**（V6.56 踩过一次）。
  */
 const SCROLL_BASE = 46
 /**
@@ -514,9 +642,27 @@ export class DiveGame extends Component {
   private readonly fxBitPool: Fish[] = []
   private floatSlots: Array<FloatFx | null> = new Array(FLOAT_CAP).fill(null)
   private motes: Mote[] = []
-  /** 远景鱼群（V6.53）。换带时整批重建（靠 `schoolLayer` 变号触发） */
+  /** 远景鱼群（V6.53）。换带时整批重建（靠 `atmoLayer` 变号触发） */
   private schools: SchoolFish[] = []
-  private schoolLayer = -1
+  /**
+   * 光照层当前所在带（`-1` = 还没构建过）。**四个元素一起按它重建** ——
+   * 它们的参数全都与带绑定（光柱只在 L1/L2、荧光只在 L3…），分开各记一个
+   * "构建过哪一带"迟早会出现"鱼群换了、光柱没换"这种半新半旧的状态。
+   */
+  private atmoLayer = -1
+
+  // ---- 光照层的四个元素（V6.59）----
+  // 时间基准统一用 `w.t`（世界时间，秒）而不是另开一个本地累加器：
+  //   `w.t` 在暂停时不推进 ⇒ 呼吸 / 摆动 / 摆尾**一起冻住**，与"暂停画面停住"的语义一致。
+  //   自己再累一个计数器，只会做出"暂停时鱼尾不动、光却还在呼吸"的分裂状态。
+  /** 丁达尔光柱（§4.2，仅 L1/L2）*/
+  private beams: Beam[] = []
+  /** 生物荧光链（§4.3，仅 L3）*/
+  private fluo: FluoChain[] = []
+  /** 热泉烟柱（§4.4，仅 L4）*/
+  private vents: Vent[] = []
+  /** 深渊呼吸点阵（§4.5，仅 L5）*/
+  private dots: AtmoDot[] = []
   /** 表现层计时器（鱼雷气泡尾迹的正弦摆动等用；与 sim 的时间无关） */
   private fxT = 0
   /** 本帧的受击白闪（drawEnemies 登记 → drawFx 消费，见 FlashMark 的注释） */
@@ -1951,8 +2097,11 @@ export class DiveGame extends Component {
 
     // ---- 海雪 / 悬浮物（V6.50 §3.2 + V6.53 + V6.56）----
     // 四条，缺一条就读不出"在往下走"：
-    //   ① **提速**：原 `vy = 6~20 px/s` 方向是对的（向上掠 = 下潜感），但**慢一个数量级**，
-    //      屏幕上几乎看不出在动 ⇒ "我在下潜"只有深度数字在说、画面不说。
+    //   ① **提速**：原 `vy = -6~-20 px/s` 方向是对的（**负值** = y 减小 = 向上掠 = 下潜感），
+    //      但**慢一个数量级**，屏幕上几乎看不出在动 ⇒ "我在下潜"只有深度数字在说、画面不说。
+    //      ⚠️ **符号千万别丢**：V6.56 重写时写成 `m.y += +scrollV`（正值），
+    //      在 sim 坐标（**y 向下**）里就是把颗粒推向**屏幕下方** —— 视觉上变成"上浮"，
+    //      与"下潜"正好相反，而且不报任何错。判据只有一条：**`SCROLL_BASE` 正数 ⇒ 用 `-=`**。
     //   ② **三层视差**：远景（背景图）静止 / 中景 0.35× / 近景 1.00×。**视差本身就是深度线索**。
     //   ③ **数量走 `LAYERS.motes`**（34/48/70/90/110）：越深越密。原值写死 60。
     //   ④ **速度走 `scrollV`**（V6.56）：这样换带爆冲能**同时**推快整片水，
@@ -1963,8 +2112,9 @@ export class DiveGame extends Component {
     while (this.motes.length > want) this.motes.pop()
     const mul = MOTE_MUL[w.layerIdx] ?? MOTE_MUL[0]
     for (const m of this.motes) {
-      m.y += (m.far ? mul[1] : mul[0]) * this.scrollV * m.jit * dt
-      // ⚠️ 回绕必须**双向**：L4 的颗粒是往下走的（`MOTE_MUL` 里的负数），
+      // **减号**：`scrollV > 0` ⇒ y 减小 ⇒ 颗粒向上掠过（见上方 ① 的符号说明）
+      m.y -= (m.far ? mul[1] : mul[0]) * this.scrollV * m.jit * dt
+      // ⚠️ 回绕必须**双向**：L4 的颗粒是往下走的（`MOTE_MUL` 里的负数 ⇒ y 增大），
       //    只判 `y < -4` 会让它们在屏幕下方越积越多，最后糊成一条静止的亮带。
       if (m.y < -4) { m.y = this.H + 4; m.x = Math.random() * this.W }
       else if (m.y > this.H + 4) { m.y = -4; m.x = Math.random() * this.W }
@@ -1991,8 +2141,13 @@ export class DiveGame extends Component {
   /**
    * 环境色调 + 压暗 + 暗角 + 屏幕边框。
    *
-   * 数值全部来自 web：色调 0.10（只是把背景图的色相往 UI 色系拉一点，压死画面就废了）、
-   * 压暗 `(1 - vis) × 0.42`、暗角 18 环 `pow(1 - i/18, 2.4) × strength`。
+   * V6.51 §2.3 重定：**光改由 `gAtmo` 提供，压暗层必须让位**。
+   *   · 色调 `0.10 → 0.16`（0.10 太淡，色相跳变根本读不出来）；
+   *   · 压暗 `(1-vis)×0.42 → ×0.24`；
+   *   · 暗角 `0.16+(1-vis)×0.72 → 0.10+(1-vis)×0.42`。
+   * 旧值是一路压到黑（L5 屏幕中央实测亮度 ≈ 9）—— 那是"我瞎了"，不是"深水"。
+   * 暗要改由 `drawFog` 的同色雾来表达（**亮的暗 ≠ 暗的暗**）。
+   *
    * 暗角必须用**同心环带**而不是径向渐变：环带每像素只画一次，渐变会被反复叠加成死黑。
    */
   private drawVeil(w: DiveWorld): void {
@@ -2003,14 +2158,14 @@ export class DiveGame extends Component {
     const L = w.layer()
     const z = this.zoom > 0 ? this.zoom : 1
 
-    this.gVeil.fill(L.tint, 0.10); this.gVeil.fillRect(vr.x, vr.y, vr.w, vr.h)
-    this.gVeil.fill(UI.abyss, (1 - L.vis) * 0.42); this.gVeil.fillRect(vr.x, vr.y, vr.w, vr.h)
+    this.gVeil.fill(L.tint, 0.16); this.gVeil.fillRect(vr.x, vr.y, vr.w, vr.h)
+    this.gVeil.fill(UI.abyss, (1 - L.vis) * 0.24); this.gVeil.fillRect(vr.x, vr.y, vr.w, vr.h)
 
     // 暗角：环带宽度按 zoom 折算，这样放大后屏幕上的视觉宽度保持一致
     const BANDS = 18
     const band = Math.min(vr.w, vr.h) / BANDS
     const descBoost = w.phase === 'descending' ? 0.38 : 0
-    const strength = 0.16 + (1 - L.vis) * 0.72 + descBoost
+    const strength = 0.10 + (1 - L.vis) * 0.42 + descBoost
     for (let i = 0; i < BANDS; i++) {
       const o = i * band
       const e = o + band
@@ -2050,16 +2205,17 @@ export class DiveGame extends Component {
   }
 
   /**
-   * **光照与生态层**（V6.53）。
+   * **光照与生态层**（V6.53 建层 / V6.59 补全六元素）。
    *
    * 为什么单独一层：**"越深越黑"物理上正确、游戏上是死路** —— 玩家需要"看得见水里有东西"，
    * 而不是"一团黑"。所以每一带换一个「光的主角」来替代被减掉的亮度：
-   *   L1 阳光 → L2 残光 → L3 生物荧光 → L4 热泉 → L5 探照灯 + 呼吸点阵。
+   *   L1 阳光光柱 → L2 残光 + 探照灯登场 → L3 生物荧光 → L4 热泉自发光 → L5 探照灯 + 呼吸点阵。
    * 详见 `docs/水域光照与生态规格_V6.51.md`。
    *
-   * v1 只落**远景鱼群剪影**这一件事（用户点名："不同水域要有海生物、鱼群"）。
-   * 探照灯 / 能见度雾 / 荧光群按 §9 的落地顺序排在后面 —— 一次改太多，
-   * 实机出问题时分不清是哪一块的账。
+   * ⚠️ **这里的绘制顺序 = 物理顺序**，不是"想到哪画到哪"：
+   *     ① 远景鱼群（最远）→ ② 能见度雾（压水体，**不压光源**）→ ③ 探照灯 + 按带光源
+   *     → ④ 换带过渡（扫带 / 水压环，压全场）。
+   *   把光源画到雾**下面** = 屏幕边缘的光柱被雾掐掉一半，看起来像渲染 bug（§3.2）。
    *
    * ⚠️ 鱼群**绝不给 2px 发光核**（那是敌人的定位铁律，见 `drawEnemies`）：
    *    远景剪影不可瞄准、不碰撞，给了核玩家会朝打不到的鱼开火。
@@ -2069,15 +2225,28 @@ export class DiveGame extends Component {
     if (w.phase === 'shop' || w.phase === 'decide' || w.phase === 'result') return
 
     const idx = Math.min(LAYER_ECO.length - 1, w.layerIdx)
-    if (this.schoolLayer !== idx) this.buildSchools(idx)
+    if (this.atmoLayer !== idx) this.buildAtmo(idx)
 
-    // 鱼群与水**同一个速度场**（中景档）。换带爆冲时它也跟着窜 ——
-    //   否则"颗粒在往上冲、鱼却钉在原地"，一看就是两个世界的东西。
+    this.drawSchools(w, idx, dt)
+    this.drawFog(w)
+    this.drawLamp(w)
+    this.drawLayerLights(w, idx, dt)
+    this.drawScanBand(w)
+    this.drawPressureRings()
+  }
+
+  /**
+   * **远景鱼群剪影**（V6.53）。用户点名要的「不同水域要有海生物、鱼群」。
+   *
+   * 与水**同一个速度场**（中景档）。换带爆冲时它也跟着窜 —— 否则
+   * "颗粒在往上冲、鱼却钉在原地"，一看就是两个世界的东西。
+   * ⚠️ 纵向同样是 **`-=`**（见 `SCROLL_BASE` 的符号约定）：L4 的 `mul[1]` 是负数 ⇒ 鱼群下沉。
+   */
+  private drawSchools(w: DiveWorld, idx: number, dt: number): void {
     const mul = MOTE_MUL[idx] ?? MOTE_MUL[0]
-
     for (const f of this.schools) {
       f.x += f.vx * dt
-      f.y += mul[1] * this.scrollV * dt
+      f.y -= mul[1] * this.scrollV * dt
       f.fade = Math.min(1, f.fade + dt / 0.6)     // 渐入（换带时不能"啪"地出现）
       // 两侧回绕：比"出屏销毁 + 重新生成"省事，也不会出现鱼群凭空冒出来
       const wrap = f.size * 1.6
@@ -2101,9 +2270,216 @@ export class DiveGame extends Component {
       this.gAtmo.fillTri(f.x - s * L * 0.48, f.y + swing,
         s > 0 ? Math.PI : 0, L * 0.42, h * 0.5)
     }
+  }
 
-    this.drawScanBand(w)
-    this.drawPressureRings()
+  /**
+   * **能见度雾**（V6.51 §4.6，全带）。
+   *
+   * ⚠️ **靠"雾"而不是靠"黑"**：雾取**当前带的 `tint`**，绝不取 `UI.abyss`。
+   *   「亮的暗」读作"我看不了太远"（这才是潜水感）；「暗的暗」读作"我瞎了"。
+   *   这条与 `drawVeil` 里**减半**的压暗是配套的 —— 压暗让位给雾。
+   *
+   * 半径随深度收（L1 无限 → L5 300px），**中心只给摄像头**（不是玩家）：
+   *   玩家被镜头跟着，两者本就几乎重合；但玩家贴世界边界时镜头会被钳住，
+   *   此时以玩家为中心会让雾圈整个甩到屏幕一侧（一闪一闪的）。
+   *
+   * ⛔ **禁用径向渐变**（项目已有教训：渐变被反复叠加成死黑）⇒ 用**同心环带**：
+   *   每像素只被一条环带覆盖一次，不叠加。
+   */
+  private drawFog(w: DiveWorld): void {
+    const idx = Math.min(FOG_R.length - 1, w.layerIdx)
+    const r0 = FOG_R[idx]
+    if (r0 <= 0 || ATMO_QUALITY === 0) return      // L1 是白天：能见度无限
+    const vr = this.viewRect()
+    const z = this.zoom > 0 ? this.zoom : 1
+    const rIn = r0 / z                              // 规格给的是**屏幕 px** ⇒ 折回世界单位
+    const rOut = Math.hypot(vr.w, vr.h) * 0.55     // 覆盖到屏幕四角（略超，免得边角漏）
+    const band = Math.max(20, (rOut - rIn) / FOG_BANDS)
+    const cx = vr.x + vr.w / 2
+    const cy = vr.y + vr.h / 2
+    const tint = w.layer().tint
+    for (let i = 0; i < FOG_BANDS; i++) {
+      const k = (i + 0.5) / FOG_BANDS
+      // 内圈几乎为 0（近处是清的）→ 外圈最浊。
+      // ⚠️ 用 `k^1.6` 而**不是** `k^2`：平方在 `rIn` 附近的斜率太小、在外圈又太大，
+      //    结果是一条可见的硬边 + 外圈糊成一片。幂 1.6 两头都平。
+      const a = FOG_ALPHA * Math.pow(k, 1.6)
+      this.gAtmo.line(tint, a, band + 2)
+      this.gAtmo.strokeCircle(cx, cy, rIn + band * (i + 0.5))
+    }
+  }
+
+  /**
+   * **玩家探照灯**（V6.51 §4.7，L2 起）。
+   *
+   * 它是「我能看见」的**因果来源**：没有它，深水就是"环境本身很亮"；
+   * 有了它才是"**我在**照亮环境"。
+   *
+   * 半径随带收缩（140 → 96）：越深越聚焦 —— 这不是物理，是**叙事**
+   * （光够不到那么远了）。淡入走 `depthM` **连续插值**而不是带的索引：
+   * 带是离散的，用索引一定会有台阶（L1 是白天不需要灯，L2 起逐渐登场）。
+   *
+   * ⚠️ **每个圆用同一个 alpha 由外向内叠**，而不是"每档算一个 alpha"：
+   *   前者每个像素被覆盖的次数 = 它到中心之间有几层 ⇒ alpha 平滑爬升；
+   *   后者会在深底上显出一圈圈**靶环**（`tools/preview_lights.py` 的合成图里当场看见，
+   *   5 档 alpha 之间的 0.045 台阶肉眼可辨）。这条与 `drawFog` 的环带**相反** ——
+   *   雾要空心的中心（近处不挡），灯要实心的中心（近处最亮）。
+   *
+   * ⚠️ 与 V6.42 删掉的「主界面探照锥」**不是一回事**：那个是装饰性锥形，
+   *   这个是功能性的同心光晕 —— 语义与位置都不同，不是复活旧设计。
+   */
+  private drawLamp(w: DiveWorld): void {
+    const k = clamp1((w.depthM - LAMP_D0) / (LAMP_D1 - LAMP_D0), 0, 1)
+    if (k <= 0.01) return                            // L1 是白天：不需要灯
+    const z = this.zoom > 0 ? this.zoom : 1
+    const R = (LAMP_R - LAMP_STEP * w.layerIdx) / z
+    const bands = ATMO_QUALITY >= 1 ? 8 : 5
+    for (let i = 0; i < bands; i++) {
+      this.gAtmo.fill(LAMP_COLOR, 0.030 * k)
+      this.gAtmo.fillCircle(w.px, w.py, R * (1 - i / bands))
+    }
+  }
+
+  /**
+   * **按带互斥的「光的主角」**（V6.51 §4.2–§4.5）。
+   *
+   * 关键：这四组**同一时刻只开一组** —— 这正是图元预算守得住的原因
+   * （最坏 L5 = 105 图元 ≈ 基线 +9.5%，见 §8.1）。L1/L2 共用光柱
+   * （L2 的"残光"就是更淡的同一件事，只是随 `depthM` 淡出）。
+   */
+  private drawLayerLights(w: DiveWorld, idx: number, dt: number): void {
+    if (ATMO_QUALITY === 0) return
+    switch (idx) {
+      case 0:
+      case 1: this.drawBeams(w); break
+      case 2: this.drawFluo(w, dt); break
+      case 3: this.drawVents(dt); break
+      case 4: this.drawDots(w); break
+    }
+  }
+
+  /**
+   * **丁达尔光柱**（§4.2，仅 L1/L2）。
+   *
+   * 「浅水」的视觉签名，也是"太阳还在上面"的唯一证据。
+   * 每条 = 3 层不等宽平行四边形（**最宽最淡 / 最窄最亮**）——
+   * ⚠️ **宽度必须有差**：等宽会读作栅栏，这是本轮之前踩过的原话。
+   * 倾角随时间缓慢摆动（**静止读作贴图**），并随 `depthM` 淡出 900→1200。
+   */
+  private drawBeams(w: DiveWorld): void {
+    const fade = 1 - clamp1((w.depthM - BEAM_D0) / (BEAM_D1 - BEAM_D0), 0, 1)
+    if (fade <= 0.01) return
+    const z = this.zoom > 0 ? this.zoom : 1
+    const tilt = BEAM_TILT + Math.sin((w.t / BEAM_SWAY_T) * Math.PI * 2) * 0.035  // ±2°
+    const tan = Math.tan(tilt)
+    const yTop = -80
+    const yBot = this.H + 40
+    for (const b of this.beams) {
+      // **越窄越亮**：宽窄差是"不是栅栏"的一半，亮度差是另一半
+      const bright = 1.35 - (b.w - 34) / 66 * 0.9
+      // ⚠️ 三层**同心嵌套**（宽淡包窄亮）⇒ 合成出来是**一条带软边的光柱**。
+      //    第一版给每层加了 16px 横向偏移，结果读作"三根并排的条纹"（预览图当场看出）。
+      //    "最宽最淡、最窄最亮"说的是**同一根柱子**的内外关系，不是三根柱子。
+      for (let L = 0; L < 3; L++) {
+        const wd = (b.w * (1.45 - 0.32 * L)) / z
+        const a = (0.030 + 0.022 * L) * fade * bright
+        const xTop = b.x - tan * (this.H * 0.5)
+        const dx = wd * 0.5
+        const xBot = xTop + tan * (yBot - yTop)
+        // 平行四边形（`fillRect` 画不出斜的，手工四个点）
+        this.gAtmo.fill(UI.cyanHi, a)
+        this.gAtmo.moveTo(xTop - dx, yTop)
+        this.gAtmo.lineTo(xTop + dx, yTop)
+        this.gAtmo.lineTo(xBot + dx, yBot)
+        this.gAtmo.lineTo(xBot - dx, yBot)
+        this.gAtmo.close()
+        this.gAtmo.fillPath()
+      }
+    }
+  }
+
+  /**
+   * **生物荧光群**（§4.3，仅 L3）。
+   *
+   * L3 的光的主角。**不是"更亮的点"，是"会呼吸的链"** —— 3–7 个点串成一串，
+   * 成串缓慢下沉 + 摆动。整屏一个色会读作"贴图重复"，故 20% 用青绿。
+   *
+   * ⚠️ 每串**独立相位**：同步会读作"整屏在脉动"（那是 bug）。
+   *   （§4.5 的深渊点阵**相反** —— 那里要的就是全场同步。）
+   * ⚠️ 不给每个点画光晕环，靠 alpha 呼吸表达 —— 省 36 个图元。
+   */
+  private drawFluo(w: DiveWorld, dt: number): void {
+    for (const c of this.fluo) {
+      c.y += 11 * dt                                        // 缓慢下沉
+      c.x += Math.sin(w.t * 0.7 + c.ph) * 7 * dt            // 横向微摆（像水里的悬浮物）
+      if (c.y > this.H + 30) { c.y = -30; c.x = Math.random() * this.W }
+      const breathe = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(w.t * 1.7 + c.ph))
+      const hue = c.warm ? FLUO_COLOR2 : FLUO_COLOR
+      for (const p of c.pts) {
+        this.gAtmo.fill(hue, breathe * 0.85)
+        this.gAtmo.fillCircle(c.x + p.dx, c.y + p.dy, 2.2)
+      }
+    }
+  }
+
+  /**
+   * **热泉烟柱**（§4.4，仅 L4）。
+   *
+   * **全场最暖、最亮的地方** —— 深渊题材里最反直觉的视觉反转点（L4 比 L3 亮）。
+   * 每条 = 4 段逐渐放大 + 变淡的椭圆（模拟扩散）。
+   *
+   * ⚠️ 与 V6.50 的"热泉反向颗粒"**配套**：**烟柱向上 + 颗粒被顶住**，
+   *   两者叠起来才是 `ventPush 190` 的完整视觉证据（机制与视觉说同一句话）。
+   * ⚠️ 底部热源辉光**只画一份**（3 环），不是每条一份 —— 图元预算（§8.1）。
+   */
+  private drawVents(dt: number): void {
+    for (const v of this.vents) {
+      // 热流向上、且比海雪更快更浊（颗粒被顶住，烟柱照冲）
+      v.y -= 62 * dt
+      if (v.y < -80) { v.y = this.H + 80; v.x = Math.random() * this.W }
+      // ⚠️ **段间距必须小于椭圆自身高度**，否则 4 段读作 4 个独立的橙色飞碟
+      //   （`preview_lights.py` 的第一版就是这个症状：间距 2.6w vs 半高 0.25w）。
+      //   收紧到 0.55w + 加高椭圆 ⇒ 4 段互相吃到，才连成一根**柱**。
+      for (let i = 0; i < 4; i++) {
+        const k = i / 3
+        const yy = v.y - k * v.w * 0.55
+        const rr = v.w * (0.52 + k * 0.95)
+        this.gAtmo.fill(i < 2 ? VENT_HOT : VENT_EDGE, 0.15 - 0.11 * k)
+        this.gAtmo.fillEllipse(v.x + Math.sin(v.ph + k * 2.1) * 7, yy, rr, rr * 0.72)
+      }
+    }
+    if (ATMO_QUALITY >= 1) {
+      const gy = this.H - 20
+      for (let i = 0; i < 3; i++) {
+        this.gAtmo.fill(VENT_HOT, 0.09 - i * 0.025)
+        this.gAtmo.fillEllipse(this.W / 2, gy + i * 16, 380 - i * 100, 26 - i * 6)
+      }
+    }
+  }
+
+  /**
+   * **深渊呼吸点阵**（§4.5，仅 L5）。
+   *
+   * L5 的光的主角。**全场点阵同步明灭**（周期 3.2s）。周期与主循环 14.4s、
+   * 与荧光链的呼吸都取**非整数比** ⇒ 四种周期永远错开，读作
+   * "底下有个巨大的东西在缓缓动着"，而不是"画面在闪"。
+   * ⚠️ 点阵**避开中央** `DOTS_SAFE_R`：那是战斗区，不该有东西干扰可读性。
+   */
+  private drawDots(w: DiveWorld): void {
+    const pulse = 0.5 + 0.5 * Math.sin((w.t / DOTS_PERIOD) * Math.PI * 2)
+    const base = 0.10 + 0.55 * pulse
+    for (const d of this.dots) {
+      const a = base * (0.7 + 0.3 * Math.sin(w.t * 1.3 + d.ph))
+      // 20% 的颗给 3 环渐隐光晕 —— 制造"那个大的东西就在那里"的错觉（成本 3 图元/个）
+      if (d.halo && ATMO_QUALITY >= 1) {
+        for (let i = 3; i >= 1; i--) {
+          this.gAtmo.fill(UI.cyanHi, a * 0.10 * i)
+          this.gAtmo.fillCircle(d.x, d.y, d.r + i * 3.2)
+        }
+      }
+      this.gAtmo.fill(UI.cyanHi, a)
+      this.gAtmo.fillCircle(d.x, d.y, d.r)
+    }
   }
 
   /**
@@ -2158,14 +2534,28 @@ export class DiveGame extends Component {
   }
 
   /**
-   * 按当前带**整批重建**远景鱼群（V6.53）。
+   * 按当前带**整批重建**光照层的五个元素（V6.53 的 `buildSchools` 升级，V6.59）。
    *
-   * 为什么不增量调整数量：换带时连**种类与尺寸**都变了（L1 是 46 条小鱼，L5 是 3 条巨影），
-   * 逐条改属性反而更绕。整批重建 + `fade` 渐入，读起来就是"换了一片水域"。
-   * ⚠️ 渐入是必须的：换带瞬间 46 条鱼"啪"地出现会读作 bug（用户在意的正是"丝滑"）。
+   * 为什么不增量调整：换带时**连种类与尺寸都变了**（L1 是 46 条小鱼 + 光柱，
+   * L5 是 1–2 条巨影 + 呼吸点阵），逐条改属性反而更绕。整批重建 + 渐入，
+   * 读起来就是"换了一片水域"。
+   *
+   * ⚠️ 渐入是必须的：换带瞬间几十条鱼 / 几十个光点"啪"地出现会读作 bug
+   *    （用户在意的正是"丝滑"）。
+   * ⚠️ 五个元素**共用 `atmoLayer` 一个"已构建"标记** —— 分开各记一个迟早会出现
+   *    "鱼群换了、光柱没换"的半新半旧状态（那种错不报错、只是看着别扭）。
    */
+  private buildAtmo(layerIdx: number): void {
+    this.atmoLayer = layerIdx
+    this.buildSchools(layerIdx)
+    this.buildBeams(layerIdx)
+    this.buildFluo(layerIdx)
+    this.buildVents(layerIdx)
+    this.buildDots(layerIdx)
+  }
+
+  /** 远景鱼群（V6.53）。按带整批重建，`fade` 渐入 */
   private buildSchools(layerIdx: number): void {
-    this.schoolLayer = layerIdx
     const eco = LAYER_ECO[layerIdx]
     const [aLo, aHi] = ATM_FISH_ALPHA[layerIdx] ?? [0.28, 0.48]
     this.schools.length = 0
@@ -2205,6 +2595,87 @@ export class DiveGame extends Component {
           alpha: aLo + Math.random() * (aHi - aLo),
         })
       }
+    }
+  }
+
+  /** 丁达尔光柱（§4.2）：**仅 L1/L2**。宽度必须有差，否则读作栅栏 */
+  private buildBeams(layerIdx: number): void {
+    this.beams.length = 0
+    if (layerIdx > 1) return
+    for (let i = 0; i < BEAM_N; i++) {
+      this.beams.push({
+        // 横向铺开 + 较大抖动：等距会读作**栅栏**（预览图里一眼看出来过）
+        x: this.W * ((i + 0.5 + (Math.random() - 0.5) * 1.1) / BEAM_N),
+        w: 34 + Math.random() * 66,
+      })
+    }
+  }
+
+  /** 生物荧光链（§4.3）：**仅 L3**。3–7 个点串成一串，20% 用青绿副色 */
+  private buildFluo(layerIdx: number): void {
+    this.fluo.length = 0
+    if (layerIdx !== 2) return
+    for (let c = 0; c < FLUO_CHAINS; c++) {
+      const n = 3 + Math.floor(Math.random() * 5)
+      const dir = Math.random() < 0.5 ? -1 : 1
+      const pts: Array<{ dx: number; dy: number }> = []
+      for (let i = 0; i < n; i++) {
+        // 间距 8–18px 并在纵向抖一点 —— 一条笔直的线读作"栅栏"，不是"链"
+        pts.push({
+          dx: dir * i * (8 + Math.random() * 10),
+          dy: (Math.random() - 0.5) * 22,
+        })
+      }
+      this.fluo.push({
+        x: Math.random() * this.W,
+        y: Math.random() * this.H,
+        pts,
+        ph: Math.random() * Math.PI * 2,
+        warm: Math.random() < 0.2,
+      })
+    }
+  }
+
+  /** 热泉烟柱（§4.4）：**仅 L4**。宽 30–90px（要有宽窄差） */
+  private buildVents(layerIdx: number): void {
+    this.vents.length = 0
+    if (layerIdx !== 3) return
+    for (let i = 0; i < VENT_N; i++) {
+      this.vents.push({
+        x: this.W * ((i + 0.5 + (Math.random() - 0.5) * 0.6) / VENT_N),
+        y: Math.random() * this.H,
+        w: 30 + Math.random() * 60,
+        ph: Math.random() * Math.PI * 2,
+      })
+    }
+  }
+
+  /**
+   * 深渊呼吸点阵（§4.5）：**仅 L5**。
+   * ⚠️ 必须避开中央战斗区（`DOTS_SAFE_R`）—— 拒绝采样最多试 8 次，兜底换到外圈。
+   */
+  private buildDots(layerIdx: number): void {
+    this.dots.length = 0
+    if (layerIdx !== 4) return
+    const cx = this.W / 2, cy = this.H / 2
+    for (let i = 0; i < DOTS_N; i++) {
+      let x = 0, y = 0, ok = false
+      for (let t = 0; t < 8; t++) {
+        x = Math.random() * this.W
+        y = Math.random() * this.H
+        if (Math.hypot(x - cx, y - cy) > DOTS_SAFE_R) { ok = true; break }
+      }
+      if (!ok) {
+        const a = Math.random() * Math.PI * 2
+        x = cx + Math.cos(a) * (DOTS_SAFE_R + 40)
+        y = cy + Math.sin(a) * (DOTS_SAFE_R + 40)
+      }
+      this.dots.push({
+        x, y,
+        r: 1.4 + Math.random() * 1.4,
+        ph: Math.random() * Math.PI * 2,
+        halo: Math.random() < 0.2,
+      })
     }
   }
 
@@ -2436,7 +2907,10 @@ export class DiveGame extends Component {
     this.flashMarks.length = 0        // 本帧重新登记（上一帧的已由 drawFx 消费掉）
     const n = w.enemies.length
     const lod = n > 80 ? 2 : n > 40 ? 1 : 0
-    const darkLayer = w.layer().vis < 0.5
+    // ⚠️ 判据用 `layerIdx` 而**不是** `vis < 0.5`：`vis` 是"能见度"（V6.51 §2.3 已整体抬高），
+    //    拿它当"是不是深层"的代理，一改 `vis` 就会把 L3/L4 的可读性兜底悄悄关掉
+    //    （**不报错、只能靠肉眼发现**）。深层 = L3/L4/L5 是设计事实，直接写索引。
+    const darkLayer = w.layerIdx >= 2
 
     for (const e of w.enemies) {
       if (!e.alive) continue
