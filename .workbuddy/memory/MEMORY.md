@@ -6,9 +6,9 @@
 
 | 目录 | 角色 |
 |---|---|
-| `shared/` | ★ **引擎无关单一真源**（数值/模拟核心/美术 key 表/档案逻辑）。改逻辑只改这里 |
-| `shared/dive/artKeys.ts` | ★ "游戏需要哪些美术"的唯一说明（双引擎 + 验证脚本共用） |
-| `web/` | Phaser 3.90 + Vite 原型。**2026-10-13 晚冻结**：新功能直接写 cocos；仅「已有逻辑搬运」仍以 web 为准 |
+| `shared/` | ★ **引擎无关单一真源**（数值表 + 模拟核心 + 美术 key 表 + 档案逻辑）。改逻辑只改这里 |
+| `shared/dive/artKeys.ts` | ★ "游戏需要哪些美术"的唯一说明（两个引擎 + 验证脚本共用） |
+| `web/` | Phaser 3.90 + Vite + TS 原型（**可玩参考 + shared 配置层类型检查兜底**，非权威源）。**2026-10-13 晚冻结**，新功能直接写 cocos |
 | `cocos/` | Cocos Creator 3.8.8 目标工程（分支 `cocos`） |
 | `tools/sync_shared.py` | 真源 → Cocos 副本同步 + 漂移检查（`--check`） |
 | `tools/sync_art.py` | **web → cocos** 美术同步（立绘/道具/环境背景）。⚠️ 环境背景真源在 `web/src/assets/env/L*.webp`，只改 cocos 会被下次同步覆盖 |
@@ -18,16 +18,27 @@
 
 ## 铁规
 
-1. **搬运已有逻辑以 `web/` 当前版本为准，不凭记忆**（背景：曾按旧版 web 多画了 V6.13 已删的"空座+座圈连线"）。web 冻结后此条只适用于搬运，新增功能直接写 cocos。
-2. **顺序：先落文件、再写引用。** Cocos 增量编译解析失败不登记依赖边 ⇒ 新文件晚到 = importer 永久带失败 import = 编辑器全黑而验证全绿。判据在 `cocos/temp/.../resolution-detail-map.json` 的 `__unresolved_*`。
-3. **验证只是"静态可验"的下界。** 全绿之后**必须**在 Creator 里跑 `Dive.scene` 目视确认。
-4. **改 `shared/` 后跑 `python tools/verify_cocos.py`（应 7/7）** —— 主门槛。`cd web && npx tsc --noEmit` 不阻塞放行，但顺手别让 web 烂掉。
-5. **Cocos `Graphics` 无 `translate/rotate/save/restore`**，旋转零件一律手算坐标。配套 `Gfx.arc()`（分段折线，引擎 `arc` 在 y 翻转后方向镜像）、`Gfx.roundRect()`（内部翻 y）。
-6. **椭圆：Phaser 收直径、Cocos 收半径。** 从 `web/src/` 抄 `*Ellipse(w,h)` 一律 `÷2`。
-7. **"没报错 + 图也在" ≠ "画出来了"。** 层序（后建=上层）、`active` 开关是静默失效高发区；任何 `active=false` 的节点重开点必须**每帧执行**或有明确回开事件。
-8. **UI 分层语义**：`scrim()`（半透明暗幕，弹窗）≠ `pageFill()`（不透明铺满，页面）。弹窗底画成 `pageFill` = "全屏、太大"。
-9. **换底色必须同时换文字色**（`TXT` ↔ `TXT_LIGHT`）。
-10. **命名**：中文名目录加数字前缀（字符编码排序是乱的）；归档改名说清关系，**归档≠删除**。
+1. **移植以 `shared/dive` + `cocos` 为准，不凭记忆，也不以 `web/` 为准。** `web/` 是早期 Phaser
+   原型（停在 V6.27、无 L2/炮塔/商店），只作**浏览器手感试纸**与 **shared 配置层类型检查兜底**
+   （`cd web && npx tsc --noEmit` 退出 0 即 shared 配置合法）。新逻辑落 `shared/dive` 与 `cocos`，
+   移植前读 **`cocos/assets/scripts/...` 与 `shared/dive/...` 的当前版本**。
+   已踩：曾按旧版 web 多画了 V6.13 早删除的"空座 + 座圈连线"。
+2. **顺序：先落文件、再写引用。** Cocos 增量编译**解析失败不登记依赖边**，
+   新文件晚到 = importer 永久带着失败 import 躺缓存 = 编辑器全黑而验证全绿。
+   判据在 `cocos/temp/.../resolution-detail-map.json` 的 `__unresolved_*`。
+3. **验证是"静态可验"的下界，不是"画面对"的证明。** 全绿之后**必须**在 Creator 里
+   跑 `Dive.scene` 目视确认。沙箱验不了引擎真实行为与观感。
+4. **左右都要过**：改 `shared/` 后跑 `python tools/verify_cocos.py`（应 7/7）**和**
+   `cd web && npx tsc --noEmit`（退出码 0）—— 真源是双端共用的。
+5. **Cocos `Graphics` 没有 `translate/rotate/save/restore`。** 旋转零件一律手算坐标。
+   配套：`Gfx.arc()`（分段折线，引擎 `arc` 在 y 翻转后方向镜像）、`Gfx.roundRect()`（内部翻 y）。
+6. **椭圆：Phaser 收直径、Cocos 收半径。** 从 Phaser 实现抄任何 `*Ellipse(w,h)` 的值都要 `÷2`。
+7. **"没报错 + 图也在" ≠ "画出来了"。** 层序（后建=上层）、`active` 开关是静默失效高发区。
+   任何 `active=false` 的节点，重开点必须**每帧执行**或有明确的回开事件。
+8. **UI 分层语义**：`scrim()`（半透明暗幕，弹窗用）≠ `pageFill()`（不透明铺满，页面用）。
+   把弹窗底画成 `pageFill` 就是"全屏、太大"。
+9. **换底色必须同时换文字色**（`TXT` ↔ `TXT_LIGHT`），只换底 = 白字白底。
+10. **命名规范**：中文名目录加数字前缀（按字符编码排序是乱的）；归档改名说清关系，**归档≠删除**。
 
 ## 目标平台参数（已定）
 
