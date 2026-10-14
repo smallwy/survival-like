@@ -65,6 +65,14 @@
       "dst_bytes": 142582
     },
     {
+      "src": "fish/armor.png",
+      "dst": "fish/armor.png",
+      "transform": "copy",
+      "src_sha256": "a845543f7aaec8b59902cb84103fb0af14882d03e3de3999e2b2d18ea2c83e72",
+      "dst_sha256": "a845543f7aaec8b59902cb84103fb0af14882d03e3de3999e2b2d18ea2c83e72",
+      "dst_bytes": 276383
+    },
+    {
       "src": "sub/sub_lumen.png",
       "dst": "sub/sub_lumen.png",
       "transform": "copy",

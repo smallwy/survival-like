@@ -72,10 +72,14 @@ _ASSET_RULES: list[tuple[str, str, str]] = [
     ("env/L3.webp", "env/L3.png", "webp2png"),
     ("env/L4.webp", "env/L4.png", "webp2png"),
     ("env/L5.webp", "env/L5.png", "webp2png"),
-    # ---- 三种敌人贴图（key 见 shared/dive/tables.ts ENEMY_TEX）----
+    # ---- 敌人贴图（key 见 shared/dive/tables.ts ENEMY_TEX）----
     ("fish/swarm.png", "fish/swarm.png", "copy"),
     ("fish/drift.png", "fish/drift.png", "copy"),
     ("fish/dash.png", "fish/dash.png", "copy"),
+    # V6.62 第 4 类「重甲」：**必须与 ENEMY_TEX 一一对应** ——
+    #   `artKeys.ts` 从 ENEMY_TEX 推导 key，`verify_cocos` 又要求每个 key 在磁盘上有文件，
+    #   所以"加了敌人类型却忘了加这一行"会在验证阶段直接红，而不是上线才发现少张图。
+    ("fish/armor.png", "fish/armor.png", "copy"),
     # ---- 潜航器机体（正俯视；SUB_ART_PATH 指向其中三张）----
     ("sub/sub_lumen.png", "sub/sub_lumen.png", "copy"),
     ("sub/sub_raia.png", "sub/sub_raia.png", "copy"),

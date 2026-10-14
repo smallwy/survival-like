@@ -95,7 +95,7 @@ import { Title } from './Title'
 import { Codex } from './Codex'
 import { SpriteBank, frameAspect } from './art'
 import { loadProfile, saveProfile } from './save'
-import { DiveWorld } from '../shared/dive/world'
+import { DiveWorld, ANGLER_GEOM } from '../shared/dive/world'
 import { applyRun, defaultProfile, depthLabel, recordLabel } from '../shared/dive/profile'
 import {
   settleProgress, unlockName, perkBonus, filterPool,
@@ -3187,22 +3187,34 @@ export class DiveGame extends Component {
     for (const m of w.mines) {
       if (!m.alive) continue
       const armed = m.arm <= 0
-      const breathe = 0.5 + 0.5 * Math.sin(w.t * 3.1 + m.x * 0.02)
       if (!armed) {
-        // 布防中：暗壳 + 8 段虚线圈
+        // 布防中：暗壳 + 8 段虚线圈（半径按爆炸半径画 —— 那是"待会儿这里会炸多大"）
         this.gBack.fill(0x14232f, 0.8); this.gBack.fillCircle(m.x, m.y, 8)
         this.gBack.line(0x4a7c91, 0.55, 1)
         for (let k = 0; k < 8; k++) {
           const a0 = (k / 8) * Math.PI * 2
-          this.gBack.arc(m.x, m.y, m.trig, a0, a0 + 0.34).stroke()
+          this.gBack.arc(m.x, m.y, m.r, a0, a0 + 0.34).stroke()
         }
       } else {
-        // 已激活：氧青球（三层）+ 呼吸光环 + 高光点（高光让它读作"球"不是"圈"）
-        this.gBack.fill(UI.cyanHi, 0.14 + 0.10 * breathe)
-        this.gBack.fillCircle(m.x, m.y, 14 + breathe * 2)
-        this.gBack.fill(UI.cyanHi, 0.52); this.gBack.fillCircle(m.x, m.y, 8.5)
-        this.gBack.line(UI.cyanHi, 0.24 + 0.16 * breathe, 1.5)
-        this.gBack.strokeCircle(m.x, m.y, 15 + breathe * 4)
+        // ---- 已激活（V6.62 定时引信）----
+        // ⚠️ **倒计时是定时雷区别于踩触发的全部可读性来源**：踩触发靠"敌人靠近"传达，
+        //    定时靠"自己的心跳"传达。所以闪频必须**越接近越急** —— 玩家用余光就能读时钟。
+        const k = clamp1(m.fuse / m.fuseMax, 0, 1)          // 1 = 刚布下 → 0 = 就要爆
+        // 闪周期 0.50s → 0.08s：越接近越急（12 倍频差，一眼可辨）
+        const period = 0.08 + 0.42 * k
+        const beat = 0.5 + 0.5 * Math.sin(w.t * (Math.PI * 2 / period))
+        // 颜色三档：氧青（安全）→ 琥珀（过半）→ 危险红（临爆）
+        const col = k > 0.5 ? UI.cyanHi : (k > 0.2 ? UI.amber : UI.danger)
+        // 爆炸范围圈：**画出来玩家才敢去预判** —— "算好它 1.8 秒后游到哪"要有边界可参照
+        this.gBack.line(col, 0.12 + 0.10 * beat, 1)
+        this.gBack.strokeCircle(m.x, m.y, m.r)
+        // 本体：三层同心 + 呼吸（呼吸幅度随倒计时增大 ⇒ 越接近越"鼓"）
+        const swell = 1 + (1 - k) * 0.5
+        this.gBack.fill(col, (0.14 + 0.10 * beat) * swell)
+        this.gBack.fillCircle(m.x, m.y, 14 + beat * 2 + (1 - k) * 6)
+        this.gBack.fill(col, 0.52 + 0.30 * beat * (1 - k)); this.gBack.fillCircle(m.x, m.y, 8.5)
+        this.gBack.line(col, 0.24 + 0.16 * beat, 1.5)
+        this.gBack.strokeCircle(m.x, m.y, 15 + beat * 4)
         this.gBack.fill(0xffffff, 0.85); this.gBack.fillCircle(m.x - 3, m.y - 3, 2.4)
         // 连锁雷：把射程内的伙伴连起来 —— "它们是一串"必须画出来，
         // 否则玩家只看到一排独立的雷，连锁炸开时会莫名其妙。
@@ -3408,8 +3420,11 @@ export class DiveGame extends Component {
 
     for (const e of w.enemies) {
       if (!e.alive) continue
+      // ⚠️ 鮟鱇女王的 `charge` 是**亮诱饵**（诱捕的诱），不是守望者的"蓄力砸地"（危险的兆）。
+      //    两者共用 `charge` 这个名字只是复用相位机，**表现必须分开**：
+      //    守望者蓄力 → 危险红（该躲了）；鮟鱇张口 → 诱饵亮（该忍住了）。
       const charging = (e.kind === 'dash' && e.phase === 'charge')
-        || (e.kind === 'boss' && e.phase === 'charge')
+        || (e.kind === 'boss' && e.bossKind !== 'angler' && e.phase === 'charge')
       // ⚠️ 本地变量不要叫 `col` —— 会遮蔽从 Gfx 导入的同名颜色构造函数。
       const body = charging ? UI.danger : (e.flash > 0 ? 0xffffff : e.color)
 
@@ -3471,7 +3486,33 @@ export class DiveGame extends Component {
         //   否则同屏 >120 条整体退回矢量时画风突变（贴图是斜着游的鱼、矢量是朝玩家的三角）。
         this.gEnt.fill(body, 0.95)
         if (e.kind === 'boss') this.gEnt.fillCircle(e.x, e.y, e.r)
-        else {
+        else if (e.kind === 'armor') {
+          // ---- 重甲（V6.62）：**六边形装甲壳 + 中缝** ----
+          // ⚠️ 必须与鱼的"三角"是**完全不同的轮廓语汇** —— 玩家要在开打之前就能一眼看出
+          //    "这个不一样"。它抗弹、它不追你，这两件事都先从剪影读出来。
+          const R = e.r * 1.18
+          const hex = (fn: 'fill' | 'line') => {
+            if (fn === 'fill') this.gEnt.fill(body, 0.92)
+            else this.gEnt.line(0xffffff, 0.38, 1.2)
+            for (let k = 0; k < 6; k++) {
+              const a = 0.35 + (k / 6) * Math.PI * 2
+              const px = e.x + Math.cos(a) * R, py = e.y + Math.sin(a) * R
+              if (k === 0) this.gEnt.moveTo(px, py)
+              else this.gEnt.lineTo(px, py)
+            }
+            this.gEnt.close()
+            if (fn === 'fill') this.gEnt.fillPath()
+            else this.gEnt.stroke()
+          }
+          hex('fill'); hex('line')
+          // 装甲板接缝（横中缝）—— 有缝才读作"拼出来的壳"，无缝就只是一块多边形
+          this.gEnt.line(0x0e1a24, 0.55, 1.6)
+          this.gEnt.strokeSeg(e.x - R * 0.86, e.y, e.x + R * 0.86, e.y)
+          // 航向刺（沿 dirX/dirY）—— 顺便告诉玩家"它往哪走"，因为它**不朝你**，
+          // 光看不出来它要飘向哪。这一条是"不索敌"这个行为语汇的可见化。
+          this.gEnt.line(body, 0.9, 2)
+          this.gEnt.strokeSeg(e.x, e.y, e.x + e.fx * R * 1.5, e.y + e.fy * R * 1.5)
+        } else {
           // 沿朝向、限幅 ±35°、朝左时反射到左半平面 —— 与贴图分支同一套侧视语汇。
           // ⚠️ `Gfx.tri` 的 `angRad` 收的是 **sim 角度**（y 向下、顺时针为正，
           //    见 Gfx.ang），所以这里直接喂 sim 分量，**不要**再手动取负。
@@ -3512,6 +3553,45 @@ export class DiveGame extends Component {
           const a0 = (k / 3) * Math.PI * 2 - w.t * 0.7
           this.gEnt.strokeSeg(e.x + Math.cos(a0) * rr, e.y + Math.sin(a0) * rr,
             e.x + Math.cos(a0) * e.r * 0.55, e.y + Math.sin(a0) * e.r * 0.55)
+        }
+      }
+      if (e.rootT > 0) {
+        // ---- 定身（V6.62）----
+        // 语汇必须与减速（上面的**断续**弧环）**一眼可分**：
+        //   减速 = 被缠住、还能动 ⇒ 断续（松）；
+        //   定身 = **完全不动** ⇒ 收紧的**实环** + 一道「禁止」斜杠。
+        // ⚠️ 不靠颜色区分（深海会把亮度压掉），靠**形状**。
+        const rr = e.r * 1.3
+        this.gEnt.line(UI.cyanHi, 0.92, 2.2)
+        this.gEnt.strokeCircle(e.x, e.y, rr)
+        this.gEnt.line(UI.danger, 0.88, 2)
+        this.gEnt.strokeSeg(e.x - rr * 0.72, e.y + rr * 0.72, e.x + rr * 0.72, e.y - rr * 0.72)
+      }
+      if (e.elite) {
+        // ---- 精英（V6.62 §5-A）----
+        // 脉冲光晕。**刻意复用鱼骨的"发光 = 值得"读法** —— 玩家不用学新符号就知道该先打它。
+        const pulse = 0.5 + 0.5 * Math.sin(w.t * 3.4 + e.x * 0.01)
+        this.gEnt.line(UI.amber, 0.40 + 0.36 * pulse, 2)
+        this.gEnt.strokeCircle(e.x, e.y, e.r * 1.8 + pulse * 3.5)
+      }
+      // ---- 鮟鱇女王：诱饵灯（V6.62 §4.2）----
+      // 它是"诱捕"这个压力的**唯一可见载体**：光在亮 = 它准备咬 = 你该往外游。
+      // 平时只是微亮（"我在这"），张口期全亮 + 把**咬合半径**画出来（"退到哪才安全"）。
+      if (e.kind === 'boss' && e.bossKind === 'angler') {
+        const flaring = e.phase === 'charge'
+        const k = flaring ? Math.min(1, e.t / 1.6) : 0          // 预警窗口进度 0→1
+        const bright = flaring ? 0.55 + 0.45 * k : 0.20
+        this.gEnt.fill(UI.amber, Math.min(1, 0.18 * bright * 2))
+        this.gEnt.fillCircle(e.x, e.y, 26 + 12 * k)
+        this.gEnt.fill(UI.amber, Math.min(1, 0.34 * bright * 2))
+        this.gEnt.fillCircle(e.x, e.y, 13)
+        this.gEnt.fill(0xffffff, Math.min(1, 0.9 * bright))
+        this.gEnt.fillCircle(e.x, e.y, 5)
+        if (flaring) {
+          // 咬合半径预警圈：**必须画** —— 玩家要知道"退到哪才安全"，
+          // 否则"忍住不靠近光"这条解法就变成了盲猜。
+          this.gEnt.line(UI.danger, 0.26 + 0.34 * k, 2)
+          this.gEnt.strokeCircle(e.x, e.y, ANGLER_GEOM.biteR)
         }
       }
       if (e.burnT > 0) {

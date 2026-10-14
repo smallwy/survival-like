@@ -101,27 +101,111 @@ const MAX_DT = 0.05
 const MINE_ARM = 0.4
 const MINE_CAP = 6
 const MINE_LIFE = 12
-const MINE_TRIG = 34
-const MINE_R = 88
-/** 连锁雷的连锁半径（90 = 略大于爆炸半径 88，相邻两枚必然互引） */
-const MINE_CHAIN_R = 90
+/**
+ * **引信时长（s）**（V6.62，取代 `MINE_TRIG 34` 的踩触发）。
+ * 1.8s = 一个"看得见、算得准、又够短"的预判窗口：典型敌人速度 68 ⇒ 1.8s 走 122px，
+ * 等于"一颗雷管住半屏外的一条线"。再长就变成"随机埋雷"，再短玩家来不及算。
+ */
+const MINE_FUSE = 1.8
+/**
+ * 爆炸半径 88 → **110**（V6.62）。
+ * 定时雷的价值全在**预判** —— 半径太小则"算准了也炸不到"，预判无意义。
+ * ⚠️ 连锁半径 `MINE_CHAIN_R` 必须同步 ≥ 新半径（否则相邻雷不互引）。
+ */
+const MINE_R = 110
+/** 连锁雷的连锁半径（118 = 略大于爆炸半径 110，相邻两枚必然互引） */
+const MINE_CHAIN_R = 118
 /** 连锁递归深度上限 —— 同 `explode` 的共鸣腔限深理由：不限深会递归到栈溢出 */
 const MINE_CHAIN_DEPTH = 4
 /** 氧气雷：每炸到一个敌人回氧／**单次爆炸回氧总量上限** */
 const MINE_O2_PER = 2.5
 const MINE_O2_CAP = 10
 
-/** 网：命中半径／减速倍率／减速时长（s） */
+/** 网：命中半径（形状参数，**未随 V6.62 改动**） */
 const NET_R = 46
-const NET_SLOW_MUL = 0.5
-const NET_SLOW_T = 2.0
-/** 电网：加深的减速与灼烧 */
-const NET_EL_SLOW_MUL = 0.45
-const NET_EL_SLOW_T = 2.5
+/**
+ * **定身时长（s）**（V6.62，取代 `NET_SLOW_T 2.0` 的减速）。
+ * 1.2s = "完全不动"的时长：够玩家把火力倾泻上去，又不至于把敌人钉死在那。
+ */
+const NET_ROOT_T = 1.2
+/**
+ * **定身免疫窗口（s）**（V6.62）。⚠️ **配平红线，缺这条直接无敌，不能省。**
+ *
+ * 网 `iv` ≈ 1.1s + 弹道飞行 ⇒ 若无免疫，单体被定时间 ≥40%。
+ * 一屏 150 敌里定住 40 只不动 = Bullet Heaven 变靶场。
+ * 3.0s = "被定一次后，至少要过 2 个网周期才能再被定"，把"控场"和"牢笼"分开。
+ */
+const NET_ROOT_IMMUNE = 3.0
+/** 电网：定身更久 + 灼烧 */
+const NET_EL_ROOT_T = 1.6
 const NET_EL_BURN_DPS = 6
 const NET_EL_BURN_T = 3.0
 /** 驯化网：内讧时长（s）。与诱饵的吸引时长分开 —— 两者是不同机制 */
 const NET_CHARM_T = 4.0
+
+// ---------------------------------------------------------------------------
+// V6.62 敌人区分度（第 4 类重甲）与战斗惊喜点（精英 / 连杀骨雨）
+// ---------------------------------------------------------------------------
+
+/**
+ * **重甲**（计划书点名，V6.23 起标红三轮）。
+ *
+ * 存在的唯一理由是**逼玩家换武器** —— 没有护甲的重甲只是"血厚的杂兵"。
+ * 三条一起构成它与其它类的区分度：**血厚（6×）+ 慢（0.4×）+ 不索敌（直线漂移）**。
+ * 最后一条最关键：它不追你 ⇒ **你得主动去打它**，行为语汇与另外三类完全不同。
+ */
+const ARMOR_HP_MUL = 6
+const ARMOR_SPD_MUL = 0.4
+const ARMOR_R = 30
+/** 护甲减伤比例。**爆炸 / 穿透无视它** —— 这是逼玩家换武器的唯一手段 */
+const ARMOR_REDUCE = 0.6
+
+/**
+ * **精英**（V6.62 §5-A）：每波随机 1–2 只。
+ * HP ×3 · 掉落 ×4 · 必掉一个「囊」。
+ * 复用"发光 = 值得"的既读法（与鱼骨同一套），玩家不用学新符号。
+ */
+const ELITE_HP_MUL = 3
+const ELITE_DROP_MUL = 4
+const ELITE_MIN = 1
+const ELITE_MAX = 2
+
+/**
+ * **连杀骨雨**（V6.62 §5-B）：`COMBO_WINDOW` 秒内连杀 ≥ `COMBO_N` 只 ⇒ 结算一次骨雨。
+ * 奖励"**打得好**"而不是"走得远"：把爽感从位置轴挪到操作轴。
+ */
+const COMBO_WINDOW = 3.0
+const COMBO_N = 8
+/** 骨雨块数区间（额外掉落，绕过 dropCap） */
+const COMBO_BONE0 = 6
+const COMBO_BONE1 = 10
+/** 骨雨落点相对玩家的散布半径 */
+const COMBO_SPREAD = 150
+
+/**
+ * **鮟鱇女王**（V6.62 §4.2）—— 诱捕型 Boss。
+ *
+ * 与守望者的区分全在**行为语汇**：守望者靠"逼近"施压，它靠"在远处等你来"。
+ * 三段：进入 `LURE_R` ⇒ 张口**诱饵灯全亮**（`FLARE_T` 的预警窗口，同时**停住不动**）
+ * ⇒ 咬合（还在 `BITE_R` 内就吃重击）。
+ *
+ * ⚠️ 诱捕要成立，"光"必须**真的能把玩家拽过去** —— 否则玩家站远点打就完胜，
+ *    这个 Boss 就退化成"一个不动的大血包"。所以张口期有一道**朝向它的水流**
+ *    （`PULL`）：你不主动往外游，就会被慢慢带进咬合半径。这才是"忍住别贪"。
+ */
+const ANGLER_LURE_R = 320
+const ANGLER_FLARE_T = 1.6
+const ANGLER_BITE_R = 190
+const ANGLER_BITE_DMG = 26
+/** 诱饵光的**牵引加速度**（px/s²）。玩家移速约 200 ⇒ 130 可抗衡但费力 */
+const ANGLER_PULL = 130
+
+/**
+ * 鮟鱇女王的**几何参数**，导出给渲染层画预警圈。
+ * ⚠️ 只导出几何（半径），**不导出伤害 / 时长** —— 那些是玩法数值，
+ *    留在本文件里，避免视图层读到数值后做出与模拟不一致的表现。
+ */
+export const ANGLER_GEOM = { lureR: ANGLER_LURE_R, biteR: ANGLER_BITE_R }
 
 /** 内讧撕咬：单次伤害／节流（s）。10 伤 / 0.5s = 20 dps，4s 能咬死 1–2 只游群 */
 const CHARM_BITE = 10
@@ -218,6 +302,15 @@ export class DiveWorld implements ShopTarget {
   spawnLeft = 0
   spawnTimer = 0
   droppedThisWave = 0
+  /** 本波已刷出的**精英**数（V6.62 §5-A）。每波重置，上限 `ELITE_MAX` */
+  eliteWave = 0
+  /**
+   * **连杀**（V6.62 §5-B）：`window` 内击杀计数。
+   * 每击杀 +1，距上次击杀超过 `COMBO_WINDOW` 就清零；达到 `COMBO_N` 结算一次骨雨。
+   */
+  comboCnt = 0
+  /** 距上次击杀的时间（s）。超过 `COMBO_WINDOW` ⇒ 连杀断 */
+  comboT = 0
   win = false
 
   // ---- 商店 ----
@@ -340,6 +433,7 @@ export class DiveWorld implements ShopTarget {
     this.spawnTimer = 0
     this.waveTimer = s.dur
     this.droppedThisWave = 0
+    this.eliteWave = 0            // 每波重新抽精英（V6.62 §5-A）
     this.phase = 'wave'
     this.depthM = L.depthTop + (L.depthBot - L.depthTop) * (this.waveInLayer / this.waves().length)
 
@@ -357,9 +451,13 @@ export class DiveWorld implements ShopTarget {
 
     this.emit({ t: 'wave', n: this.waveInLayer, layer: this.layerIdx })
 
-    // L5 最后一波：深渊守望者
-    if (this.layerIdx === LAYERS.length - 1 && this.waveInLayer === this.waves().length - 1) {
-      this.spawnBoss()
+    // Boss 投放（V6.62：两种，放在中段与终局各一次）。
+    //   L3 末波 = **鮟鱇女王**（诱捕型）—— 让玩家在中段遭遇一次与"逼近"完全不同的压力；
+    //   L5 末波 = **深渊守望者**（逼近型）—— 终局保持原有分量。
+    // ⚠️ 两者**语汇不同**，撞在一起才有"这是另一个 Boss"的感觉，而不是"守望者换皮"。
+    if (this.waveInLayer === this.waves().length - 1) {
+      if (this.layerIdx === 2) this.spawnBoss('angler')
+      else if (this.layerIdx === LAYERS.length - 1) this.spawnBoss('watcher')
     }
   }
 
@@ -406,27 +504,55 @@ export class DiveWorld implements ShopTarget {
     const s = this.waves()[this.waveInLayer]
     const hpScale = L.hpMul * s.hpMul
 
+    // 类型抽签：drift → dash → **armor**（V6.62）→ swarm，按占比依次判定。
+    // 顺序固定 ⇒ 各带占比加起来 ≤1 时行为可预算（与旧版只多插了一档）。
     const r = this.rng.next()
     const dashP = s.dashRatio * L.dashMul
     let kind: Kind
     if (r < L.driftRatio) kind = 'drift'
     else if (r < L.driftRatio + dashP) kind = 'dash'
+    else if (r < L.driftRatio + dashP + L.armorRatio) kind = 'armor'
     else kind = 'swarm'
 
-    const base = kind === 'drift' ? 110 : kind === 'dash' ? 52 : 30
-    const hp = Math.round(base * hpScale)
+    const base = kind === 'drift' ? 110 : kind === 'dash' ? 52 : kind === 'armor' ? 40 : 30
+    let hp = Math.round(base * hpScale)
+    if (kind === 'armor') hp = Math.round(hp * ARMOR_HP_MUL)   // 血厚 6×
     const relicSpd = this.hasRelic('abyss_mark') ? 1.1 : 1
-    const spd = (kind === 'drift' ? 42 : kind === 'dash' ? 96 : 68) * relicSpd
+    let spd = (kind === 'drift' ? 42 : kind === 'dash' ? 96 : 68) * relicSpd
+    if (kind === 'armor') spd *= ARMOR_SPD_MUL                 // 慢 0.4×
+
+    // ---- 精英标记（V6.62 §5-A）----
+    // 每波随机 1–2 只：**同一只不能既是重甲又是精英**（两者都是"值得打的"，叠加会读作数值失控）。
+    let elite = false
+    if (kind !== 'armor') {
+      const want = ELITE_MIN + this.rng.int(0, ELITE_MAX - ELITE_MIN)
+      if (this.eliteWave < want && this.rng.next() < 0.5) {
+        elite = true
+        this.eliteWave++
+        hp = Math.round(hp * ELITE_HP_MUL)
+      }
+    }
+
+    // 重甲的直线漂移方向（随机单位向量）。放这里而不是 updateEnemies：
+    // 方向是**出生时定死**的，每帧重算就变成"随机游走"了（那是另一种 AI）。
+    const armorAng = this.rng.next() * Math.PI * 2
 
     this.enemies.push(this.mkEnemy({
       x, y,
       hp,
-      r: kind === 'drift' ? 34 : kind === 'dash' ? 25 : 19,
+      r: kind === 'drift' ? 34 : kind === 'dash' ? 25 : kind === 'armor' ? ARMOR_R : 19,
       kind,
-      color: kind === 'drift' ? UI.amber : kind === 'dash' ? UI.magenta : UI.jade,
+      color: kind === 'drift' ? UI.amber : kind === 'dash' ? UI.magenta
+        : kind === 'armor' ? UI.steel : UI.jade,
       speed: spd,
       tex: ENEMY_TEX[kind],
       texRot: TEX_BASE_ROT[kind] ?? 0,
+      armor: kind === 'armor' ? ARMOR_REDUCE : 0,
+      elite,
+      dirX: kind === 'armor' ? Math.cos(armorAng) : 0,
+      dirY: kind === 'armor' ? Math.sin(armorAng) : 0,
+      fx: kind === 'armor' ? Math.cos(armorAng) : -1,
+      fy: kind === 'armor' ? Math.sin(armorAng) : 0,
     }))
     this.eid++
     this.spawned[kind] = (this.spawned[kind] ?? 0) + 1
@@ -492,26 +618,40 @@ export class DiveWorld implements ShopTarget {
       phase: 'chase', t: 0, dirX: 0, dirY: 0,
       alive: true, flash: 0,
       texRot: 0,
+      bossKind: 'watcher',
       // 初始朝向朝左（贴图基准方向）。**必须给非零值** —— 全零会让渲染层
       // `Math.hypot(0,0)=0` 掉进"无朝向"分支，出生那一帧方向是空的。
       fx: -1, fy: 0,
       slowT: 0, slowMul: 1,
+      // V6.62：硬控 / 护甲 / 精英默认全关 —— 只有对应分支才打开
+      rootT: 0, rootImmune: 0, armor: 0, elite: false,
       burnT: 0, burnDps: 0, burnTick: 0,
       charmT: 0, charmTick: 0,
       ...p,
     }
   }
 
-  /** DiveScene.ts:1561-1575 */
-  spawnBoss(): void {
+  /**
+   * 刷 Boss（V6.62：两种）。
+   *
+   * `kind` 决定**压力语汇**：`watcher` 是"逼近"（追→蓄力→砸地），
+   * `angler` 是"诱捕"（亮诱饵 → 张口吞）。见 `types.ts` 的 `bossKind` 表。
+   *
+   * ⚠️ 两者共用 `kind: 'boss'`（掉落 / 图鉴 / 震屏 / wave 清场都按 `'boss'` 走）。
+   *    区分只在 `bossKind` 与 AI 分支 —— 不新增第五个 `Kind`，否则每一处
+   *    `e.kind === 'boss'` 都要审一遍，是纯粹的返工风险。
+   */
+  spawnBoss(bk: 'watcher' | 'angler' = 'watcher'): void {
     const W = this.W
-    const hp = Math.round(1500 * this.layer().hpMul)
+    const hp = Math.round((bk === 'angler' ? 1100 : 1500) * this.layer().hpMul)
     this.enemies.push(this.mkEnemy({
       x: W / 2, y: -90,
       hp,
-      r: 44, kind: 'boss',
-      color: UI.violet,
-      speed: 46 * (this.hasRelic('abyss_mark') ? 1.1 : 1),
+      r: bk === 'angler' ? 38 : 44, kind: 'boss',
+      bossKind: bk,
+      // 鮟鱇女王用**琥珀**（诱饵光的颜色，与它的机制同源）；守望者保持紫。
+      color: bk === 'angler' ? UI.amber : UI.violet,
+      speed: (bk === 'angler' ? 30 : 46) * (this.hasRelic('abyss_mark') ? 1.1 : 1),
       tex: ENEMY_TEX.boss,
       texRot: TEX_BASE_ROT.dash ?? 0,
     }))
@@ -552,6 +692,13 @@ export class DiveWorld implements ShopTarget {
     if (this.hurtDirT > 0) this.hurtDirT -= dt
     if (this.layerCardT > 0) this.layerCardT -= dt
     if (this.ramT > 0) this.ramT -= dt
+    // 连杀断链（V6.62 §5-B）：距上次击杀超过窗口 ⇒ 计数清零。
+    // ⚠️ 放这里（主循环）而不是 `updateWave`：`updateWave` 在 `descending` 相位不跑，
+    //    而连杀窗口是**按真实时间**计的 —— 下潜途中不该"冻结"连杀。
+    if (this.comboCnt > 0) {
+      this.comboT += dt
+      if (this.comboT > COMBO_WINDOW) { this.comboCnt = 0; this.comboT = 0 }
+    }
     // 氧气显示值补间（指数逼近，8/s）
     this.o2Shown += (this.o2 - this.o2Shown) * Math.min(1, dt * 8)
     if (Math.abs(this.o2 - this.o2Shown) < 0.05) this.o2Shown = this.o2
@@ -694,6 +841,9 @@ export class DiveWorld implements ShopTarget {
 
       // ---- V6.46 控制状态结算（放在位移之前 ⇒ 本帧立即生效，不滞后一帧）----
       if (e.slowT > 0) { e.slowT -= dt; if (e.slowT < 0) e.slowT = 0 }
+      // V6.62 硬控：定身与它的免疫窗口都在这里递减（免疫比定身长，所以两个独立计时）
+      if (e.rootT > 0) { e.rootT -= dt; if (e.rootT < 0) e.rootT = 0 }
+      if (e.rootImmune > 0) { e.rootImmune -= dt; if (e.rootImmune < 0) e.rootImmune = 0 }
       if (e.charmT > 0) { e.charmT -= dt; if (e.charmT < 0) e.charmT = 0 }
       if (e.burnT > 0) {
         e.burnT -= dt
@@ -705,7 +855,9 @@ export class DiveWorld implements ShopTarget {
           if (!e.alive) continue                 // 灼烧可能当场烧死
         }
       }
-      const slow = e.slowT > 0 ? e.slowMul : 1
+      // **定身 > 减速**：`rootT > 0` ⇒ 速度因子 0（完全不动）。
+      // 定身结束时若 `slowT` 还在，减速会接管 —— 两层控制叠加不打架（先硬后软）。
+      const slow = e.rootT > 0 ? 0 : (e.slowT > 0 ? e.slowMul : 1)
 
       // 目标改写（内讧 / 诱饵 / 玩家三选一）
       const aim = this.enemyAim(e)
@@ -733,9 +885,46 @@ export class DiveWorld implements ShopTarget {
         const pulse = 0.6 + 0.4 * Math.sin(this.t * 2.2 + e.x * 0.01)
         e.x += nx * e.speed * pulse * slow * dt
         e.y += ny * e.speed * pulse * slow * dt
+      } else if (e.kind === 'armor') {
+        // ---- 重甲（V6.62）：**不索敌**，沿固定方向直线漂移 ----
+        // 这是它与另外三类的**行为区分**：swarm/dash 都追你，drift 脉冲式追你，
+        // 而重甲**根本不理你** ⇒ "你得主动去打它"（它的血厚 + 慢都服务于这一条）。
+        // 撞到边界就反弹 ⇒ 它在屏内**巡逻**而不是飘走。
+        //   ⚠️ 反弹不是装饰：不反弹它就会飘出屏幕，而清波条件是 `enemies.length === 0`
+        //      ⇒ **这一波永远结束不了**（静默死锁）。这是可以自己撞上的坑。
+        e.x += e.dirX * e.speed * slow * dt
+        e.y += e.dirY * e.speed * slow * dt
+        if (e.x < e.r) { e.x = e.r; e.dirX = Math.abs(e.dirX) }
+        else if (e.x > this.W - e.r) { e.x = this.W - e.r; e.dirX = -Math.abs(e.dirX) }
+        if (e.y < e.r) { e.y = e.r; e.dirY = Math.abs(e.dirY) }
+        else if (e.y > this.H - e.r) { e.y = this.H - e.r; e.dirY = -Math.abs(e.dirY) }
+        e.fx = e.dirX; e.fy = e.dirY
       } else if (e.kind === 'boss') {
         e.t += dt
-        if (e.phase === 'chase') {
+        if (e.bossKind === 'angler') {
+          // ---- 鮟鱇女王：诱捕（亮诱饵光 → 张口吞）----
+          if (e.phase === 'chase') {
+            // 缓慢靠近（30 px/s，比守望者慢）—— 它**不靠速度施压**，靠"你忍不住靠近"
+            e.x += nx * e.speed * slow * dt
+            e.y += ny * e.speed * slow * dt
+            if (da < ANGLER_LURE_R) { e.phase = 'charge'; e.t = 0 }
+          } else if (e.phase === 'charge') {
+            // 张口：**停住不动 + 诱饵灯全亮**。这是它的预警窗口，也是玩家的"忍住别贪"考验。
+            // 诱捕的物理落点：一道**朝向它的水流**把玩家往咬合半径里拽。
+            // ⚠️ 没有这道水流，"光"就只是装饰，玩家站远点打 = 完胜，Boss 退化成大血包。
+            const dd = dist(this.px, this.py, e.x, e.y) || 1
+            if (dd < ANGLER_LURE_R) {
+              const pull = ANGLER_PULL * (1 - dd / ANGLER_LURE_R) * dt   // 越近拉力越强
+              this.px += (e.x - this.px) / dd * pull
+              this.py += (e.y - this.py) / dd * pull
+            }
+            if (e.t >= ANGLER_FLARE_T) { this.anglerBite(e); e.phase = 'dash'; e.t = 0 }
+          } else if (e.phase === 'dash') {
+            if (e.t >= 0.5) { e.phase = 'rest'; e.t = 0 }
+          } else {
+            if (e.t >= 1.2) { e.phase = 'chase'; e.t = 0 }
+          }
+        } else if (e.phase === 'chase') {
           e.x += nx * e.speed * slow * dt
           e.y += ny * e.speed * slow * dt
           if (e.t >= 5) { e.phase = 'charge'; e.t = 0 }
@@ -847,6 +1036,22 @@ export class DiveWorld implements ShopTarget {
     this.emit({ t: 'shake', ms: 220, intensity: 0.008 })
   }
 
+  /**
+   * **鮟鱇女王咬合**（V6.62）：张口结束时，玩家还在咬合半径内 ⇒ 重击。
+   *
+   * 与 `bossSlam`（守望者的范围砸地）的差别在**因果**：砸地是"它主动打你"，
+   * 咬合是"**你被自己的贪心带进去了**" —— 同一个伤害数字，两种心理体验。
+   * 伤害更高（26 > 18）也是刻意的：被诱捕的代价该比被砸一下更疼。
+   */
+  anglerBite(e: Enemy): void {
+    this.emit({ t: 'shake', ms: 240, intensity: 0.009 })
+    if (dist(this.px, this.py, e.x, e.y) <= ANGLER_BITE_R) {
+      const dx = e.x - this.px, dy = e.y - this.py
+      const len = Math.max(1, Math.hypot(dx, dy))
+      this.damagePlayer(ANGLER_BITE_DMG, dx / len, dy / len)
+    }
+  }
+
   /** 声呐脉冲：波前向外扩散。DiveScene.ts:2021-2051 */
   updatePulses(dt: number): void {
     for (const p of this.pulses) {
@@ -906,10 +1111,14 @@ export class DiveWorld implements ShopTarget {
   }
 
   /**
-   * 气泡雷（V6.46 陷阱族）：布防 → 待机 → 敌人进入触发半径即爆。
+   * 气泡雷（V6.46 陷阱族）：布防 → 倒计时 → **到时必爆**（V6.62 定时引信）。
    *
    * 三层状态在**同一个 for 里**推进（不拆成三个循环）：
-   * 布防 0.4s → 激活（画面上点亮）→ 有人踩 / 超时自毁。
+   * 布防 0.4s → 引信 1.8s（画面上红→橙闪频递增）→ 引爆。
+   *
+   * ⚠️ **V6.62 从"踩触发"改成"定时引信"**（V6.49 §3.2）：爆不爆不再由敌人走位决定，
+   *    而由**玩家预判**决定 —— "我算好它 1.8 秒后会游到那里"。
+   *    二选一，**不能同时保留踩触发**（双重触发会让玩家读不出"它为什么现在爆"）。
    */
   updateMines(dt: number): void {
     // ⚠️ 倒序遍历：`detonateMine` 可能连锁引爆数组里的**其它**雷（改动数组长度），
@@ -917,18 +1126,14 @@ export class DiveWorld implements ShopTarget {
     for (let i = this.mines.length - 1; i >= 0; i--) {
       const m = this.mines[i]
       if (!m.alive) continue
-      if (m.arm > 0) { m.arm -= dt; continue }       // 布防中：**不触发**
+      if (m.arm > 0) { m.arm -= dt; continue }       // 布防中：**引信不走**（否则一放下就响）
       m.life -= dt
-      if (m.life <= 0) { m.alive = false; continue } // 超时**自毁**（不爆）
-      for (const e of this.enemies) {
-        if (!e.alive) continue
-        // ⚠️ 友军化的敌人不踩雷（内讧中它正忙着咬同类，不该被自己的雷炸）
-        if (e.charmT > 0) continue
-        if (dist(m.x, m.y, e.x, e.y) < m.trig + e.r) {
-          this.detonateMine(m, 0)
-          break
-        }
-      }
+      m.fuse -= dt
+      // **主时钟**：引信归零 ⇒ 引爆，与附近有没有敌人**无关**。
+      if (m.fuse <= 0) { this.detonateMine(m, 0); continue }
+      // 兜底自毁（不爆）。`fuse(2.2s) < life(12s)` ⇒ 正常永远走不到这里；
+      // 留着是给"将来有人把引信调得比存活还长"留一条不出错的退路。
+      if (m.life <= 0) { m.alive = false; continue }
     }
     this.mines = this.mines.filter(m => m.alive)
   }
@@ -973,17 +1178,28 @@ export class DiveWorld implements ShopTarget {
   /**
    * 网张开：对半径 `NET_R` 内所有敌人施加控制（V6.46）。
    *
-   * 三种网共用这一处，只有参数不同：
-   * | id | 减速 | 灼烧 | 策反 |
+   * 三种网共用这一处，只有参数不同（V6.62：减速 → **定身**）：
+   * | id | 定身 | 灼烧 | 策反 |
    * |---|---|---|---|
-   * | `net` | 50% × 2.0s | — | — |
-   * | `net_el` | 55% × 2.5s | 6 dps × 3.0s | — |
-   * | `net_cv` | 50% × 2.0s | — | **4s 内讧** |
+   * | `net` | **1.2s 完全不动**（+3.0s 免疫） | — | — |
+   * | `net_el` | **1.6s**（+3.0s 免疫） | 6 dps × 3.0s | — |
+   * | `net_cv` | **1.2s**（+3.0s 免疫） | — | **4s 内讧** |
+   *
+   * ⚠️ 网必须保持**弹道**（420 速度，见 `fireWeapons`）。改成"命中即定"的瞬时判定，
+   *    它就退化成被动光环 —— **"要打得准"是网值这个武器位的唯一理由**。
    */
   private applyNet(id: WeaponId, e: Enemy): void {
     const el = id === 'net_el'
-    e.slowT = el ? NET_EL_SLOW_T : NET_SLOW_T
-    e.slowMul = el ? NET_EL_SLOW_MUL : NET_SLOW_MUL
+    // ---- V6.62 定身（硬控）----
+    // ⚠️ `rootImmune` 是配平红线：免疫窗口内**不再被定**（伤害照结算）。
+    //    没有它 ⇒ 单体被定时间 ≥40%（网 iv 1.1s + 弹道），一屏定住 40 只 = 靶场。
+    // ⚠️ Boss **允许**被定（这是"打得准"该有的回报），但同样受免疫窗口约束。
+    if (e.rootImmune <= 0) {
+      e.rootT = el ? NET_EL_ROOT_T : NET_ROOT_T
+      e.rootImmune = NET_ROOT_IMMUNE
+    }
+    // 电网的灼烧与定身**独立**：即使这网没定住（在免疫期），烧仍然上 ——
+    // 否则玩家在免疫窗口内打网 = 白打，读作"武器时好时坏"。
     if (el) { e.burnT = NET_EL_BURN_T; e.burnDps = NET_EL_BURN_DPS; e.burnTick = 0.35 }
     if (id === 'net_cv') {
       // ⚠️ **Boss 免疫策反**。否则"网住 Boss 让它帮你打小怪"直接摧毁关卡设计意图
@@ -1049,6 +1265,12 @@ export class DiveWorld implements ShopTarget {
     const crit = this.rng.chance(this.st.crit)
     let d = dmg * this.dmgMulNow()
     if (crit) d *= 1 + this.st.critMul
+    // ---- V6.62 重甲护甲：减伤 60%，但**爆炸 / 穿透无视** ----
+    // 这两条豁免不是"网开一面"，而是重甲存在的**全部意义**：它逼玩家在
+    // 「低伤高射速」和「高伤爆炸/穿透」之间做武器选择。没有豁免 ⇒ 它只是血厚的杂兵。
+    const ignoreArmor = cause === 'blast' || cause === 'pierce'
+    const blocked = e.armor > 0 && !ignoreArmor
+    if (blocked) d *= (1 - e.armor)
     e.hp -= d
     e.flash = Math.max(e.flash, 0.09)
     let nx = 0, ny = 0
@@ -1060,7 +1282,10 @@ export class DiveWorld implements ShopTarget {
       e.ky += ny * kd
     }
     // 命中事件（渲染层据此画：冲击波 + 击打痕 + 迸溅火星 + 飘字）
-    this.emit({ t: 'hit', x: e.x, y: e.y, r: e.r, color: crit ? UI.violet : e.color, crit, dmg: d, nx, ny, cause })
+    // ⚠️ 被护甲格挡时把火花换成**钢灰**：玩家第一次打重甲就能从颜色学到"这玩意抗弹、该换武器"，
+    //    不用先去看图鉴。这是"逼玩家换武器"这条设计意图在**反馈层**的落点。
+    const hitCol = blocked ? UI.steel : (crit ? UI.violet : e.color)
+    this.emit({ t: 'hit', x: e.x, y: e.y, r: e.r, color: hitCol, crit, dmg: d, nx, ny, cause })
     if (crit) {
       // 命中震屏：只给暴击（普通命中频率太高，每次都震会变廉价且让人晕）
       this.emit({ t: 'shake', ms: 90, intensity: 0.0022 })
@@ -1105,6 +1330,14 @@ export class DiveWorld implements ShopTarget {
       this.biomass += e.kind === 'boss' ? 20 : 1
       if (e.kind === 'boss') this.bossDown = true
       this.emit({ t: 'kill', x: e.x, y: e.y, r: e.r, color: e.color, kind: e.kind, cause })
+      // ---- 连杀计数（V6.62 §5-B）----
+      // ⚠️ **Boss 不计**：Boss 是一场长战，杀它本身不该算进"3 秒 8 只"的节奏里
+      //    （否则打 Boss 的过程中混进来 7 只小怪就白送一次骨雨，读作"随机发钱"）。
+      if (e.kind !== 'boss') {
+        this.comboCnt++
+        this.comboT = 0
+        if (this.comboCnt >= COMBO_N) { this.comboRain(); this.comboCnt = 0 }
+      }
       // 击杀震屏：按体型分三档，**频率越高的震得越轻**。
       //   普通小鱼（swarm/dash）不震 —— 每秒可能死十几只，全震就是持续抖动；
       //   大水母（drift，r=27）轻震一记 —— 它是"值得打的大目标"，死了该有反馈；
@@ -1127,23 +1360,60 @@ export class DiveWorld implements ShopTarget {
     }
   }
 
-  /** 掉鱼骨。硬约束 ②：每波掉落总量有上限（Boss 不受限）。DiveScene.ts:2239-2261 */
-  dropBone(e: Enemy): void {
-    const isBoss = e.kind === 'boss'
-    const size = isBoss ? 44 : clamp(e.r * 1.7, 14, 30)
-    const o2 = isBoss ? 24 : Math.max(2, Math.round(BONE_O2.o2Base * (size / 18)))
-    const coin = isBoss ? 24 : Math.max(3, Math.round(4 * (size / 18)))
-    if (!isBoss && this.droppedThisWave >= this.layer().dropCap) return
-    this.droppedThisWave += coin
+  /**
+   * 造一块鱼骨。**掉落的统一入口** —— `dropBone`（击杀）与 `comboRain`（骨雨）都走它。
+   * `spread` = 初速倍率（骨雨用更小的值让骨落在原地，别溅一屏）。
+   */
+  private mkBone(x: number, y: number, o2: number, coin: number, size: number, spread = 1): void {
     const a = this.rng.next() * Math.PI * 2
-    const sp = 30 + this.rng.next() * 45
+    const sp = (30 + this.rng.next() * 45) * spread
     this.bones.push({
-      x: e.x, y: e.y,
+      x, y,
       vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 20,
       fade: O2.boneFade, o2, coin, size,
       rot: a, spin: (this.rng.next() - 0.5) * 1.6,
       alive: true,
     })
+  }
+
+  /** 掉鱼骨。硬约束 ②：每波掉落总量有上限（Boss / 精英不受限）。DiveScene.ts:2239-2261 */
+  dropBone(e: Enemy): void {
+    const isBoss = e.kind === 'boss'
+    const size = isBoss ? 44 : clamp(e.r * 1.7, 14, 30)
+    const o2 = isBoss ? 24 : Math.max(2, Math.round(BONE_O2.o2Base * (size / 18)))
+    const coin = isBoss ? 24 : Math.max(3, Math.round(4 * (size / 18)))
+    // ---- 精英（V6.62 §5-A）：掉落 ×4 + **必掉一个「囊」** ----
+    // ⚠️ 精英**整体绕过 dropCap** —— "必掉"就是必掉，不能被波预算吃掉。
+    //    （否则"打得好的那一波反倒没掉落"，正好把奖励设计反了。）
+    if (e.elite) {
+      this.mkBone(e.x, e.y, o2, coin * ELITE_DROP_MUL, size)
+      this.mkBone(e.x, e.y, 18, 0, 34, 0.7)     // 囊：大块 + 一大口氧
+      return
+    }
+    if (!isBoss && this.droppedThisWave >= this.layer().dropCap) return
+    this.droppedThisWave += coin
+    this.mkBone(e.x, e.y, o2, coin, size)
+  }
+
+  /**
+   * **连杀骨雨**（V6.62 §5-B）。
+   *
+   * `COMBO_WINDOW` 秒内连杀 ≥ `COMBO_N` 只 ⇒ 在玩家周围撒一屏骨（额外 6–10 块，绕过 dropCap）。
+   * 为什么这么设计：奖励"**打得好**"而不是"走得远" —— 把爽感从**位置轴**挪到**操作轴**。
+   * 落点散布在玩家周围而不是原地：玩家刚杀完一片，骨雨从"他所在的位置"下才是最贴切的嘉奖。
+   */
+  private comboRain(): void {
+    const n = COMBO_BONE0 + this.rng.int(0, COMBO_BONE1 - COMBO_BONE0)
+    for (let i = 0; i < n; i++) {
+      const a = this.rng.next() * Math.PI * 2
+      const r = this.rng.next() * COMBO_SPREAD
+      const x = clamp(this.px + Math.cos(a) * r, 20, this.W - 20)
+      const y = clamp(this.py + Math.sin(a) * r, 20, this.H - 20)
+      this.mkBone(x, y, 2, 3, 20, 0.6)
+    }
+    // 结算反馈：一句飘字（"骨雨"是这个惊喜点的**名字**，玩家得看得见它发生了）
+    this.emit({ t: 'float', x: this.px, y: this.py - 46, text: `连杀 ×${COMBO_N} · 骨雨`, color: UI.amber, size: 22 })
+    this.emit({ t: 'shake', ms: 120, intensity: 0.004 })
   }
 
   /**
@@ -1504,13 +1774,14 @@ export class DiveWorld implements ShopTarget {
         this.mines.push({
           x: this.px, y: this.py,
           arm: MINE_ARM, life: MINE_LIFE,
-          dmg: w.dmg, trig: MINE_TRIG, r: MINE_R,
+          dmg: w.dmg, fuse: MINE_FUSE, fuseMax: MINE_FUSE, r: MINE_R,
           o2per, o2cap: o2per > 0 ? MINE_O2_CAP : Infinity,
           chainR: w.id === 'mine_ch' ? MINE_CHAIN_R : 0,
           alive: true,
         })
-        // 布雷的位置反馈：不发光环的话，玩家不知道雷落在哪（尤其是移动中）
-        this.emit({ t: 'burst', x: this.px, y: this.py, r: MINE_TRIG })
+        // 布雷的位置反馈：不发光环的话，玩家不知道雷落在哪（尤其是移动中）。
+        // 半径取 44（不再是踩触发半径 34）：布雷是"我放了个东西在这"，不是"有人踩到了"。
+        this.emit({ t: 'burst', x: this.px, y: this.py, r: 44 })
       } else if (fam === 'net') {
         const e = this.nearestEnemy(rng); if (!e) continue
         const base = pose ? pose.ang : Math.atan2(e.y - this.py, e.x - this.px)
@@ -1636,7 +1907,9 @@ export class DiveWorld implements ShopTarget {
         if (dist(b.x, b.y, e.x, e.y) < e.r + 6) {
           b.hit.add(i)
           e.flash = 0.08
-          this.hurt(e, b.dmg)
+          // V6.62：鱼叉是**穿透**伤害 ⇒ 无视重甲护甲（这是"逼玩家换武器"的另一半：
+          //   爆炸与穿透两条豁免里，玩家手里的武器至少要占一条，否则重甲无解）。
+          this.hurt(e, b.dmg, b.kind === 'harpoon' ? 'pierce' : 'bullet')
           // 网：**撞到第一个敌人就张开**（半径内的全部一起网住），然后消散。
           // ⚠️ 用 `openNet` 而不是在这里内联 —— 射程尽头也要走同一段逻辑，
           //    分开写迟早只有一处生效（而漏的那处不会有任何报错）。

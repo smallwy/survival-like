@@ -423,23 +423,23 @@ export const LAYERS: LayerDef[] = [
   // L1 阳光带：教学层，**不给机制**
   { name: '阳光带', sub: 'SUNLIT', mech: '', tip: '没有额外机制 —— 先把手感练顺',
     o2Max: 100, drain: 1.00, dropCap: 70,  toll: 15, vis: 1.00, depthTop: 0,     depthBot: 200,
-    ventPush: 0,  current: 0,  pressure: 0,    surge: false, tint: 0x2a6f8a, motes: 34,  hpMul: 1.00, cntMul: 1.00, dashMul: 0.5, driftRatio: 0.00 },
+    ventPush: 0,  current: 0,  pressure: 0,    surge: false, tint: 0x2a6f8a, motes: 34,  hpMul: 1.00, cntMul: 1.00, dashMul: 0.5, driftRatio: 0.00, armorRatio: 0.00 },
   // L2 弱光带：**暗流**
   { name: '弱光带', sub: 'TWILIGHT', mech: '暗流', tip: '水流在缓慢旋转，鱼群和你都会被带偏',
     o2Max: 100, drain: 1.35, dropCap: 90,  toll: 20, vis: 0.92, depthTop: 200,   depthBot: 1000,
-    ventPush: 0,  current: 34, pressure: 0,    surge: false, tint: 0x1d6b7a, motes: 48,  hpMul: 1.35, cntMul: 1.25, dashMul: 1.0, driftRatio: 0.12 },
+    ventPush: 0,  current: 34, pressure: 0,    surge: false, tint: 0x1d6b7a, motes: 48,  hpMul: 1.35, cntMul: 1.25, dashMul: 1.0, driftRatio: 0.12, armorRatio: 0.05 },
   // L3 午夜带：**涌流**
   { name: '午夜带', sub: 'MIDNIGHT', mech: '涌流', tip: '它们从同一个方向压上来 —— 退路只有一条',
     o2Max: 85,  drain: 1.80, dropCap: 110, toll: 25, vis: 0.68, depthTop: 1000,  depthBot: 4000,
-    ventPush: 0,  current: 0,  pressure: 0,    surge: true,  tint: 0x352f6b, motes: 70,  hpMul: 1.80, cntMul: 1.50, dashMul: 1.1, driftRatio: 0.18 },
+    ventPush: 0,  current: 0,  pressure: 0,    surge: true,  tint: 0x352f6b, motes: 70,  hpMul: 1.80, cntMul: 1.50, dashMul: 1.1, driftRatio: 0.18, armorRatio: 0.09 },
   // L4 热泉带：**热泉**
   { name: '热泉带', sub: 'HYDROTHERMAL', mech: '热泉', tip: '上升的热流会顶开你 —— 停不住',
     o2Max: 70,  drain: 2.40, dropCap: 135, toll: 30, vis: 0.60, depthTop: 4000,  depthBot: 6000,
-    ventPush: 190, current: 0, pressure: 0,   surge: false, tint: 0x7a3a16, motes: 90,  hpMul: 2.40, cntMul: 1.80, dashMul: 1.2, driftRatio: 0.15 },
+    ventPush: 190, current: 0, pressure: 0,   surge: false, tint: 0x7a3a16, motes: 90,  hpMul: 2.40, cntMul: 1.80, dashMul: 1.2, driftRatio: 0.15, armorRatio: 0.11 },
   // L5 深渊带：**压力**
   { name: '深渊带', sub: 'THE ABYSS', mech: '压力', tip: '每过一波，舱体再压掉一截氧气上限',
     o2Max: 60,  drain: 3.00, dropCap: 160, toll: 0,  vis: 0.46, depthTop: 6000,  depthBot: 11000,
-    ventPush: 0,  current: 0,  pressure: 0.06, surge: false, tint: 0x1a1740, motes: 110, hpMul: 3.20, cntMul: 2.10, dashMul: 1.3, driftRatio: 0.22 },
+    ventPush: 0,  current: 0,  pressure: 0.06, surge: false, tint: 0x1a1740, motes: 110, hpMul: 3.20, cntMul: 2.10, dashMul: 1.3, driftRatio: 0.22, armorRatio: 0.14 },
 ]
 
 /**
@@ -544,6 +544,7 @@ export const TEX_BASE_ROT: Partial<Record<Kind, number>> = {
   swarm: Math.PI - 0.10,
   dash: Math.PI + 0.02,
   drift: Math.PI,
+  armor: Math.PI,        // 重甲：素材同规，头朝左
 }
 
 /** 敌人贴图 key（渲染层按它取资源）。DiveScene.ts:1486 / 1572 */
@@ -551,5 +552,6 @@ export const ENEMY_TEX: Record<Kind, string> = {
   swarm: 'f_swarm',
   dash: 'f_dash',
   drift: 'f_drift',
+  armor: 'f_armor',      // V6.62 第 4 类重甲
   boss: 'f_dash',
 }
