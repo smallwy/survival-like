@@ -368,7 +368,17 @@ export type SimEvent =
   | { t: 'playerHurt'; dirX: number; dirY: number; amount: number }
   | { t: 'dodge'; x: number; y: number }
   | { t: 'shake'; ms: number; intensity: number }
-  | { t: 'burst'; x: number; y: number; r: number }
+  /**
+   * 网张开（V6.46 `openNet`）。
+   *
+   * `ang` = **抛出方向**（rad）。渲染层需要它 —— 网是**柔性体**，被甩出去时迎水的一面
+   * 被向后拖 ⇒ 张开形状是**沿运动方向拉长的水滴形**，不是圆。没有方向就只能画同心圆环，
+   * 那是"冲击波"的形状，不是网的形状（V6.61 按物理修正）。
+   */
+  // `ang` = 抛出方向（弧度）。**仅撒网有** —— 柔性网是沿速度方向甩出去的；
+  //   氧气雷 / 水雷 / 诱饵的引爆是**全向**的，没有方向可言（`ang` 缺省 ⇒ 渲染层画各向同性爆点）。
+  //   别为了"字段统一"给它们编一个方向：那会把"爆炸"画成"抛出"。
+  | { t: 'burst'; x: number; y: number; r: number; ang?: number }
   /** 电弧折线（链式电弧）。点位只有模拟层知道，所以必须由事件带出来。 */
   | { t: 'arc'; pts: { x: number; y: number }[] }
   /** 鱼雷 / 回声爆点（渲染层画 blast 环 + 冲击波）。 */

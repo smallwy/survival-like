@@ -73,10 +73,16 @@ LAMP_D0, LAMP_D1 = 120, 600
 LAMP_ALPHA, LAMP_BANDS, LAMP_POW = 0.044, 14, 1.35
 LAMP_EDGE_N, LAMP_EDGE_RAMP = 3, [0.35, 0.60, 0.85]
 FOG_R, FOG_BANDS, FOG_ALPHA = [0, 640, 480, 380, 300], 12, 0.22
-BEAM_N, BEAM_TILT = 4, 0.314
-BEAM_COLOR = 0xDFF2FF
-BEAM_SPREAD, BEAM_SEG, BEAM_FALLOFF, BEAM_OVERLAP = 1.45, 3, 1.6, 0.04
+# ---- 丁达尔光柱（V6.61 物理版）----
+BEAM_N = 4
+BEAM_VP_X, BEAM_VP_Y = 0.62, -0.55          # 消失点（太阳虚像）
+BEAM_SWAY_T, BEAM_SWAY_A = 11, 14
+BEAM_SWAY_PH = [0, 1.7, 3.4, 5.1, 0.9, 2.6]
+BEAM_COL_TOP, BEAM_COL_BOT = 0xFFF2DC, 0x93CDF0   # 分波长吸收：暖白 → 蓝青
+BEAM_ABSORB, BEAM_DIFFUSE = 1.75, 0.8        # Beer-Lambert + 散射扩散
 BEAM_W0, BEAM_W1 = 24, 44
+BEAM_SEG, BEAM_OVERLAP = 3, 0.04
+BEAM_D0, BEAM_D1 = 900, 1200                 # depthM 淡出
 FLUO_CHAINS, FLUO_C1, FLUO_C2 = 7, 0xA88CFF, 0x6FF0D0
 VENT_N, VENT_HOT, VENT_EDGE = 6, 0xFF8A3C, 0x8A3A18
 DOTS_N, DOTS_PERIOD, DOTS_SAFE_R = 48, 3.2, 260
@@ -173,33 +179,50 @@ def draw_lamp(lay, d, i):
 
 
 def draw_beams(lay, d, i, rnd):
+    """V6.61：透视放射 + Beer-Lambert 指数衰减 + 散射扩散 + 分波长变色。
+
+    `fade` 由 depthM 决定（L1 满 / L2 减半），`ph` 每条独立相位。
+    """
     if i > 1:
         return 0
+    depth = DEPTH_MID[i]
+    fade = max(0.0, min(1.0, 1 - (depth - BEAM_D0) / (BEAM_D1 - BEAM_D0)))
+    if fade <= 0.01:
+        return 0
     n = 0
-    tan = math.tan(BEAM_TILT)
     y_top, y_bot = -80, H + 40
+    vpx, vpy = W * BEAM_VP_X, H * BEAM_VP_Y
+    span = y_bot - y_top
     for b in range(BEAM_N):
-        bx = W * ((b + 0.5 + (rnd.random() - 0.5) * 1.1) / BEAM_N)
         bw = BEAM_W0 + rnd.random() * BEAM_W1
+        sx = W * ((b + 0.5 + (rnd.random() - 0.5) * 1.1) / BEAM_N) \
+            + math.sin(BEAM_SWAY_PH[b % len(BEAM_SWAY_PH)]) * BEAM_SWAY_A
         bright = 1.30 - (bw - BEAM_W0) / BEAM_W1 * 0.80
         for L in range(3):
             w_top = (bw * (1.45 - 0.32 * L)) / CAM_ZOOM
-            w_bot = w_top * BEAM_SPREAD
-            a_base = (0.030 + 0.022 * L) * bright
-            x_top = bx - tan * (H * 0.5)
-            span = y_bot - y_top
+            a_base = (0.030 + 0.022 * L) * fade * bright
             for sg in range(BEAM_SEG):
                 t0 = sg / BEAM_SEG
                 t1 = min(1.0, (sg + 1) / BEAM_SEG + BEAM_OVERLAP)
                 ya, yb = y_top + span * t0, y_top + span * t1
-                wa = w_top + (w_bot - w_top) * t0
-                wb = w_top + (w_bot - w_top) * t1
-                cxa, cxb = x_top + tan * (ya - y_top), x_top + tan * (yb - y_top)
-                a = a_base * ((1 - t0) ** BEAM_FALLOFF)
+                ka = (ya - vpy) / (y_bot - vpy)
+                kb = (yb - vpy) / (y_bot - vpy)
+                cxa = vpx + (sx - vpx) * ka          # 向消失点收敛
+                cxb = vpx + (sx - vpx) * kb
+                wa = w_top * (1 + BEAM_DIFFUSE * t0)   # 越深越宽
+                wb = w_top * (1 + BEAM_DIFFUSE * t1)
+                a = a_base * math.exp(-BEAM_ABSORB * t0)   # 指数衰减
+                col = mix_col(BEAM_COL_TOP, BEAM_COL_BOT, t0)  # 变色
                 d.polygon([(cxa - wa * 0.5, ya), (cxa + wa * 0.5, ya),
-                           (cxb + wb * 0.5, yb), (cxb - wb * 0.5, yb)], fill=rgba(BEAM_COLOR, a))
+                           (cxb + wb * 0.5, yb), (cxb - wb * 0.5, yb)], fill=rgba(col, a))
                 n += 1
     return n
+
+
+def mix_col(c1, c2, t):
+    r1, g1, b1 = (c1 >> 16) & 255, (c1 >> 8) & 255, c1 & 255
+    r2, g2, b2 = (c2 >> 16) & 255, (c2 >> 8) & 255, c2 & 255
+    return (int(r1 + (r2 - r1) * t) << 16) | (int(g1 + (g2 - g1) * t) << 8) | int(b1 + (b2 - b1) * t)
 
 
 def draw_fluo(lay, d, i, rnd):

@@ -961,7 +961,8 @@ export class DiveWorld implements ShopTarget {
   private openNet(b: Bullet): void {
     if (!b.net) return
     // 视觉先于伤害：先抛事件（渲染层这一帧就能画网），再结算效果
-    this.emit({ t: 'burst', x: b.x, y: b.y, r: NET_R })
+    // `ang` = 抛出方向：网是柔性体，张开形状沿运动方向拉长（不是圆），渲染层需要它
+    this.emit({ t: 'burst', x: b.x, y: b.y, r: NET_R, ang: Math.atan2(b.vy, b.vx) })
     for (const e of this.enemies) {
       if (!e.alive) continue
       if (e.charmT > 0) continue                  // 已是友方的别再网一遍

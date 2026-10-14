@@ -210,7 +210,16 @@ const MOTE_STYLE: readonly MoteStyle[] = [
  * 丁达尔光柱的一条（§4.2）。**参数在换带时整批重建**，位置与倾角每帧按 `w.t` 摆动。
  * 只有 `x` 与底宽 `w` 两个量 —— 亮度由 `w` 反推（**越窄越亮**），不另存一份。
  */
-interface Beam { x: number; w: number }
+interface Beam {
+  /** 底部的**横向锚点**（屏幕 px）*/
+  x: number
+  /** 顶宽（px）。各条不等 —— 等宽读作栅栏 */
+  w: number
+  /** 摆动**相位**（rad）。水面波是随机的 ⇒ 各条光束**不同步**（同步读作"贴图在平移"）*/
+  ph: number
+  /** 本帧摆动后的底部 x（由 `prepBeams` 每帧写入，`beamGain` 与 `drawBeams` 共用）*/
+  sx: number
+}
 
 /**
  * 荧光链（§4.3）。锚点缓慢下沉 + 摆动，`pts` 是**相对锚点**的偏移。
@@ -253,6 +262,31 @@ interface AtmoFlash {
   col: number
   /** 峰值 alpha（在 `life = 0` 处）*/
   a: number
+}
+
+/**
+ * **网张开**的一次（V6.61 按物理重写）。
+ *
+ * V6.60 及以前：`pushShock` 画一圈**同心圆环** —— 那是**冲击波**的形状，不是网的形状。
+ * 物理上，撒出去的网（cast net）是**柔性体**：
+ *   ① **沿运动方向拉长**：甩出时迎水的一面被向后拖 ⇒ 张开形状是水滴形，不是圆；
+ *   ② **网缘是扇贝形**：铅坠（sinkers）是网缘上**离散的**配重块，相邻两颗之间的
+ *      网衣被水顶起成弧 ⇒ 边缘是波浪，不是光滑圆；
+ *   ③ **先展开后收拢**：靠离心力张开到最大，随后水阻让网衣向网缘堆 ⇒ 会**塌回去**；
+ *   ④ **各段不对称**：抛出时网衣折叠不均，每段的下垂量都不同（`ph` 存这个随机量）。
+ */
+interface NetOpen {
+  x: number
+  y: number
+  /** 抛出方向（rad）＝ 长轴方向 */
+  ang: number
+  /** 基准半轴（px），等于判定半径 `NET_R` */
+  r: number
+  col: number
+  life: number
+  maxLife: number
+  /** 12 个网缘分区各自的随机下垂量 `0..1`（打破完美对称）*/
+  ph: number[]
 }
 
 /** 贴图池里的一条：`key` 让它能被同种敌人复用（与 web 的 fishPool 同构） */
@@ -441,6 +475,30 @@ const FLASH_MUZZLE = { r0: 20, r1: 38, dur: 0.12, col: 0xdff2ff, a: 0.26 }
 const FLASH_BLAST = { r0: 56, r1: 158, dur: 0.28, col: 0xffe6bc, a: 0.30 }
 const FLASH_PICK = { r0: 140, r1: 248, dur: 0.20, col: 0x6fe8ff, a: 0.13 }
 
+// ---- 网张开（V6.61 按物理重写）----
+/** 张开动画总时长（s）。比爆炸环（0.32）长 —— 柔性体的展开与塌陷比冲击波慢 */
+const NET_DUR = 0.52
+/**
+ * **展开段占比**：`0 → NET_OPEN_END` 是张开，`NET_OPEN_END → 1` 是塌陷收拢。
+ * ⚠️ 这段比例是"网"与"冲击波"的分界：一直往外扩 = 爆炸，会让人以为这是个伤害圈。
+ */
+const NET_OPEN_END = 0.42
+/** 沿抛出方向的**拉伸倍率**（在展开段末达到最大）。网迎水的一面被向后拖 ⇒ 沿速度方向拉长 */
+const NET_STRETCH = 0.45
+/** 水滴形：前端（抛出方向）比后端窄多少。前尖后宽 = 被甩出去的形状 */
+const NET_TAPER = 0.22
+/** 网缘**扇贝波**的幅度与瓣数（相邻铅坠之间的网衣被水顶起）*/
+const NET_SCALLOP = 0.035
+const NET_SCALLOP_N = 6
+/** 网缘分区数 = 铅坠颗数 */
+const NET_SEGS = 12
+/** 各分区的随机下垂量幅度（抛出时网衣折叠不均 ⇒ **不能**完美对称）*/
+const NET_JITTER = 0.05
+/** 塌陷段收拢到的比例 */
+const NET_COLLAPSE = 0.82
+/** 同屏张开动画上限。网的 cd 是 2.4s 级、动画 0.52s ⇒ 常态 1~2 个，6 足够 */
+const NET_CAP = 6
+
 // ---- 能见度雾（§4.6）----
 /**
  * 各带的**能见度半径**（屏幕 px）。`0` = 该带不画。
@@ -463,33 +521,68 @@ const FOG_ALPHA = 0.22
 /** 光柱条数（§4.2「4–6 条」）。取**下限 4** —— 5–6 条在 1304 宽上会把画面铺满，
  *  读作"一片光幕"而不是"几道透下来的光柱"（预览图实测）。**宽度必须不等**，等宽读作栅栏 */
 const BEAM_N = 4
-/** 光柱倾角基准（弧度 ≈ 18°；§4.2 取 14°–22°）*/
-const BEAM_TILT = 0.314
+/**
+ * **消失点**（太阳的虚像，归一化屏幕坐标；`y` 为负 = 屏幕上方之外）。
+ *
+ * ⚠️ 这是 V6.61 最关键的修正，也是用户那句「视觉上能看到平行的柱子吗」的正解：
+ *   - 太阳在**无穷远** ⇒ 入射光**物理上确实平行**；
+ *   - 但**透视投影**让平行线在画面上必然**汇聚到消失点**（云隙光 / 铁路轨道 / 走廊
+ *     都是同一条几何）。观察者看到的是**放射状**，不是"等距平行"。
+ *   - V6.60 画的"等距平行直条"：**既不物理**（无衰减无扩散），**也不符合透视**
+ *     （真平行线在画面上必汇聚）⇒ 两头不靠。
+ *
+ * 另注：水下抬头看，整个天空被压缩进 97.2° 的**斯涅尔窗**内
+ * （水 n=1.333 ⇒ 临界角 arcsin(1/1.333) = 48.6°，全角 97.2°），
+ * 窗外的水面是全反射的镜面。所以消失点只会在**上方**，不会跑到侧面去。
+ */
+const BEAM_VP_X = 0.62
+const BEAM_VP_Y = -0.55
 /** 摆动周期（s）。**不能静止 —— 静止读作贴图** */
 const BEAM_SWAY_T = 11
+/** 每条的摆动相位（rad）。`Beam.ph` 从中取值，保证各条不同步 */
+const BEAM_SWAY_PH = [0, 1.7, 3.4, 5.1, 0.9, 2.6]
+/** 水面波动引起的横向摆幅（px，底部）*/
+const BEAM_SWAY_A = 14
 /**
- * 光柱颜色：**天光冷白**，不是 `UI.cyanHi`。
- * ⚠️ V6.60 换色 —— 阳光从水面透下来是**偏白的**，用饱和青（cyanHi）在蓝绿背景上
- *   色相跳得太狠，用户实机反馈「几道透下来的光**有点突兀**」。
- *   冷白偏一点点青（0xdff2ff）= "水把阳光滤过一遍"，与环境同源 ⇒ 不跳。
+ * **分波长吸收**（水的选择性吸收）：红 → 橙 → 黄 → 绿 → 蓝，被依次吃掉。
+ * 清澈海水的**衰减长度**：红 ≈5 m / 橙 ≈20 m / 黄 ≈50 m / 绿 ≈100 m / 蓝 ≈200 m。
+ * ⇒ 光柱在水下是**变色**的：入水处暖白，往下走只剩蓝青。
+ * ⚠️ V6.60 整条一个颜色（0xdff2ff）⇒ "贴纸感"的另一半来源。
  */
-const BEAM_COLOR = 0xdff2ff
+const BEAM_COL_TOP = 0xfff2dc
+const BEAM_COL_BOT = 0x93cdf0
 /**
- * 底宽 / 顶宽。**等宽直条是"突兀"的一半来源** —— 扩散成梯形才读作"光散开了"。
- * ⚠️ 1.7 → **1.45**：扩散太狠时最外层（×1.45）× 底宽会到 150px，
- *    四条铺满 45% 屏宽 ⇒ 读作"一片光幕"而不是"几道透下来的光"。
+ * **Beer–Lambert 指数衰减** `I(d) = I₀ · e^(−c·d)`。
+ *
+ * ⚠️ 水对光是**指数**衰减，不是多项式。V6.60 用的 `(1−t)^1.6` 是"画着顺手"的曲线，
+ *    物理上不成立：指数的特征是**先掉得快、后面拖一条长尾**，多项式正好相反
+ *    （尾段反而掉得更急）。观感上指数衰减才是"光被水吃掉了"。
+ * c = 1.75 ⇒ 顶 100% / 中 42% / 底 17%。
  */
-const BEAM_SPREAD = 1.45
-/** 单条**顶宽**区间（px，屏幕坐标）。34–100 → **24–68**：
- *  同上 —— 宽度是"几道"与"一片"的分界，比亮度分配更敏感 */
+const BEAM_ABSORB = 1.75
+/**
+ * **散射横向扩散**：光被悬浮粒子反复散射 ⇒ 光束越深越宽、边缘越糊。
+ * `w(t) = w₀ × (1 + BEAM_DIFFUSE × t)` ⇒ 底部 1.8× 顶宽。
+ */
+const BEAM_DIFFUSE = 0.8
+/** 单条**顶宽**区间（px，屏幕坐标）。宽度是"几道"与"一片"的分界，比亮度分配更敏感 */
 const BEAM_W0 = 24
 const BEAM_W1 = 44
 /** 纵向分段数：顶亮 → 底淡。**上下一样亮 = 一条贯穿全屏的硬条**（贴纸感的真凶）*/
 const BEAM_SEG = 3
-/** 纵向衰减指数：`alpha ∝ (1 - t) ** BEAM_FALLOFF` ⇒ 顶 1.00 / 中 0.53 / 底 0.19 */
-const BEAM_FALLOFF = 1.6
 /** 段与段的重叠比例（消接缝：相邻段之间留一条 4% 的搭边）*/
 const BEAM_OVERLAP = 0.04
+/**
+ * **光柱里的颗粒被照亮**（丁达尔效应的本质）。
+ *
+ * 丁达尔效应 = 光被悬浮粒子**散射进眼睛** —— 水若绝对纯净，光束的侧面是**看不见**的
+ * （就像真空里看不见激光的径迹）。所以「看得见光柱」与「光被水消化」是**同一件事的两面**：
+ * 光束可见，正因为光正在被粒子散射掉。
+ *
+ * ⇒ 光柱内的颗粒必须**更亮**。没有这一条，光柱就是一层"飘在水前面"的贴纸，
+ *   与水体毫无关系（用户：「光在水里不能消化吗」—— 能，而且正是它让我们看见了光柱）。
+ */
+const BEAM_LIT_GAIN = 1.9
 /** 光柱随 `depthM` 淡出：900 → 1200 归零（再深就照不进太阳了）*/
 const BEAM_D0 = 900
 const BEAM_D1 = 1200
@@ -833,6 +926,14 @@ export class DiveGame extends Component {
   //   自己再累一个计数器，只会做出"暂停时鱼尾不动、光却还在呼吸"的分裂状态。
   /** 丁达尔光柱（§4.2，仅 L1/L2）*/
   private beams: Beam[] = []
+  /**
+   * 光柱的**每帧公共量快照**（`prepBeams` 写入，`drawBeams` 与 `beamGain` 共用）。
+   * ⚠️ 必须共用同一份：`drawBg`（颗粒）在 `drawAtmo`（光柱）**之前**调用，
+   *    两边各自算一遍会在时间上错一帧 ⇒ "被照亮的颗粒"与画面上的光柱对不齐。
+   */
+  private beamFade = 0
+  private beamVpX = 0
+  private beamVpY = 0
   /** 生物荧光链（§4.3，仅 L3）*/
   private fluo: FluoChain[] = []
   /** 热泉烟柱（§4.4，仅 L4）*/
@@ -841,6 +942,8 @@ export class DiveGame extends Component {
   private dots: AtmoDot[] = []
   /** 交互光反馈（§6）：开火 / 爆炸 / 拾取在水里留下的反光。**不随换带清空**（瞬时事件）*/
   private atmoFlashes: AtmoFlash[] = []
+  /** 网张开的进行中的动画（V6.61）。**不随换带清空**，但 `clearFx` 要清 */
+  private nets: NetOpen[] = []
   /** 表现层计时器（鱼雷气泡尾迹的正弦摆动等用；与 sim 的时间无关） */
   private fxT = 0
   /** 本帧的受击白闪（drawEnemies 登记 → drawFx 消费，见 FlashMark 的注释） */
@@ -1314,7 +1417,7 @@ export class DiveGame extends Component {
     }
     this.drawVeil(w)
     this.drawAtmo(w, dt)
-    this.drawFx()
+    this.drawFx(dtSec)
     this.drawFxBits()
 
     this.hud.begin()
@@ -1895,7 +1998,17 @@ export class DiveGame extends Component {
         this.pushFlash(ev.x, ev.y, FLASH_MUZZLE)         // §6：枪口把周围的水照亮一下
         break
       case 'burst':
-        this.pushShock(ev.x, ev.y, ev.r, 0.4, UI.cyanHi, 3, ev.r * 0.12, 1)
+        // 同一个 `burst` 事件承载**两种物理**，靠 `ang` 分流（见 types.ts 的注释）：
+        if (ev.ang !== undefined) {
+          // ① **撒网张开**（有抛出方向）：柔性体 ⇒ 水滴形 + 扇贝边 + 展开→塌陷。
+          //    ⚠️ V6.60 及以前这里也是同心圆环 —— 那是**冲击波**的形状，不是网的形状。
+          //       网沿速度方向被甩长、网缘挂着铅坠、张开后受水阻塌回去（见 `drawNets`）。
+          this.pushNet(ev.x, ev.y, ev.r, ev.ang, UI.jade)
+        } else {
+          // ② **全向爆炸**（氧气雷 / 水雷 / 诱饵引爆）：各向同性 ⇒ 冲击波环。
+          //    没有方向可言，别硬套网状（那会把"炸开"画成"抛出"）。
+          this.pushShock(ev.x, ev.y, ev.r, 0.4, UI.cyanHi, 3, ev.r * 0.12, 1)
+        }
         break
       case 'arc':
         this.arcs.push({ pts: ev.pts, life: 0.18 })
@@ -1981,6 +2094,19 @@ export class DiveGame extends Component {
     saveProfile(this.profile)
     // 结算后立刻刷新标题屏的钱包（否则要点开装置坞才更新）
     this.title?.refreshWallet()
+  }
+
+  /**
+   * 登记一次**网张开**（V6.61）。
+   *
+   * `ang` 是抛出方向 —— 网沿它拉长。这个值必须由模拟层给出（`openNet` 传子弹速度方向），
+   * 渲染层猜不出来：同一个位置往上扔和往右扔，网的形状完全不同。
+   */
+  private pushNet(x: number, y: number, r: number, ang: number, col: number): void {
+    const ph: number[] = []
+    for (let i = 0; i < NET_SEGS; i++) ph.push(Math.random())
+    this.nets.push({ x, y, ang, r, col, life: 0, maxLife: NET_DUR, ph })
+    if (this.nets.length > NET_CAP) this.nets.splice(0, this.nets.length - NET_CAP)
   }
 
   private pushShock(x: number, y: number, rMax: number, dur: number, color: number, width: number, core: number, rings: number): void {
@@ -2168,6 +2294,7 @@ export class DiveGame extends Component {
     this.blasts.length = 0
     // 环境反光（§6）也归零：换带/结算之后不该还留着一团 0.2s 前的亮斑
     this.atmoFlashes.length = 0
+    this.nets.length = 0                 // 网张开：换带/结算之后不该还挂着一张 0.5s 前的网
     this.fxBits.length = 0
     for (const f of this.fxBitPool) f.sp.node.active = false
     for (const f of this.floatSlots) {
@@ -2291,6 +2418,10 @@ export class DiveGame extends Component {
     this.gBase.fill(UI.abyss, 1)
     this.gBase.fillRect(-pw, -ph, this.W + pw * 2, this.H + ph * 2)
 
+    // ⚠️ 光柱的公共量必须在**颗粒之前**算：`beamGain` 依赖它，而颗粒在光柱之前画。
+    //    放在这里而不是 `drawAtmo` 里，就是为了这个顺序（见 `prepBeams` 的说明）。
+    this.prepBeams(w)
+
     // ---- 海雪 / 悬浮物（V6.50 §3.2 + V6.53 + V6.56）----
     // 四条，缺一条就读不出"在往下走"：
     //   ① **提速**：原 `vy = -6~-20 px/s` 方向是对的（**负值** = y 减小 = 向上掠 = 下潜感），
@@ -2323,9 +2454,14 @@ export class DiveGame extends Component {
       if (m.y < -4) { m.y = this.H + 4; m.x = Math.random() * this.W }
       else if (m.y > this.H + 4) { m.y = -4; m.x = Math.random() * this.W }
       // 近景更亮更大、中景更暗更小 —— Graphics 没有景深，"远近"只能这样读出来
-      const a = m.a * (m.far ? 0.5 : 1)
+      let a = m.a * (m.far ? 0.5 : 1)
       const r = m.r * st.sMul
-      this.gBg.fill(st.col, a)
+      // **光柱照亮的颗粒**（丁达尔效应的因果，见 `BEAM_LIT_GAIN`）：
+      //   在光束里的颗粒同时**变亮**且**偏白**（散射光是天光本色，不是颗粒自己的颜色）。
+      //   没有这一条，光柱就是一层"飘在水前面"的贴纸 —— 与"光被水消化"毫无关系。
+      const lit = this.beamGain(m.x, m.y)
+      if (lit > 0) a = Math.min(0.9, a * (1 + lit * BEAM_LIT_GAIN))
+      this.gBg.fill(lit > 0 ? mixCol(st.col, BEAM_COL_TOP, Math.min(0.6, lit * 0.75)) : st.col, a)
       if (st.sq > 1) {
         // 悬浮絮：拉成横条 + 随暗流左右摆（`wob`）。**摆动是 L2 机制的可见化** ——
         //   玩家光看数字不知道"有暗流"，但看到絮被拽着走就知道了。
@@ -2650,46 +2786,97 @@ export class DiveGame extends Component {
   }
 
   /**
-   * **丁达尔光柱**（§4.2，仅 L1/L2）。
+   * 每帧先算一次光柱的**公共量**（`beamFade` / `beamVp*` / 每条的 `sx`）。
    *
-   * 「浅水」的视觉签名，也是"太阳还在上面"的唯一证据。
-   * 每条 = 3 层不等宽平行四边形（**最宽最淡 / 最窄最亮**）——
-   * ⚠️ **宽度必须有差**：等宽会读作栅栏，这是本轮之前踩过的原话。
-   * 倾角随时间缓慢摆动（**静止读作贴图**），并随 `depthM` 淡出 900→1200。
+   * ⚠️ 必须在 `drawBg` 的颗粒绘制**之前**跑：`beamGain` 要读这些值，而 `drawBg`
+   *    在 `drawAtmo`（`drawBeams` 在里面）之前调用。两处共用同一份快照，
+   *    否则颗粒的"被照亮"区域会与画面上的光柱**错开**。
+   */
+  private prepBeams(w: DiveWorld): void {
+    this.beamFade = 1 - clamp1((w.depthM - BEAM_D0) / (BEAM_D1 - BEAM_D0), 0, 1)
+    if (this.beamFade <= 0.01) return
+    // 水面波让太阳虚像**缓慢漂移** —— 静止的消失点 = 静止的贴图 = 死的
+    const sway = Math.sin((w.t / BEAM_SWAY_T) * Math.PI * 2)
+    this.beamVpX = this.W * BEAM_VP_X + sway * 26
+    this.beamVpY = this.H * BEAM_VP_Y
+    const base = (w.t / BEAM_SWAY_T) * Math.PI * 2
+    for (const b of this.beams) b.sx = b.x + Math.sin(base + b.ph) * BEAM_SWAY_A
+  }
+
+  /**
+   * 点 `(x, y)`（**屏幕坐标**）处的光柱照射增益 `0..1`。
+   *
+   * 给 `drawBg` 的颗粒用：**在光束里的颗粒更亮**。见 `BEAM_LIT_GAIN` ——
+   * 丁达尔效应的因果是"光束可见 = 光正被粒子散射掉"，所以照亮的颗粒不是装饰，
+   * 是光柱**存在的原因**。
+   *
+   * ⛔ 只判中心距离、不判"是不是 L1/L2"：`beamFade` 已经把深层归零了
+   *    （深层没有阳光，自然没有光柱 ⇒ 增益为 0）。
+   */
+  private beamGain(x: number, y: number): number {
+    if (this.beamFade <= 0.01) return 0
+    const yBot = this.H + 40
+    const k = (y - this.beamVpY) / (yBot - this.beamVpY)
+    if (k <= 0) return 0
+    for (const b of this.beams) {
+      const cx = this.beamVpX + (b.sx - this.beamVpX) * k
+      // 半宽取**中间层**（0.72 ≈ 三级嵌套里第二级），与画面上的可见宽度一致
+      const half = b.w * 0.72 * (1 + BEAM_DIFFUSE * k)
+      const d = Math.abs(x - cx)
+      if (d < half) {
+        // 中心亮、边缘暗（光束横截面近似高斯），并叠加该深度的指数衰减
+        return (1 - d / half) * Math.exp(-BEAM_ABSORB * k) * this.beamFade
+      }
+    }
+    return 0
+  }
+
+  /**
+   * **丁达尔光柱**（§4.2，仅 L1/L2）—— 「浅水」的视觉签名，也是"太阳还在上面"的唯一证据。
+   *
+   * V6.61 按**物理**重写（V6.60 是"按几何画"，用户反馈「太机械化 / 不结合物理世界」）：
+   *
+   * | 项 | V6.60（几何） | V6.61（物理） |
+   * |---|---|---|
+   * | 排布 | 等距**平行**直条 | 汇聚到**消失点**（透视；真平行线在画面上必放射） |
+   * | 纵向衰减 | `(1−t)^1.6` 多项式 | **`e^(−1.75t)`** Beer–Lambert 指数 |
+   * | 宽度 | 顶部固定、底部固定倍率 | 随深度**线性增宽**（散射扩散） |
+   * | 颜色 | 整条一个色 | **分波长吸收**：暖白 → 只剩蓝青 |
+   * | 摆动 | 全体同步 | 每条**独立相位**（水面波随机） |
+   * | 与颗粒的关系 | 无 | 光束里的颗粒**被照亮**（丁达尔的因果） |
+   *
+   * 每条仍是 3 层同心嵌套（**最宽最淡 / 最窄最亮**）⇒ 合成出一条带软边的光柱。
+   * ⚠️ 三层必须**同心**：V6.60 第一版给每层加了横向偏移，结果读作"三根并排的条纹"。
    */
   private drawBeams(w: DiveWorld): void {
-    const fade = 1 - clamp1((w.depthM - BEAM_D0) / (BEAM_D1 - BEAM_D0), 0, 1)
-    if (fade <= 0.01) return
+    if (this.beamFade <= 0.01) return
     const z = this.zoom > 0 ? this.zoom : 1
-    const tilt = BEAM_TILT + Math.sin((w.t / BEAM_SWAY_T) * Math.PI * 2) * 0.035  // ±2°
-    const tan = Math.tan(tilt)
     const yTop = -80
     const yBot = this.H + 40
     const span = yBot - yTop
     const layers = ATMO_QUALITY >= 2 ? 3 : 2
     const segs = ATMO_QUALITY >= 2 ? BEAM_SEG : 2
-    const xTop = (b: Beam) => b.x - tan * (this.H * 0.5)
     for (const b of this.beams) {
       // **越窄越亮**：宽窄差是"不是栅栏"的一半，亮度差是另一半
       const bright = 1.30 - (b.w - BEAM_W0) / BEAM_W1 * 0.80
-      // ⚠️ 三层**同心嵌套**（宽淡包窄亮）⇒ 合成出来是**一条带软边的光柱**。
-      //    第一版给每层加了 16px 横向偏移，结果读作"三根并排的条纹"（预览图当场看出）。
-      //    "最宽最淡、最窄最亮"说的是**同一根柱子**的内外关系，不是三根柱子。
       for (let L = 0; L < layers; L++) {
         const wTop = (b.w * (1.45 - 0.32 * L)) / z
-        const wBot = wTop * BEAM_SPREAD
-        const aBase = (0.030 + 0.022 * L) * fade * bright
-        // 纵向分段：光在水里是**越深越弱**的。上下一样亮 = 一条贯穿全屏的硬条，
-        // 那正是"贴纸感"的来源（用户：光柱"有点突兀"）。
+        const aBase = (0.030 + 0.022 * L) * this.beamFade * bright
         for (let s = 0; s < segs; s++) {
           const t0 = s / segs
           const t1 = Math.min(1, (s + 1) / segs + BEAM_OVERLAP)   // 搭边消接缝
           const yA = yTop + span * t0, yB = yTop + span * t1
-          const wA = wTop + (wBot - wTop) * t0, wB = wTop + (wBot - wTop) * t1
-          // 中心线随倾角平移（顶部锚在 `xTop`）
-          const cxA = xTop(b) + tan * (yA - yTop), cxB = xTop(b) + tan * (yB - yTop)
-          const a = aBase * Math.pow(1 - t0, BEAM_FALLOFF)
-          this.gAtmo.fill(BEAM_COLOR, a)
+          // ① **透视**：两条边都向消失点收敛（`k` = 从消失点算起的行程比例）
+          const kA = (yA - this.beamVpY) / (yBot - this.beamVpY)
+          const kB = (yB - this.beamVpY) / (yBot - this.beamVpY)
+          const cxA = this.beamVpX + (b.sx - this.beamVpX) * kA
+          const cxB = this.beamVpX + (b.sx - this.beamVpX) * kB
+          // ② **散射扩散**：越深越宽（不是固定倍率的梯形）
+          const wA = wTop * (1 + BEAM_DIFFUSE * t0), wB = wTop * (1 + BEAM_DIFFUSE * t1)
+          // ③ **Beer–Lambert 指数衰减**
+          const a = aBase * Math.exp(-BEAM_ABSORB * t0)
+          // ④ **分波长吸收**：越深越只剩蓝青
+          this.gAtmo.fill(mixCol(BEAM_COL_TOP, BEAM_COL_BOT, t0), a)
           this.gAtmo.moveTo(cxA - wA * 0.5, yA)
           this.gAtmo.lineTo(cxA + wA * 0.5, yA)
           this.gAtmo.lineTo(cxB + wB * 0.5, yB)
@@ -2912,6 +3099,8 @@ export class DiveGame extends Component {
         // 横向铺开 + 较大抖动：等距会读作**栅栏**（预览图里一眼看出来过）
         x: this.W * ((i + 0.5 + (Math.random() - 0.5) * 1.1) / BEAM_N),
         w: BEAM_W0 + Math.random() * BEAM_W1,
+        ph: BEAM_SWAY_PH[i % BEAM_SWAY_PH.length],
+        sx: 0,
       })
     }
   }
@@ -3981,7 +4170,7 @@ export class DiveGame extends Component {
     }
   }
 
-  private drawFx(): void {
+  private drawFx(dt: number): void {
     // ---- 受击白闪最先画 ----
     // web 的层序是「鱼的白色剪影 < 冲击波 < 击打痕 < 火花」，闪白属于敌人那一层，
     // 所以它必须排在冲击波之前 —— 被冲击波压住就看不出"是这条鱼挨打了"。
@@ -4053,6 +4242,81 @@ export class DiveGame extends Component {
         neonLine(this.gFront, s.x, s.y, s.x - ca * L * k, s.y - sa * L * k, s.color,
           { width: Math.max(0.5, s.size * k), alpha: k, bloom: false })
       }
+    }
+
+    // 网张开排在最后：它是**面积最大**的特效，压在火星之上才不会被自己的碎屑糊住
+    this.drawNets(dt)
+  }
+
+  /**
+   * **网张开**（V6.61 按物理重写）。画在 `gFront`（敌人之上），四件事：
+   *   ① **网衣**（极淡填充）—— 让网"有面"，不是一圈线；
+   *   ② **网缘**（主轮廓）—— 12 颗铅坠 + 扇贝波；
+   *   ③ **网目** —— 径向索（中心 → 每颗铅坠）+ 两圈环向索；
+   *   ④ **铅坠** —— 网缘上的配重块，也是网最先下沉的地方。
+   *
+   * ⛔ **不要退化成"同心圆环 + 径向线"**：那读作冲击波 / 雷达，不是网。
+   *    网之所以是网，靠的是**环向索**（把径向索连起来的那些圈）—— 有它才有"网格"。
+   *
+   * 时序两段：**先展开（0 → `NET_OPEN_END`）后塌陷收拢**（`NET_OPEN_END` → 1）。
+   * 一直往外扩 = 爆炸，玩家会以为这是个伤害圈；网恰恰相反，张开到最大后要**塌回去缠住猎物**。
+   */
+  private drawNets(dt: number): void {
+    for (let i = this.nets.length - 1; i >= 0; i--) {
+      const n = this.nets[i]
+      n.life += dt
+      const t = n.life / n.maxLife
+      if (t >= 1) { this.nets.splice(i, 1); continue }
+
+      const open = t < NET_OPEN_END
+      const kIn = open ? t / NET_OPEN_END : (t - NET_OPEN_END) / (1 - NET_OPEN_END)
+      // ① 展开 0.35r → 1.0r（网从收拢的网束张开）；② 塌陷 1.0r → 0.82r
+      const spread = open ? 0.35 + 0.65 * kIn : 1 - (1 - NET_COLLAPSE) * kIn
+      // 沿抛出方向**越飞越长**：迎水的一面被向后拖（柔性体，不是刚性圆）
+      const a1 = n.r * spread * (1 + NET_STRETCH * (open ? kIn : 1))
+      const b1 = n.r * spread
+      // alpha：展开期由淡转实；塌陷期淡出
+      const al = open ? 0.30 + 0.55 * kIn : 0.85 * (1 - kIn)
+
+      const ca = Math.cos(n.ang), sa = Math.sin(n.ang)
+      const px: number[] = [], py: number[] = []
+      for (let k = 0; k < NET_SEGS; k++) {
+        const th = (k / NET_SEGS) * Math.PI * 2
+        // **水滴**（前尖后宽）× **扇贝**（铅坠之间网衣被水顶起）× **各段随机**（打破完美对称）
+        const w = (1 - NET_TAPER * Math.cos(th))
+          * (1 + NET_SCALLOP * Math.sin(NET_SCALLOP_N * th) + (n.ph[k] - 0.5) * NET_JITTER)
+        const lx = a1 * w * Math.cos(th), ly = b1 * w * Math.sin(th)
+        px.push(n.x + lx * ca - ly * sa)
+        py.push(n.y + lx * sa + ly * ca)
+      }
+      const outline = () => {
+        this.gFront.moveTo(px[0], py[0])
+        for (let k = 1; k < NET_SEGS; k++) this.gFront.lineTo(px[k], py[k])
+        this.gFront.close()
+      }
+
+      // ① 网衣
+      this.gFront.fill(n.col, al * 0.12); outline(); this.gFront.fillPath()
+      // ② 网缘
+      this.gFront.line(n.col, al, 1.5); outline(); this.gFront.stroke()
+      // ③ 径向索（只连到 0.92 —— 留出铅坠的位置）
+      this.gFront.line(n.col, al * 0.5, 0.8)
+      for (let k = 0; k < NET_SEGS; k++) {
+        this.gFront.strokeSeg(n.x + (px[k] - n.x) * 0.92, n.y + (py[k] - n.y) * 0.92, px[k], py[k])
+      }
+      // ④ 环向索：两圈，把径向索**连起来** ⇒ 这才读作"网"
+      for (const fr of [0.38, 0.66]) {
+        this.gFront.line(n.col, al * 0.42, 0.7)
+        this.gFront.moveTo(n.x + (px[0] - n.x) * fr, n.y + (py[0] - n.y) * fr)
+        for (let k = 1; k < NET_SEGS; k++) {
+          this.gFront.lineTo(n.x + (px[k] - n.x) * fr, n.y + (py[k] - n.y) * fr)
+        }
+        this.gFront.close()
+        this.gFront.stroke()
+      }
+      // ⑤ 铅坠
+      this.gFront.fill(n.col, al * 0.85)
+      for (let k = 0; k < NET_SEGS; k++) this.gFront.fillCircle(px[k], py[k], 1.8)
     }
   }
 }
