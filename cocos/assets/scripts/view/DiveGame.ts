@@ -178,6 +178,45 @@ interface SchoolFish {
 }
 
 /**
+ * 远景鱼的**单条轮廓**（V6.64）。归一化坐标：
+ *   `u` = 从头到尾 0→1 · `v` = 横向半高比例（正负 = 上下）。
+ *
+ * ⚠️ **为什么从"椭圆 + 三角尾"换成一条完整轮廓**：椭圆没有**任何鱼的结构特征**
+ * —— 没有最厚点的位置、没有尾柄的收细、没有分叉的尾鳍。压到远景尺寸（26~78px）后，
+ * "一个扁椭圆 + 一片三角"读作**一片叶子 / 一只蝌蚪**，读不出"鱼"。
+ *
+ * 一条鱼能被认出来，靠的是**三个结构事实**，缺一个就散：
+ *   ① **最厚点在体前 38%**（不是正中）—— 鱼的重心靠前，这是"头在这一端"的读法；
+ *   ② **尾柄收细、但收不细过头**（见下方 ⚠️）；
+ *   ③ **尾鳍在纵向张开、后缘成 V 形缺口**（上叶 → 缺口 → 下叶）。
+ *
+ * 用**一个多边形**画完整条鱼还有一个额外好处：**1 个图元/条**（原来是椭圆 + 三角 = 2），
+ * L1 的 46 条从 92 图元降到 46 —— 省下的预算正好给 V6.64 的光幕。
+ *
+ * ---------------------------------------------------------------------------
+ * ⚠️ V6.64 二次修正：第一版四条点在纵向上几乎重合 ⇒ 整体读作**一支飞镖**
+ * ---------------------------------------------------------------------------
+ * 第一版尾鳍写的是 `[1.20, 0.70] / [0.94, 0.00] / [1.20, −0.70]`：
+ * 尾叶只张开 **0.70 半高**，而身体最厚处是 **1.00** ⇒ 尾比身体**还窄**，
+ * 加上尾柄收到 0.22（几乎归零）、身体长达 1.0 ⇒ 剪影上的信息只剩"一个尖角"，
+ * 缩到 26px 直接读成**箭头 / 飞镖**（预览图实例）。
+ *
+ * ⇒ 两条反向修正：
+ *   · **尾鳍要张开**：半高抬到 **1.05**，超过身体最厚处（真鱼尾鳍确实宽于体高）；
+ *   · **尾柄不能收得太细**：0.22 → **0.38**。尾柄在 26px 上只有约 2px，
+ *     收到 0.22 就等于**断开** ⇒ 尾鳍读作"飘在旁边的一块三角"。
+ *   · 身体后段（0.62 处）从 0.60 抬到 0.72 ⇒ 后段不收太早，轮廓更饱满。
+ */
+const FISH_OUTLINE: Array<[number, number]> = [
+  // 上边缘：钝头 → 最厚(0.38) → 后段渐收 → 尾柄
+  [0.00, 0.16], [0.16, 0.60], [0.38, 1.00], [0.62, 0.72], [0.82, 0.38], [0.98, 0.26],
+  // 尾鳍：上叶 → **V 形缺口** → 下叶（张开到 1.05，**宽于体高**）
+  [1.24, 1.05], [0.94, 0.10], [1.24, -1.05],
+  // 下边缘：从尾根回到头（与上边缘对称）
+  [0.98, -0.26], [0.82, -0.38], [0.62, -0.72], [0.38, -1.00], [0.16, -0.60], [0.00, -0.16],
+]
+
+/**
  * **每带的水体物质**（V6.51 §9 第 4 步「海雪 → 五带物质」）。
  *
  * 为什么必须分层：五带现在**换了背景图、换了光**，但如果悬浮物还是同一种白点，
@@ -213,10 +252,18 @@ const MOTE_STYLE: readonly MoteStyle[] = [
 interface Beam {
   /** 底部的**横向锚点**（屏幕 px）*/
   x: number
-  /** 顶宽（px）。各条不等 —— 等宽读作栅栏 */
+  /** 顶宽（px）。**由行波给出**，不是纯随机 —— 纯随机 ⇒ 相邻宽度突变 ⇒ 读作离散柱子 */
   w: number
-  /** 摆动**相位**（rad）。水面波是随机的 ⇒ 各条光束**不同步**（同步读作"贴图在平移"）*/
+  /** 摆动**相位**（rad）。**按序号线性递增** ⇒ 整片光幕上的起伏是一道横扫的行波 */
   ph: number
+  /**
+   * 本条的**相对亮度权重**（0.35~1.0，来自行波的起伏值）。
+   *
+   * 给 `beamGain` 用：颗粒在**波峰**处被照得更亮、波谷处更暗。
+   * ⚠️ 光柱连成一片之后，几乎所有颗粒都在光里 —— 若增益不加这个权重，
+   *    "被照亮"就失去对比 ⇒ 丁达尔的因果（光束可见 = 光正被粒子散射掉）**看不出来**。
+   */
+  lit: number
   /** 本帧摆动后的底部 x（由 `prepBeams` 每帧写入，`beamGain` 与 `drawBeams` 共用）*/
   sx: number
 }
@@ -518,9 +565,42 @@ const FOG_BANDS = 12
 const FOG_ALPHA = 0.22
 
 // ---- 丁达尔光柱（仅 L1 / L2，§4.2）----
-/** 光柱条数（§4.2「4–6 条」）。取**下限 4** —— 5–6 条在 1304 宽上会把画面铺满，
- *  读作"一片光幕"而不是"几道透下来的光柱"（预览图实测）。**宽度必须不等**，等宽读作栅栏 */
-const BEAM_N = 4
+/**
+ * 光柱**条数**。⚠️ V6.64 从 **4 改成 13** —— 这是「阳光应该是平面的，柱子太突兀」的正解。
+ *
+ * **前提是错的**：V6.61 的"放射柱"隐含假设了水面上方有**离散遮挡物**（云、岩缝、沉船），
+ * 所以光被切成"一束一束"（云隙光就是这么来的）。但 **L1/L2 是开阔水域，水面没有遮挡**
+ * ⇒ 阳光是**一整片**同时入射的。玩家该看到的不是几束光，而是**整片水从上方被照亮**，
+ * 上面叠加水面行波造成的**连续明暗起伏**。
+ *
+ * 原来那 4 条之所以"突兀"，根因是**两个几何量**，跟亮度无关：
+ *   ① **间距 ≫ 宽度** —— 4 条铺在 1304 宽上 ⇒ 间距 326px，而柱宽只有 35~99px
+ *      ⇒ 条与条之间是**大片空隙**，视觉上必然是"几根柱子"；
+ *   ② **宽度纯随机** —— `BEAM_W0 + rand×BEAM_W1` 让**相邻两条宽度突变**
+ *      ⇒ 读作"两根各画各的柱子"，而不是"同一片光上的起伏"。
+ *
+ * ⇒ 修法**不是调 alpha**（V6.60 的教训：硬边来自几何，不来自亮度）：
+ *    条数加到 13（间距 ≈100px）+ 宽度加大 ⇒ **相邻条互相重叠成一片**；
+ *    宽度与相位**沿序号连续变化**（正弦行波）⇒ 合成后是**一片有波纹起伏的光幕**。
+ *
+ * ---------------------------------------------------------------------------
+ * ⚠️ V6.64 二次修正：**光幕 = 整片基底 + 起伏调制**，不是"很多条拼起来"
+ * ---------------------------------------------------------------------------
+ * 上一版把条数加到 13 后，**横向 alpha 剖面的 min 仍然是 0**（脚本实测）——
+ * 也就是说条与条之间**还是漏光**，只是缝从 326px 缩到几十 px，本质没变。
+ *
+ * 物理上的错误在于：把"阳光"建模成了**很多条独立的柱子**。
+ * 但 L1/L2 是**开阔水域，水面没有任何遮挡物** ⇒ 阳光是**一整片同时入射**的 ——
+ * 玩家该看到的是「**整片水从上方被照亮**」，再叠加水面波纹造成的**明暗起伏**。
+ * 波纹调制的是**亮度**，不是"有光 / 无光"的开关。
+ *
+ * ⇒ 拆成两层：
+ *    ① **基底光幕**（`BEAM_SHEET_A`）：铺满全屏宽的一整片，随深度 Beer–Lambert 衰减
+ *       + 分波长吸收。它保证剖面**处处 > 0**（这就是"平面"的那一半）。
+ *    ② **起伏条带**（13 条行波）：只负责**在基底之上加亮度调制**，允许有疏密，
+ *       因为底下已经有光兜着，不再是"柱子"。
+ */
+const BEAM_N = 13
 /**
  * **消失点**（太阳的虚像，归一化屏幕坐标；`y` 为负 = 屏幕上方之外）。
  *
@@ -539,8 +619,14 @@ const BEAM_VP_X = 0.62
 const BEAM_VP_Y = -0.55
 /** 摆动周期（s）。**不能静止 —— 静止读作贴图** */
 const BEAM_SWAY_T = 11
-/** 每条的摆动相位（rad）。`Beam.ph` 从中取值，保证各条不同步 */
-const BEAM_SWAY_PH = [0, 1.7, 3.4, 5.1, 0.9, 2.6]
+/**
+ * **相邻条的相位差**（rad）。水面波是**空间连续的行波** ⇒ 相邻位置的相位差恒定，
+ * 于是整片光幕上看到的起伏是**一道横着扫过去的波**。
+ *
+ * ⚠️ V6.61 用的是乱序数组 `[0, 1.7, 3.4, 5.1, 0.9, 2.6]` ⇒ 相邻条摆动互不连贯
+ *    ⇒ 读作"几根柱子各自在晃"，而不是"一片水在动"。**行波必须相位递增。**
+ */
+const BEAM_SWAY_STEP = 0.55
 /** 水面波动引起的横向摆幅（px，底部）*/
 const BEAM_SWAY_A = 14
 /**
@@ -548,9 +634,15 @@ const BEAM_SWAY_A = 14
  * 清澈海水的**衰减长度**：红 ≈5 m / 橙 ≈20 m / 黄 ≈50 m / 绿 ≈100 m / 蓝 ≈200 m。
  * ⇒ 光柱在水下是**变色**的：入水处暖白，往下走只剩蓝青。
  * ⚠️ V6.60 整条一个颜色（0xdff2ff）⇒ "贴纸感"的另一半来源。
+ *
+ * ⚠️ **V6.64 二次修正：变色速率被误设得太快**。原来 `0x93cdf0` 的绿分量掉到 205/242
+ *    ⇒ 按 `t0` 拉到 1/3 屏高时就明显偏蓝，画面上表现为**一条横向的色阶带**
+ *    （预览图里那片"上面暖白、下面突然转蓝"的横带就是这么来的）。
+ *    物理上这个变色要走完**几百米水柱**，一屏高度只该看出**轻微**偏暖 → 偏冷。
+ *    ⇒ 收到 `0xcfe9fb`（绿 233/242）。判据：**整片光幕内看不出色相台阶**。
  */
 const BEAM_COL_TOP = 0xfff2dc
-const BEAM_COL_BOT = 0x93cdf0
+const BEAM_COL_BOT = 0xcfe9fb
 /**
  * **Beer–Lambert 指数衰减** `I(d) = I₀ · e^(−c·d)`。
  *
@@ -565,9 +657,55 @@ const BEAM_ABSORB = 1.75
  * `w(t) = w₀ × (1 + BEAM_DIFFUSE × t)` ⇒ 底部 1.8× 顶宽。
  */
 const BEAM_DIFFUSE = 0.8
-/** 单条**顶宽**区间（px，屏幕坐标）。宽度是"几道"与"一片"的分界，比亮度分配更敏感 */
-const BEAM_W0 = 24
-const BEAM_W1 = 44
+/**
+ * 单条**顶宽** = `BEAM_W_BASE + BEAM_W_AMP × 行波值`（px，屏幕坐标）。
+ *
+ * ⚠️ **不再是"随机区间"** —— 宽度由**沿序号的正弦行波**给出（见 `buildBeams`）：
+ *   相邻两条宽度接近 ⇒ 合成后是**连续起伏的光幕**；
+ *   纯随机 ⇒ 相邻宽度突变 ⇒ 又回到"各自独立的柱子"。
+ *   基准 80 / 幅度 36 ⇒ 顶宽 44~116px，最外层 ×1.45 ⇒ 64~168px，
+ *   与间距 1304/13 ≈ 100px 同量级 ⇒ **必然重叠成一片**。
+ *
+ * ⚠️ V6.64：有了基底光幕兜底，条带**只需提供起伏**，不再需要靠自身宽度去补缝
+ *   ⇒ 基准抬到 80、幅度收到 36（**不能再宽**：宽度接近间距的 2 倍 ⇒ 起伏被抹平成死平）。
+ */
+const BEAM_W_BASE = 80
+const BEAM_W_AMP = 36
+/**
+ * 沿序号的**空间波数**：一个屏幕内约 1.6 个明暗起伏周期。
+ * ⚠️ 太少 = 一片死平（没有"水面在动"的证据）；太多 = 间距小于宽度太多，又变回栅栏。
+ */
+const BEAM_WAVE_K = 1.6
+/** 随机扰动占起伏的比例。1.0 = 纯随机（= V6.61 的"柱子"），必须压到 0.25 以下 */
+const BEAM_WAVE_JITTER = 0.22
+/**
+ * 单层 alpha 的**基底与层间增量**。
+ *
+ * ⚠️ 比 V6.61 低约 **2.4 倍** —— 因为 13 条互相重叠，同一像素会被覆盖 4~6 次。
+ *    **别按"单条看着太淡"去调高**：画面上是**合成值**，单条调高会让光幕过曝成一片白
+ *    （V6.60 那个"一片光幕"就是这么来的，用户当时同样判它不对）。
+ */
+const BEAM_A0 = 0.013
+const BEAM_A1 = 0.009
+/**
+ * **整片基底光幕**的 alpha（V6.64 新增）。
+ *
+ * 这是「阳光是一整片」的那一半：**铺满全屏宽**，随深度 `e^(−1.75t)` 衰减 + 分波长吸收。
+ * 它保证横向 alpha 剖面**处处 > 0** —— 只要剖面还有一处掉到 0，视觉上就还是"柱子"。
+ *
+ * 判据（可脚本验证，见 `tools/preview_v664.py`）：屏宽 20%~80% 的 `min/max > 0.3`。
+ * ⚠️ 调参时**只看这个数字**，别按"基底层看着太淡"去调高 —— 它外面还要乘起伏包络。
+ */
+const BEAM_SHEET_A = 0.115
+/**
+ * **起伏包络的增益**（V6.64 新增）。
+ *
+ * 条带不再各画各的，只贡献一个**乘性包络** `1 + env×GAIN`：
+ *   · `GAIN = 0` ⇒ 整片均匀（= 关了起伏，读作一层灰纱）；
+ *   · 太大 ⇒ 包络波谷接近 0、波峰 2~3× ⇒ 又变回明暗分明的竖条。
+ * 取 0.35 ⇒ 剖面在 1.0~1.55 倍之间起伏，**幅度够看出"水在动"、又不会被读成条**。
+ */
+const BEAM_ENV_GAIN = 0.35
 /** 纵向分段数：顶亮 → 底淡。**上下一样亮 = 一条贯穿全屏的硬条**（贴纸感的真凶）*/
 const BEAM_SEG = 3
 /** 段与段的重叠比例（消接缝：相邻段之间留一条 4% 的搭边）*/
@@ -2681,15 +2819,23 @@ export class DiveGame extends Component {
 
       const a = f.alpha * f.fade
       const L = f.size
-      const h = L * 0.40
-      // 身体：压扁的椭圆（侧视鱼是长条，不是圆）。**无发光核**。
+      const H = L * 0.20                       // 半高（与旧的 `h*0.5 = L*0.2` 同值）
+      const s = f.vx > 0 ? 1 : -1              // 头在游向那一端
+      const tailPhase = w.t * 5 + f.phase      // 摆尾相位逐条错开，否则一群鱼像一块板
+      const swing = Math.sin(tailPhase) * H * 0.55
+
+      // 一条完整轮廓 = **1 个图元**（旧版是椭圆 + 三角 = 2）。**无发光核**。
+      const pts: Array<{ x: number; y: number }> = []
+      for (const [u, v] of FISH_OUTLINE) {
+        // 越靠尾摆得越多（头几乎不动）—— 游动是"尾巴在推"，整条平移读作贴图
+        const wTail = Math.max(0, (u - 0.6) / 0.4)
+        // 身体**中段**的轻微起伏（`sin(u*π)` ⇒ 两端为 0，不破坏头尾的接驳）
+        const bend = Math.sin(tailPhase - 0.8) * H * 0.12 * Math.sin(u * Math.PI)
+        pts.push({ x: f.x + s * (0.5 - u) * L, y: f.y + v * H + bend + swing * wTail })
+      }
       this.gAtmo.fill(ATM_FISH_TINT[idx] ?? 0x24455c, a)
-      this.gAtmo.fillEllipse(f.x, f.y, L * 0.5, h * 0.5)
-      // 尾鳍：摆尾相位逐条错开，否则一群鱼像一块板。尾在身后（贴图基准朝左，这里按游向定）
-      const s = f.vx > 0 ? 1 : -1
-      const swing = Math.sin(w.t * 5 + f.phase) * h * 0.5
-      this.gAtmo.fillTri(f.x - s * L * 0.48, f.y + swing,
-        s > 0 ? Math.PI : 0, L * 0.42, h * 0.5)
+      this.gAtmo.polyline(pts)
+      this.gAtmo.fillPath()
     }
   }
 
@@ -2824,8 +2970,10 @@ export class DiveGame extends Component {
       const half = b.w * 0.72 * (1 + BEAM_DIFFUSE * k)
       const d = Math.abs(x - cx)
       if (d < half) {
-        // 中心亮、边缘暗（光束横截面近似高斯），并叠加该深度的指数衰减
-        return (1 - d / half) * Math.exp(-BEAM_ABSORB * k) * this.beamFade
+        // 中心亮、边缘暗（光束横截面近似高斯），并叠加该深度的指数衰减。
+        // ⚠️ 乘 `b.lit`（行波起伏）：光柱连成一片后几乎所有颗粒都在光里，
+        //    没有这个权重的话"被照亮"就没有对比 ⇒ 丁达尔的因果看不出来。
+        return (1 - d / half) * Math.exp(-BEAM_ABSORB * k) * this.beamFade * b.lit
       }
     }
     return 0
@@ -2856,35 +3004,105 @@ export class DiveGame extends Component {
     const span = yBot - yTop
     const layers = ATMO_QUALITY >= 2 ? 3 : 2
     const segs = ATMO_QUALITY >= 2 ? BEAM_SEG : 2
-    for (const b of this.beams) {
-      // **越窄越亮**：宽窄差是"不是栅栏"的一半，亮度差是另一半
-      const bright = 1.30 - (b.w - BEAM_W0) / BEAM_W1 * 0.80
-      for (let L = 0; L < layers; L++) {
-        const wTop = (b.w * (1.45 - 0.32 * L)) / z
-        const aBase = (0.030 + 0.022 * L) * this.beamFade * bright
-        for (let s = 0; s < segs; s++) {
-          const t0 = s / segs
-          const t1 = Math.min(1, (s + 1) / segs + BEAM_OVERLAP)   // 搭边消接缝
-          const yA = yTop + span * t0, yB = yTop + span * t1
-          // ① **透视**：两条边都向消失点收敛（`k` = 从消失点算起的行程比例）
-          const kA = (yA - this.beamVpY) / (yBot - this.beamVpY)
-          const kB = (yB - this.beamVpY) / (yBot - this.beamVpY)
-          const cxA = this.beamVpX + (b.sx - this.beamVpX) * kA
-          const cxB = this.beamVpX + (b.sx - this.beamVpX) * kB
-          // ② **散射扩散**：越深越宽（不是固定倍率的梯形）
-          const wA = wTop * (1 + BEAM_DIFFUSE * t0), wB = wTop * (1 + BEAM_DIFFUSE * t1)
-          // ③ **Beer–Lambert 指数衰减**
-          const a = aBase * Math.exp(-BEAM_ABSORB * t0)
-          // ④ **分波长吸收**：越深越只剩蓝青
-          this.gAtmo.fill(mixCol(BEAM_COL_TOP, BEAM_COL_BOT, t0), a)
-          this.gAtmo.moveTo(cxA - wA * 0.5, yA)
-          this.gAtmo.lineTo(cxA + wA * 0.5, yA)
-          this.gAtmo.lineTo(cxB + wB * 0.5, yB)
-          this.gAtmo.lineTo(cxB - wB * 0.5, yB)
-          this.gAtmo.close()
-          this.gAtmo.fillPath()
-        }
+
+    // ---- ① 整片基底光幕：阳光是**一整片入射**，不是很多条柱子 ----
+    // 铺满全屏宽（左右各溢出 80px，避免边缘出现竖直硬边），纵向同样分段衰减 + 变色。
+    const xL = -80, xR = this.W + 80
+    for (let s = 0; s < segs; s++) {
+      const t0 = s / segs
+      const t1 = Math.min(1, (s + 1) / segs + BEAM_OVERLAP)
+      const a = BEAM_SHEET_A * this.beamFade * Math.exp(-BEAM_ABSORB * t0)
+      if (a < 0.002) continue
+      this.gAtmo.fill(mixCol(BEAM_COL_TOP, BEAM_COL_BOT, t0), a)
+      this.gAtmo.moveTo(xL, yTop + span * t0)
+      this.gAtmo.lineTo(xR, yTop + span * t0)
+      this.gAtmo.lineTo(xR, yTop + span * t1)
+      this.gAtmo.lineTo(xL, yTop + span * t1)
+      this.gAtmo.close()
+      this.gAtmo.fillPath()
+    }
+
+    // ---- ② 起伏条带：**不单独画，只给基底加 alpha** ----
+    //⚠️ 不能把条带当"独立的半透明形状"再叠一层 —— 那样叠出来的 alpha 是加法
+    //   （`a₁ + a₂(1−a₁)`），条带中心必然比基底高出一档 ⇒ 画面上清清楚楚看得出
+    //   **13 道竖着的亮带**（V6.64 预览图实例）。物理上也不对：水面波纹调制的是
+    //   **入射强度**，不是"再盖一层光上去"。
+    //⇒ 正确做法：**条带只在剖面里贡献数值**，最终画出来的**只有基底那一片**，
+    //   它的 alpha 剖面 = `基底 × (1 + 起伏包络)`。这正是"被调制的整片光"。
+    for (let s = 0; s < segs; s++) {
+      const t0 = s / segs
+      const t1 = Math.min(1, (s + 1) / segs + BEAM_OVERLAP)
+      const yA = yTop + span * t0, yB = yTop + span * t1
+      // 只需采样这一段的**横向包络**：条带在纵向是直条（只有散射扩散的轻微外扩），
+      // 段内变化可忽略 ⇒ 取段中点算一次。
+      const env = this.beamEnvelope((yA + yB) * 0.5, yBot)
+      if (env.max < 0.01) continue
+      const a = BEAM_SHEET_A * this.beamFade * Math.exp(-BEAM_ABSORB * t0)
+      if (a < 0.002) continue
+      this.beamSheetStrip(xL, xR, yA, yB, env, a, mixCol(BEAM_COL_TOP, BEAM_COL_BOT, t0))
+    }
+  }
+
+  /**
+   * 某一行的**横向起伏包络**：把 13 条行波的横向剖面算成 `ceil/1.5` 的**台阶函数**。
+   *
+   * 为什么返回 `/1.5` 的整数档：Graphics 画多边形要**离散的横坐标分段**，
+   * 每段一个常量增益（等值面阶梯）。1.5px 的分辨率在 1304 宽上有 870 档，
+   * 肉眼完全看不出一档一档（而每多一档就多 2 个顶点 —— 图元预算见文件头）。
+   *
+   * ⚠️ 参数 `w` 里已经含了**透视收敛**（`k` = 从消失点算起的行程比例）——
+   *   底部行宽 ≠ 顶部行宽，所以每行都要重算，不能全屏共用一条包络。
+   */
+  private beamEnvelope(y: number, yBot: number): { cols: Int32Array; vals: Float32Array; max: number } {
+    const STEP = 1.5
+    const n = Math.ceil(this.W / STEP) + 1
+    const cols = new Int32Array(n)
+    const vals = new Float32Array(n)
+    const k = (y - this.beamVpY) / (yBot - this.beamVpY)
+    const grow = 1 + BEAM_DIFFUSE * Math.max(0, Math.min(1, k))
+    let max = 0
+    for (let i = 0; i < n; i++) {
+      const x = i * STEP
+      let env = 0
+      const c = this.beamVpX + (0 - this.beamVpX) * k   // 该行 x=0 的位置
+      for (const b of this.beams) {
+        const bx = this.beamVpX + (b.sx - this.beamVpX) * k
+        const half = b.w * 0.72 * grow / (this.zoom > 0 ? this.zoom : 1)
+        const d = Math.abs(x - bx)
+        if (d >= half) continue
+        env += (1 - d / half) * b.lit
       }
+      void c
+      const v = env * BEAM_ENV_GAIN
+      cols[i] = Math.round(x) | 0
+      vals[i] = v
+      if (v > max) max = v
+    }
+    return { cols, vals, max }
+  }
+
+  /**
+   * 按包络画**一条横向的条带**：横坐标按 `STEP` 分段，每段用**该处的增益**乘基底 alpha。
+   *
+   * ⚠️ 相邻段之间必须**首尾相接**（下一段的 `x` 起点 = 上一段的终点），
+   *   否则段与段之间会留出竖直的缝 —— 缝在 1.5px 分辨率下肉眼可见（一片竖条纹）。
+   */
+  private beamSheetStrip(xL: number, xR: number, yA: number, yB: number,
+                         env: { cols: Int32Array; vals: Float32Array }, aBase: number, col: number): void {
+    const { cols, vals } = env
+    const n = cols.length
+    for (let i = 0; i < n - 1; i++) {
+      const x0 = i === 0 ? xL : cols[i]
+      const x1 = i === n - 2 ? xR : cols[i + 1]
+      const a = aBase * (1 + vals[i])
+      if (a < 0.002) continue
+      this.gAtmo.fill(col, a)
+      this.gAtmo.moveTo(Math.max(xL, x0), yA)
+      this.gAtmo.lineTo(x1, yA)
+      this.gAtmo.lineTo(x1, yB)
+      this.gAtmo.lineTo(Math.max(xL, x0), yB)
+      this.gAtmo.close()
+      this.gAtmo.fillPath()
     }
   }
 
@@ -3090,16 +3308,34 @@ export class DiveGame extends Component {
     }
   }
 
-  /** 丁达尔光柱（§4.2）：**仅 L1/L2**。宽度必须有差，否则读作栅栏 */
+  /**
+   * 丁达尔光柱（§4.2）：**仅 L1/L2**。
+   *
+   * ⚠️ V6.64：宽度与亮度**由行波给出**（不是随机），这是"连成一片"的关键。
+   *   纯随机宽度 ⇒ 相邻两条突变 ⇒ 读作各自独立的柱子（用户：「柱子太突兀」）。
+   */
   private buildBeams(layerIdx: number): void {
     this.beams.length = 0
     if (layerIdx > 1) return
+    // 行波的**随机初相**：每换一次带，光幕的起伏位置换一批（否则每次换带都长一样）
+    const phi = Math.random() * Math.PI * 2
     for (let i = 0; i < BEAM_N; i++) {
+      const u = i / BEAM_N
+      // 沿序号的**连续行波**（-1..1）+ 少量随机扰动
+      const wave = Math.sin(u * BEAM_WAVE_K * Math.PI * 2 + phi)
+      const jitter = (Math.random() - 0.5) * 2 * BEAM_WAVE_JITTER
+      const k = Math.max(-1, Math.min(1, wave + jitter))
       this.beams.push({
-        // 横向铺开 + 较大抖动：等距会读作**栅栏**（预览图里一眼看出来过）
-        x: this.W * ((i + 0.5 + (Math.random() - 0.5) * 1.1) / BEAM_N),
-        w: BEAM_W0 + Math.random() * BEAM_W1,
-        ph: BEAM_SWAY_PH[i % BEAM_SWAY_PH.length],
+        // 横向**均匀铺开**（间距 W/N ≈ 100px）。抖动要小 —— 等距在这里是**对的**：
+        // 我们要的就是"均匀铺满"，相邻的间距突变才会读作离散柱子
+        x: this.W * ((i + 0.5 + (Math.random() - 0.5) * 0.35) / BEAM_N),
+        // 波峰宽、波谷窄 ⇒ 合成后是连续起伏的一片，不是几根柱子
+        w: BEAM_W_BASE + BEAM_W_AMP * k,
+        // 相位**按序号递增** ⇒ 一道横扫的行波（V6.61 的乱序数组读作"各自在晃"）
+        ph: i * BEAM_SWAY_STEP,
+        // 越窄越亮（能量集中）—— 波谷窄且亮、波峰宽且淡 ⇒ 合成后起伏被拉平一点，
+        // 但仍然保留"水面在动"的证据。下限 0.35 防止过曝。
+        lit: Math.max(0.35, 1.0 - 0.55 * (k * 0.5 + 0.5)),
         sx: 0,
       })
     }
