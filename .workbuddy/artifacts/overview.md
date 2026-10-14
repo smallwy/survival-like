@@ -12,6 +12,7 @@
 | 4 | §9-7 **交互光反馈** | 开火 / 爆炸 / 拾取 → 水里亮一下（软边、大范围、低 α）|
 | 5 | §9-9 **depthM 连续化** | `tint`/`vis`/雾半径按深度插值，**前 70% 本色、后 30% 过渡** |
 | 6 | §9-12 **深度计** | HUD 左侧竖直标尺：五段 + 真实深度游标 + 带名 |
+| 7 | **波间下探节拍** | V6.49 §2 最后一环：换波峰值 115（2.5×）vs 换带 220（4.8×）+ 深度数字滚动 |
 
 ## 关键判断（两条反馈都不是"参数大小"问题）
 
@@ -30,8 +31,8 @@
 - 代码：`cocos/assets/scripts/view/DiveGame.ts`、`Hud.ts`
 - 规格：`docs/光照与深度_V6.60.md`
 - 预览：`docs/shots/lights_ab.png`（五带 A/B）、`blend_curve.png`（连续化）、
-  `flash_timeline.png`（光反馈时序）、`hud_layout.png`（深度计布局）
-- 工具：`tools/preview_v660.py`（新增）
+  `flash_timeline.png`（光反馈时序）、`wave_burst.png`（节拍对比）、`hud_layout.png`（深度计布局）
+- 工具：`tools/preview_v660.py`（新增，`--blend` / `--flash` / `--wave`）
 
 ## 验证
 

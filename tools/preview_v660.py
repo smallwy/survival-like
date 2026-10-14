@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-V6.60 两件事的预览（`--blend` / `--flash`，默认全出）。
+V6.60 三件事的预览（`--blend` / `--flash` / `--wave`，默认全出）。
 
 ① depthM 连续化（§9-9）
    旧：`drawVeil` / `drawFog` 取 `w.layer()` 的**常量** tint / vis / 雾半径
@@ -18,13 +18,18 @@ V6.60 两件事的预览（`--blend` / `--flash`，默认全出）。
 ⚠️ 数值必须与 `cocos/assets/scripts/view/DiveGame.ts` 同步
    （`LAMP_*` / `FLASH_*` / `BLEND_FROM` / `LAYERS`）。
 
+③ 波间下探节拍（V6.49 §2）
+   换波（20 次/局）= **节拍**，峰值必须是换带（5 次/局）= **事件**的一半左右，
+   否则节拍会把事件淹掉。两条指数衰减曲线的对比。
+
 用法
 ----
-    python tools/preview_v660.py            # 两张都出
+    python tools/preview_v660.py            # 三张都出
     python tools/preview_v660.py --blend    # 只出连续性
     python tools/preview_v660.py --flash    # 只出光反馈
+    python tools/preview_v660.py --wave     # 只出节拍对比
 
-输出 `docs/shots/blend_curve.png` / `docs/shots/flash_timeline.png`。
+输出 `docs/shots/`：`blend_curve.png` / `flash_timeline.png` / `wave_burst.png`。
 """
 
 import os
@@ -229,14 +234,67 @@ def draw_flash():
     return p
 
 
+# ------------------------------------------------- ③ 换波 vs 换带 的爆冲对比
+BASE, TAU = 46, 0.9          # SCROLL_BASE / BURST_TAU
+BURST = {'换带（事件 · 5 次/局）': 220, '换波（节拍 · 20 次/局）': 115}
+
+
+def draw_wave():
+    W, H = 1180, 420
+    img = Image.new('RGB', (W, H), (10, 18, 26))
+    d = ImageDraw.Draw(img)
+    x0, x1, y0, y1 = 80, W - 60, 70, H - 90
+    tmax, vmax = 2.6, 280
+
+    def px(t):
+        return x0 + (x1 - x0) * t / tmax
+
+    def py(v):
+        return y1 - (y1 - y0) * v / vmax
+
+    # 网格
+    for v in range(0, vmax + 1, 50):
+        d.line([(x0, py(v)), (x1, py(v))], fill=(32, 50, 62))
+        d.text((x0 - 44, py(v) - 7), f'{v}', fill=(130, 160, 175), font=F(12))
+    for t in [0, 0.5, 1.0, 1.5, 2.0, 2.5]:
+        d.line([(px(t), y0), (px(t), y1)], fill=(32, 50, 62))
+        d.text((px(t) - 12, y1 + 6), f'{t:.1f}s', fill=(130, 160, 175), font=F(12))
+
+    # 常态基线
+    d.line([(x0, py(BASE)), (x1, py(BASE))], fill=(90, 120, 135), width=1)
+    d.text((x1 - 132, py(BASE) + 6), '常态 46 px/s', fill=(90, 120, 135), font=F(12))
+
+    cols = [(255, 209, 102), (120, 230, 255)]
+    for (label, pk), c in zip(BURST.items(), cols):
+        pts = [(px(t / 40), py(BASE + pk * pow(2.718281828, -t / 40 / TAU))) for t in range(int(tmax * 40) + 1)]
+        d.line(pts, fill=c, width=3)
+        # 峰值标注 + 倍数
+        d.text((px(0.04), py(BASE + pk) - 20), f'{label} 峰值 {pk} = {pk / BASE:.1f}×',
+               fill=c, font=F(13))
+        # 半衰点
+        th = TAU * 0.693
+        d.line([(px(th), py(BASE + pk / 2)), (px(th), y1)], fill=c, width=1)
+        d.text((px(th) + 4, y1 - 20), f'半衰 {th:.2f}s', fill=c, font=F(11))
+
+    d.text((14, 16), 'V6.60 · 波间下探节拍 —— 换波（节拍）峰值只有换带（事件）的一半',
+           fill=(190, 225, 240), font=F(15))
+    d.text((14, H - 26),
+           '※ 强度必须拉开：20 次/局的节拍若与 5 次/局的事件同强度，事件会被淹掉 —— 对比度是这套设计的核心',
+           fill=(140, 175, 190), font=F(13))
+    p = os.path.join(OUT_DIR, 'wave_burst.png')
+    img.save(p)
+    return p
+
+
 def main():
     os.makedirs(OUT_DIR, exist_ok=True)
-    only_blend = '--blend' in sys.argv
-    only_flash = '--flash' in sys.argv
-    if not only_flash:
+    only = [a for a in sys.argv[1:] if a.startswith('--')]
+    if not only or '--blend' in only:
         print('已出图:', draw_blend())
-    if not only_blend:
+    if not only or '--flash' in only:
         print('已出图:', draw_flash())
+    if not only or '--wave' in only:
+        print('已出图:', draw_wave())
 
 
 if __name__ == '__main__':

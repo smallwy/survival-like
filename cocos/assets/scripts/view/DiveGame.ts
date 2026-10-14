@@ -561,6 +561,22 @@ const XFADE_DUR = 2.0
 const RING_DUR = 0.9
 
 /**
+ * **换波「下探节拍」的爆冲峰值**（px/s）。V6.49 §2 / V6.50 §下探节拍。
+ *
+ * 为什么它比换带更重要：全流程下潜次数 **5 → 25**。同样 156s 的战斗，
+ * 从"我打完 4 波然后换了个地方"变成"**我一直在往下沉**"。
+ *
+ * ⚠️ **峰值必须明显小于换带**（0.52×）：换带 5 次/局 = **事件**，
+ *   换波 20 次/局 = **节拍**。两者同强度的话，节拍会把事件淹掉 ——
+ *   **对比度**才是这套设计的核心（同 `SCROLL_BURST` 的 4.8× 逻辑）。
+ *   115 px/s ≈ 常态的 **2.5×**：一眼看得出"往下沉了一截"，
+ *   但不至于被误读成"换水域了"。
+ */
+const WAVE_BURST = 115
+/** 换波节拍的水压环强度倍率（换带是满环 1.0）。环是"又穿过了一小段水"的确认 */
+const WAVE_RING = 0.55
+
+/**
  * 颗粒的**视差系数**（按带，`[近景, 中景]`）。
  *
  * V6.52 §3.2 定的是三档：远景（背景图）静止 / 中景 0.35× / 近景 1.00×。
@@ -740,6 +756,8 @@ export class DiveGame extends Component {
   private xfadeT = -1
   /** 水压环计时（0→`RING_DUR`）；`< 0` = 未激活。见 §3.4 */
   private ringT = -1
+  /** 水压环强度倍率：换带 `1.0` / 换波 `WAVE_RING`。环共用一套代码，只差强度 */
+  private ringStr = 1
 
   // ---- 节点 ----
   private worldRoot!: Node
@@ -1898,7 +1916,17 @@ export class DiveGame extends Component {
         this.burstV = SCROLL_BURST
         this.scanT = 0
         this.ringT = 0
+        this.ringStr = 1                            // 换带 = 满环（换波只有 0.55，见 WAVE_RING）
         this.beginXfade()
+        break
+      case 'waveCleared':
+        // **波间下探节拍**（V6.49 §2：这条是"下潜体感"里唯一能单独成立的改动）——
+        // 每波结束都"往下沉一截"：世界再窜一下（小幅）+ 一圈水压环掠过。
+        // ⚠️ 用 `max` 而不是直接赋值：若换带的 220 还在衰减中就清了这一波，
+        //   不该把它**拉低**到 115（那会读作"节拍反而变弱了"）。
+        this.burstV = Math.max(this.burstV, WAVE_BURST)
+        this.ringT = 0
+        this.ringStr = WAVE_RING
         break
       case 'shake':
         this.shake(ev.ms, ev.intensity)
@@ -1912,7 +1940,8 @@ export class DiveGame extends Component {
         this.finishRun()
         break
       // 以下事件本切片不产生额外表现（相位可直接读 world 字段）：
-      //   playerHurt、dodge、wave / waveCleared / layerCleared
+      //   playerHurt、dodge、wave / layerCleared
+      //   （`waveCleared` 已在上面接了「波间下探节拍」，不在这一组）
       default:
         break
     }
@@ -2766,7 +2795,9 @@ export class DiveGame extends Component {
   private drawPressureRings(): void {
     if (this.ringT < 0) return
     const k = this.ringT / RING_DUR
-    const a = 0.42 * (1 - k)
+    // 强度只调 alpha，不调半径：换波与换带的环大小差 9% 肉眼看不出来，
+    // 但 alpha 差 45% 一眼可辨 —— **对比度要花在能被感知的量上**。
+    const a = 0.42 * this.ringStr * (1 - k)
     for (let i = 0; i < 3; i++) {
       const kk = k - i * 0.12
       if (kk <= 0) continue

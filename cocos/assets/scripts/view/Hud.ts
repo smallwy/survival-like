@@ -50,6 +50,14 @@ import type { UpgradeDef, WeaponId, RelicId, Stats } from '../shared/dive/types'
 const clamp01 = (v: number): number => (v < 0 ? 0 : v > 1 ? 1 : v)
 
 /**
+ * 深度读数的**阻尼跟随**速率（1/s）。换波时 `w.depthM` 是**阶跃**的
+ * （`L.depthTop + (bot−top) × wave/total`），直接显示会"啪"地跳一个数字 ——
+ * 那是"计数器更新"，不是"我下沉了一截"。让它以时间常数 ≈0.17s 追上去才有滚动感。
+ * ⛔ 不改模拟层：`w.depthM` 仍是真值，**只有显示滞后**。
+ */
+const DEPTH_FOLLOW = 6
+
+/**
  * 估算一段文字的像素宽（CJK ≈ 字号，ASCII ≈ 0.6×字号）。
  *
  * 用来做卡面文案的**截断**。为什么不用 Label 的真实宽度：`put()` 是池化的、
@@ -151,6 +159,10 @@ export class Hud {
   private labelUsed = 0
   private btnUsed = 0
   private artUsed = 0
+  /** 深度**显示值**（阻尼跟随 `w.depthM`，见 `DEPTH_FOLLOW`）。`-1` = 尚未初始化 */
+  private depthShown = -1
+  /** 上一帧的 `w.t`，用来推 dt。`-1` = 尚未初始化 */
+  private lastT = -1
   /** 全屏底色的外扩量（见 pageFill）：每帧按实际可视区刷新 */
   private padW = 8
   private padH = 8
@@ -403,8 +415,19 @@ export class Hud {
 
     // ===== ① 深度指示（左上）：实时米数 + 层名 + 本层机制 =====
     // 米数是"分层体感"的核心：玩家对 "3,400 m" 有真实的压迫联想，对 "L3 午夜带" 只是一个词。
+    //
+    // ⚠️ 显示值走**阻尼跟随**（`DEPTH_FOLLOW`）：`w.depthM` 在换波时是**阶跃**的，
+    //   直接显示会"啪"地跳一个数字 —— 那是"计数器更新"，不是"我下沉了一截"。
+    //   让它追上去（时间常数 ≈0.17s）才有**滚动**的观感。⛔ 模拟层不动，只滞后显示。
     const dx0 = 24, dy0 = 22
-    const depthStr = Math.round(w.depthM).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',')
+    const dt = this.lastT < 0 ? 0 : Math.max(0, Math.min(0.1, t - this.lastT))
+    this.lastT = t
+    if (this.depthShown < 0) this.depthShown = w.depthM
+    // 重新开局会从 11,000m 直接回到 0m —— 大跳变**直接对齐**（否则数字要从头滚一遍，
+    // 那读作"这局从深海开始"）。换波最大单跳 ≈1250m（L5），不会误触发。
+    if (Math.abs(w.depthM - this.depthShown) > 2000) this.depthShown = w.depthM
+    this.depthShown += (w.depthM - this.depthShown) * Math.min(1, dt * DEPTH_FOLLOW)
+    const depthStr = Math.round(this.depthShown).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',')
     this.text(dx0, dy0, depthStr, 30, TXT.cyber)
     this.text(dx0 + 12 + depthStr.length * 15, dy0 + 12, 'm', 12, TXT.dim)
     this.text(dx0, dy0 + 26, `L${w.layerIdx + 1} ${L.name}`, 13, TXT.cyber)
@@ -440,8 +463,10 @@ export class Hud {
       g.line(UI.cyanDim, 0.6, 1); g.strokeRect(mgX, mgY0, mgW, mgH)
 
       // 游标：带内按真实深度插值（见上方 ⚠️），所以越往下走它越慢/越快是真实比例
+      // ⚠️ 游标跟着**显示值**走（不是 `w.depthM`）：否则数字在滚动、游标已经跳到位，
+      //    两者不同步会比都不滚更假。
       const Lc = LAYERS[w.layerIdx]
-      const kIn = clamp01((w.depthM - Lc.depthTop) / Math.max(1, Lc.depthBot - Lc.depthTop))
+      const kIn = clamp01((this.depthShown - Lc.depthTop) / Math.max(1, Lc.depthBot - Lc.depthTop))
       const py = mgY0 + (w.layerIdx + kIn) * segH
       g.line(UI.cyanHi, 0.95, 2); g.strokeSeg(mgX - 5, py, mgX + mgW + 5, py)
       g.fill(UI.cyanHi, 1); g.fillRect(mgX + mgW + 1, py - 3, 5, 6)
