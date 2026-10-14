@@ -519,17 +519,21 @@ export class Hud {
     //
     // ⚠️ 点位**绝不给 2px 发光核**（那是"可瞄准敌人"的铁律，见 `drawEnemies`）：
     //    雷达点纯信息，给了核会和战斗画面里真正能打的目标混淆。
-    const RCX = W - 88, RCY = 164, RR = 52, RPLOT = 44
+    // 2026-10-14 用户：「鱼情图小了点」⇒ 外环 52→**64**（+23%）、映射半径 44→**54**。
+    // ⚠️ 放大的**上限**由上方波次环（底 ≈ y 97）与右侧屏幕边共同压住：
+    //    RCY − RR = 110 > 97（不撞波次环）、RCX + RR = W−22（右边留 22px）。
+    //    再往上加会同时踩到这两条，所以这里是"刚好放下"的尺寸，不是随手取的。
+    const RCX = W - 86, RCY = 174, RR = 64, RPLOT = 54
     // 量程比屏幕半对角线（≈752）略大 ⇒ 画面内出现的敌人**必然**落在圈内；
     // 落在外环上的只可能是"还没进画面"的 —— 那正是"它正从那个方向来"的导航语义。
     const RANGE = 780
     g.fill(UI.panel, 0.58); g.fillCircle(RCX, RCY, RR)
-    g.line(UI.cyanDim, 0.5, 1.4); g.strokeCircle(RCX, RCY, RR)
+    g.line(UI.cyanDim, 0.5, 1.6); g.strokeCircle(RCX, RCY, RR)
     // 半量程内环 + 十字准线 —— "导航感"来自这两样，不是来自点位本身
     g.line(UI.line, 0.32, 1); g.strokeCircle(RCX, RCY, RR * 0.5)
     g.line(UI.line, 0.22, 1); g.strokeSeg(RCX - RR, RCY, RCX + RR, RCY)
     g.line(UI.line, 0.22, 1); g.strokeSeg(RCX, RCY - RR, RCX, RCY + RR)
-    this.center(RCX, RCY - RR + 13, '鱼情', 11, TXT.mute)
+    this.center(RCX, RCY - RR + 14, '鱼情', 12, TXT.mute)
 
     for (const e of w.enemies) {
       if (!e.alive) continue
@@ -540,47 +544,69 @@ export class Hud {
       const px = RCX + ux * k * RPLOT, py = RCY + uy * k * RPLOT
       if (e.kind === 'boss') {
         // BOSS 是本作唯一"必须提前知道它从哪来"的目标 ⇒ 大点 + 呼吸环
-        const br = 6 + 2 * Math.abs(Math.sin(t * 3))
-        g.line(UI.violet, 0.7, 1.6); g.strokeCircle(px, py, br)
-        g.fill(UI.violet, 1); g.fillCircle(px, py, 3.4)
+        const br = 7 + 2.5 * Math.abs(Math.sin(t * 3))
+        g.line(UI.violet, 0.7, 1.8); g.strokeCircle(px, py, br)
+        g.fill(UI.violet, 1); g.fillCircle(px, py, 4.2)
       } else {
         // 贴边（k=1）的压暗：它还没进画面，只表示"那个方向有东西"
+        // 点位半径同步上调（3.0/2.2 → 3.6/2.6）—— 圈放大了点位不放大，读起来会更"空"
         g.fill(e.color, k >= 1 ? 0.5 : 0.95)
-        g.fillCircle(px, py, e.kind === 'drift' ? 3.0 : 2.2)
+        g.fillCircle(px, py, e.kind === 'drift' ? 3.6 : 2.6)
       }
     }
     // 圆心 = 玩家自己，**最后画**，保证永不被点位盖住。小箭头 = 航向（`w.aim` 是 sim 角度）
-    g.fill(UI.cyanHi, 1); g.fillCircle(RCX, RCY, 3)
-    g.fill(UI.cyanHi, 0.8); g.fillTri(RCX, RCY, w.aim, 9, 4.5)
+    g.fill(UI.cyanHi, 1); g.fillCircle(RCX, RCY, 3.4)
+    g.fill(UI.cyanHi, 0.8); g.fillTri(RCX, RCY, w.aim, 10, 5)
 
-    // ===== ④ 生物质（层末才显示）/ 鱼骨（常驻）/ 暂停按钮（常驻·右上角）=====
+    // ===== ④ 生物质（层末才显示）/ 鱼骨（常驻）/ 暂停按钮（常驻·**右下角**）=====
     // 鱼骨必须**常驻**：玩家要在战斗中就看见数字在涨，才会把"捡鱼骨"和"待会儿能买什么"连起来。
     //
-    // 2026-10-13：右上角腾出来常驻一个暂停按钮 —— 此前局内**只有键盘**能退出，
-    // 触屏玩家一个出口都没有。代价是鱼骨与生物质整组左移（从贴边 W-106/W-24
-    // 挪到 W-150/W-64），让出 56px 的角。两处仍是左/右对齐，位数变化不会左右抖。
+    // 2026-10-14：暂停按钮**从右上角移到右下角**（用户："那个退出暂停的可以放在右下角"）。
+    //   右上角现在被鱼情雷达占着，三个组挤在一列会互相抢注意力；而右下角天然是"出口"的
+    //   位置（拇指最容易够到、与其他信息块最远）。鱼骨/生物质随之**回到贴边**（W-106 / W-24）——
+    //   2026-10-13 为让角做过一次左移，现在角让回来了，那 44px 的偏移一并撤销。
     const bY = by + (w.mult > 1 ? 48 : 26)
-    g.line(BONE, 0.9, 1.4); g.strokeCircle(W - 150, bY + 8, 7)
-    this.text(W - 132, bY, `${w.bank}`, 17, TXT.cyber)
+    g.line(BONE, 0.9, 1.4); g.strokeCircle(W - 106, bY + 8, 7)
+    this.text(W - 88, bY, `${w.bank}`, 17, TXT.cyber)
     if (w.phase !== 'wave') {
-      this.text(W - 64, by + 2, `生物质 ${w.biomass}`, 18, TXT.jade, true)
-      if (w.mult > 1) this.text(W - 64, by + 26, `上浮可得 ${Math.floor(w.biomass * w.mult)}`, 13, TXT.amber, true)
+      this.text(W - 24, by + 2, `生物质 ${w.biomass}`, 18, TXT.jade, true)
+      if (w.mult > 1) this.text(W - 24, by + 26, `上浮可得 ${Math.floor(w.biomass * w.mult)}`, 13, TXT.amber, true)
     }
 
-    // 暂停按钮：**视觉 38×38，热区 64×64**（视觉尺寸与点击区分离 ——
-    // 38px 在触屏上够不着，但画大了会压住鱼骨）。图标是矢量两条圆角竖杠：
-    // 纯 UI 符号、要随状态换色，走位图反而多一层，与"沉淀货币留矢量"同一条分工线。
+    // ---- 暂停按钮（右下角）----
+    // 用户 2026-10-14：「这个退出 icon 太简单了」。旧版是面板上两条素竖杠，读起来像
+    // 一个占位符。现在按**实体按键**画五层，把"这一块是可以按下去的"先立住：
+    //   ① 投影（右下偏移暗圆角块）
+    //   ② 键体（UI.panel 圆角 12）
+    //   ③ 按键面（内缩 3.5px、**比框亮**的 UI.panelHi ⇒ 读作凸起的键帽，不是一块平贴）
+    //   ④ 顶边受光带 + 四角铆钉（深海仪器的语汇：手轮/舱门都是四角固定的）
+    //   ⑤ 双竖杠（**圆头**：fillRoundRect 而不是 fillRect —— 方头是"两条色块"，
+    //     圆头才是"两根实体按键柱"），每根右侧压一条暗线 ⇒ 竖杠本身也有厚度
+    // ⚠️ 视觉 46×46，热区 76×76（视觉尺寸与点击区分离）。热区同心，点击中心不偏。
     if (cbs.onPause) {
-      const pbx = W - 32, pby = 30
-      g.fill(UI.panel, 0.72)
-      g.fillRoundRect(pbx - 19, pby - 19, 38, 38, 9)
-      g.line(UI.cyanDim, 0.85, 1.2)
-      g.strokeRoundRect(pbx - 19, pby - 19, 38, 38, 9)
-      g.fill(UI.cyan, 0.92)
-      g.fillRect(pbx - 7.5, pby - 9, 5.5, 18)
-      g.fillRect(pbx + 2, pby - 9, 5.5, 18)
+      const pbx = W - 46, pby = H - 27, PS = 46, ph = PS / 2, pr = 12
+      g.fill(UI.abyss, 0.45)
+      g.fillRoundRect(pbx - ph + 2, pby - ph + 3, PS, PS, pr)      // ① 投影
+      g.fill(UI.panel, 0.94)
+      g.fillRoundRect(pbx - ph, pby - ph, PS, PS, pr)              // ② 键体
+      g.fill(UI.panelHi, 0.92)
+      g.fillRoundRect(pbx - ph + 3.5, pby - ph + 3.5, PS - 7, PS - 7, 9)  // ③ 键帽面
+      g.line(UI.abyss, 0.75, 1.6)
+      g.strokeRoundRect(pbx - ph, pby - ph, PS, PS, pr)            // 外描边
+      g.line(UI.cyanDim, 0.55, 1)
+      g.strokeRoundRect(pbx - ph + 1.2, pby - ph + 1.2, PS - 2.4, PS - 2.4, pr - 1)
+      g.line(UI.cyanHi, 0.26, 2.2)                                 // ④ 顶边受光带
+      g.strokeSeg(pbx - ph + 7, pby - ph + 2, pbx + ph - 7, pby - ph + 2)
+      for (const sx of [-1, 1]) for (const sy of [-1, 1]) {        // 四角铆钉
+        g.fill(UI.cyanDim, 0.5); g.fillCircle(pbx + sx * 15, pby + sy * 15, 1.5)
+      }
+      g.fill(UI.cyan, 0.95)                                        // ⑤ 圆头双竖杠
+      g.fillRoundRect(pbx - 7.6, pby - 9, 5.6, 18, 2.8)
+      g.fillRoundRect(pbx + 2.0, pby - 9, 5.6, 18, 2.8)
+      g.fill(UI.abyss, 0.5)
+      g.fillRoundRect(pbx - 2.0, pby - 9, 1.4, 18, 0.7)            // 两柱之间的凹槽
       // 只吃点击、不画任何东西的空按钮（fillA / edgeA = 0）
-      this.button(pbx, pby, 64, 64, '', cbs.onPause, true, { fillA: 0, edgeA: 0 })
+      this.button(pbx, pby, 76, 76, '', cbs.onPause, true, { fillA: 0, edgeA: 0 })
     }
 
     // ===== ⑤ 装备槽（底部左）=====
@@ -633,9 +659,11 @@ export class Hud {
 
     // ===== ⑥ 遗物槽（底部右）=====
     // 遗物必须战斗中也能看见：效果多为条件触发，玩家得知道"我现在有条件可触发"
+    // ⚠️ 2026-10-14：右端从 `W-24` 退到 `W-92` —— 给右下角的暂停键让出 23px 间隔。
+    //    底部这一行现在是**从右往左**排的：暂停键 → 遗物槽 → (空) → 技能冷却 → 装备槽。
     {
       const rs = 30, rgap = 36
-      const rx0 = W - 24 - RELIC_SLOTS * rgap + (rgap - rs)
+      const rx0 = W - 92 - RELIC_SLOTS * rgap + (rgap - rs)
       for (let i = 0; i < RELIC_SLOTS; i++) {
         const rx = rx0 + i * rgap
         const id = w.relics[i]
@@ -646,7 +674,7 @@ export class Hud {
         g.strokeRoundRect(rx, sy + 7, rs, rs, 7)
         this.relicIcon(id, rx + rs / 2, sy + 22, 11)
       }
-      this.text(W - 24, sy - 16, '遗物', 12, TXT.dim, true)
+      this.text(W - 92, sy - 16, '遗物', 12, TXT.dim, true)
     }
 
     // ===== ⑦ 技能冷却（底部中）=====
