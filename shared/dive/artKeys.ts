@@ -25,7 +25,7 @@
  */
 import { ENEMY_TEX, LAYERS, WEAPON_DEF, RELIC_DEF } from './tables'
 import { SUB_ART_PATH } from '../subs'
-import { UI_ICON_PATH, UI_BG_PATH, FX_TEX_PATH } from '../uiArt'
+import { UI_ICON_PATH, UI_BG_PATH, FX_TEX_PATH, UI_FRAME_PATH } from '../uiArt'
 
 export function artPaths(): Record<string, string> {
   const out: Record<string, string> = {}
@@ -70,6 +70,13 @@ export function artPaths(): Record<string, string> {
   // 击杀特效（V6.40）。key 是 `fx_<id>`，与 `FX_TEX_PATH` 的 id 字面一致。
   for (const [id, p] of Object.entries(FX_TEX_PATH)) {
     out['fx_' + id] = p.replace(/\.png$/, '')
+  }
+
+  // 主界面框架元件（V6.63）。key 是 `frame_<元件>_<态>`，与 `UI_FRAME_PATH` 的 id 字面一致。
+  // 这些是 `tools/make_ui_frame.py` **程序化生成**的（不是 AI 出图），同进这张表的好处一样：
+  // 少同步一张会**离线就红**，而不是运行时安静地退回矢量绘制。
+  for (const [id, p] of Object.entries(UI_FRAME_PATH)) {
+    out['frame_' + id] = p.replace(/\.png$/, '')
   }
 
   return out

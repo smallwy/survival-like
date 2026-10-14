@@ -96,6 +96,44 @@ export const FX_TEX_PATH = {
 export type FxTexId = keyof typeof FX_TEX_PATH
 
 /**
+ * 主界面**框架元件**（V6.63 新增，程序化生成）。
+ *
+ * 与图标 / 背景 / 特效三类的区别：**这些不是 AI 出图的，是脚本算出来的**。
+ *
+ * 为什么几何元件不交给 AI 出图：框架元件的全部技术指标是 —— 圆角半径、描边宽度、
+ * 九宫格边界值、高光带位置。**这四项 AI 一项都给不准**（它给的是"看起来像圆角矩形"，
+ * 不是"半径 11px 的圆角矩形"）。圆角算错的后果不是"难看"，是**九宫格角块接不上**
+ * （拉伸后四角起毛刺）。程序化还多一个 AI 给不了的东西：**改一个常量重跑就换一版**。
+ *
+ * 生产脚本 `tools/make_ui_frame.py`（PIL 超采样 ×4 后降采样到 @2× 输出），
+ * 取值**逐字对齐 `cocos/assets/scripts/view/Title.ts` 实装**，不按 `主界面版式_V6.38.md`
+ * （该文档 §3.3 / §8.2 有三处已被 V6.41 实装取代，见脚本头部的对照表）。
+ *
+ * ⚠️ key 的命名是 `<元件>_<态>`，与磁盘文件名**字面一致**（去掉 .png）。
+ *    态名沿用实装：`off` / `hi` / `press` / `lock`（槽位）、`dis`（按钮禁用）。
+ *
+ * ⚠️ **面板只出九宫格源图（设计 64×64），不出 880×660 整图** —— 整图 @2× 约 1MB，
+ *    源图 128×128 只有几 KB，拉伸后观感一致。代价：面板底**不能带纵向渐变**
+ *    （中段会被纵向拉伸 41×），所以面板态刻意只有纯色 + 描边。
+ */
+export const UI_FRAME_PATH = {
+  /** 玻璃槽位底 96×96 r12 —— 四态。锁定态**没有高光**（高光会误导"这个能点"） */
+  slot_off: 'ui/frame/slot_off.png',
+  slot_hi: 'ui/frame/slot_hi.png',
+  slot_press: 'ui/frame/slot_press.png',
+  slot_lock: 'ui/frame/slot_lock.png',
+  /** 主按钮底 236×62 r11（V6.41 实装值，**不是** 文档 §3.3 的 340×68）—— 四态 */
+  btn_off: 'ui/frame/btn_off.png',
+  btn_hi: 'ui/frame/btn_hi.png',
+  btn_press: 'ui/frame/btn_press.png',
+  btn_dis: 'ui/frame/btn_dis.png',
+  /** 面板底九宫格源图 64×64 r18 —— 装置坞 / 出击准备共用一张 */
+  panel_off: 'ui/frame/panel_off.png',
+} as const
+
+export type UiFrameId = keyof typeof UI_FRAME_PATH
+
+/**
  * 图标画布边长（px）。**512 是出图与后处理的基准**，不是显示尺寸。
  *
  * 显示尺寸见 `shared/menu.ts` 的 `columnBlocks()`：侧栏 96 / 88，顶栏 24。

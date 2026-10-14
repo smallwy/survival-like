@@ -1,0 +1,90 @@
+{
+  "slot": {
+    "name": "玻璃槽位底",
+    "w": 96,
+    "h": 96,
+    "radius": 12,
+    "nine": false,
+    "out_scale": 2,
+    "source_px": [
+      192,
+      192
+    ],
+    "inset_design": null,
+    "inset_source_px": null,
+    "states": [
+      "off",
+      "hi",
+      "press",
+      "lock"
+    ]
+  },
+  "btn": {
+    "name": "主按钮底",
+    "w": 236,
+    "h": 62,
+    "radius": 11,
+    "nine": true,
+    "out_scale": 2,
+    "source_px": [
+      472,
+      124
+    ],
+    "inset_design": {
+      "left": 16,
+      "top": 16,
+      "right": 16,
+      "bottom": 16
+    },
+    "inset_source_px": {
+      "left": 32,
+      "top": 32,
+      "right": 32,
+      "bottom": 32
+    },
+    "states": [
+      "off",
+      "hi",
+      "press",
+      "dis"
+    ]
+  },
+  "panel": {
+    "name": "面板底（九宫格源图）",
+    "w": 64,
+    "h": 64,
+    "radius": 18,
+    "nine": true,
+    "out_scale": 2,
+    "source_px": [
+      128,
+      128
+    ],
+    "inset_design": {
+      "left": 24,
+      "top": 24,
+      "right": 24,
+      "bottom": 24
+    },
+    "inset_source_px": {
+      "left": 48,
+      "top": 48,
+      "right": 48,
+      "bottom": 48
+    },
+    "states": [
+      "off"
+    ]
+  },
+  "_keys": [
+    "slot_off",
+    "slot_hi",
+    "slot_press",
+    "slot_lock",
+    "btn_off",
+    "btn_hi",
+    "btn_press",
+    "btn_dis",
+    "panel_off"
+  ]
+}
