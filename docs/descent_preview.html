@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>下潜感预览 · 深海回响 V6.51a</title>
+<style>
+  :root { --ink:#dff6ff; --dim:#7fa6bb; --line:#1d3d52; --bg:#07121c; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:14px/1.6 system-ui,"Segoe UI","Microsoft YaHei",sans-serif; padding:24px; }
+  h1 { font-size:17px; font-weight:500; margin:0 0 4px; }
+  .sub { color:var(--dim); font-size:13px; margin:0 0 18px; }
+  .wrap { max-width:760px; margin:0 auto; }
+  canvas { width:100%; height:auto; display:block; border-radius:12px; border:1px solid var(--line); }
+  .row { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-top:14px; }
+  label { font-size:13px; color:var(--dim); }
+  input[type=range] { flex:1; min-width:140px; accent-color:#4fe8ff; }
+  button { background:transparent; color:var(--ink); border:1px solid var(--line);
+           border-radius:8px; padding:6px 14px; font-size:13px; cursor:pointer; }
+  button:hover { border-color:#4fe8ff; }
+  .stat { display:flex; gap:20px; flex-wrap:wrap; margin-top:12px; font-size:12px; color:var(--dim); }
+  .stat b { color:var(--ink); font-weight:500; }
+  .note { margin-top:22px; border-top:1px solid var(--line); padding-top:16px;
+          font-size:12.5px; color:var(--dim); }
+  .note b { color:var(--ink); font-weight:500; }
+  table { border-collapse:collapse; width:100%; margin-top:10px; font-size:12.5px; }
+  th,td { text-align:left; padding:6px 8px; border-bottom:1px solid var(--line); }
+  th { color:var(--ink); font-weight:500; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>下潜感预览 · 俯视角度</h1>
+  <p class="sub">水域持续下潜的实时演示。悬浮物向上掠过 = 你在下沉；鱼群横向游动 = 周围生态。</p>
+
+  <canvas id="cv" width="640" height="300"></canvas>
+
+  <div class="row">
+    <label>下潜速度</label>
+    <input id="sp" type="range" min="10" max="140" value="46">
+    <span id="spv" style="min-width:64px">46 px/s</span>
+    <button id="pulse">下探节拍</button>
+  </div>
+
+  <div class="stat">
+    <span>深度 <b id="dep">120</b> m</span>
+    <span>水域带 <b id="band">L1 阳光带</b></span>
+    <span>悬浮物 <b id="pc">0</b> 颗</span>
+  </div>
+
+  <div class="note">
+    <b>怎么读这张图</b> —— 俯视看不到"下"，"下"由四个通道翻译过来：
+    <table>
+      <tr><th>通道</th><th>屏幕里长什么样</th><th>权重</th></tr>
+      <tr><td>相对运动</td><td>悬浮物向上掠过（= 开车时路边景物向后跑）</td><td>★★★</td></tr>
+      <tr><td>换带</td><td>颜色 / 亮度 / 生物群整体换一次</td><td>★★</td></tr>
+      <tr><td>生物群变化</td><td>鱼群种类、大小、密度随深度换</td><td>★★</td></tr>
+      <tr><td>HUD 深度计</td><td>左侧竖条游标持续下移</td><td>★</td></tr>
+    </table>
+    <p style="margin-top:12px">
+      <b>⚠️ 可读性红线</b>：远景鱼群（深）不可瞄准、不碰撞、<b>不给 2px 发光核心</b> ——
+      那枚核是敌人的定位铁律，破了它玩家会朝打不到的鱼开火。
+    </p>
+    <p>规格见 <code>docs/水域光照与生态规格_V6.51.md</code> §0-A（介质决定）/ §0-B（读出通道）。</p>
+  </div>
+</div>
+
+<script>
+(function(){
+  var cv=document.getElementById('cv'), ctx=cv.getContext('2d');
+  var W=cv.width, H=cv.height;
+  var sp=document.getElementById('sp'), spv=document.getElementById('spv');
+  var depEl=document.getElementById('dep'), bandEl=document.getElementById('band'), pcEl=document.getElementById('pc');
+  var pulseBtn=document.getElementById('pulse');
+  var base=+sp.value, burst=0;
+  sp.addEventListener('input',function(){ base=+sp.value; spv.textContent=base+' px/s'; });
+  pulseBtn.addEventListener('click',function(){ burst=1; });
+
+  var BANDS=[
+    {n:'L1 阳光带', bg:'#0e3a55', deep:100},
+    {n:'L2 弱光带', bg:'#0b3348', deep:600},
+    {n:'L3 午夜带', bg:'#2a2350', deep:2500},
+    {n:'L4 热泉带', bg:'#4a2410', deep:5000},
+    {n:'L5 深渊带', bg:'#191634', deep:8500}
+  ];
+  var layers=[
+    {mul:1.0, n:36, rmin:1.2, rmax:3.0, a:0.34},
+    {mul:0.35,n:24, rmin:0.8, rmax:2.0, a:0.20},
+    {mul:0.12,n:20, rmin:0.6, rmax:1.4, a:0.11}
+  ];
+  var parts=[];
+  for(var i=0;i<layers.length;i++){
+    var L=layers[i];
+    for(var j=0;j<L.n;j++){
+      parts.push({l:L, x:Math.random()*W, y:Math.random()*H, r:L.rmin+Math.random()*(L.rmax-L.rmin), a:L.a*(0.6+Math.random()*0.6)});
+    }
+  }
+  function mkFish(){
+    var s=3+Math.random()*7;
+    return {x:Math.random()*W, y:Math.random()*H, s:s, vx:(Math.random()<0.5?-1:1)*(8+Math.random()*22)*(0.5+s/10), ph:Math.random()*6.28};
+  }
+  var fish=[]; for(var k=0;k<15;k++) fish.push(mkFish());
+
+  var depth=120, t=0, last=performance.now();
+  function bandIdx(d){ var best=0,bd=1e9; for(var i=0;i<BANDS.length;i++){ var dd=Math.abs(Math.log((d+80)/(BANDS[i].deep+80))); if(dd<bd){bd=dd;best=i;} } return best; }
+
+  function frame(now){
+    var dt=Math.min(0.05,(now-last)/1000); last=now; t+=dt;
+    burst*=Math.pow(0.12,dt);
+    var speed=base*(1+burst*3.8);
+    depth+=speed*dt*3.2;
+    if(depth>12000) depth=120;
+    var bi=bandIdx(depth);
+
+    ctx.fillStyle=BANDS[bi].bg; ctx.fillRect(0,0,W,H);
+
+    if(bi<=1){
+      ctx.save(); ctx.globalAlpha=0.055; ctx.fillStyle='#cfefff';
+      for(var i2=0;i2<7;i2++){
+        var x=(i2*97+(t*8)%200);
+        ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x+40,0); ctx.lineTo(x-10,H); ctx.lineTo(x-60,H); ctx.closePath(); ctx.fill();
+      }
+      ctx.restore();
+    }
+    if(bi===3){
+      ctx.save(); ctx.globalAlpha=0.10; ctx.fillStyle='#ff9a52';
+      for(var i3=0;i3<10;i3++){
+        var vx=60+i3*62+Math.sin(t*0.5+i3)*10;
+        ctx.beginPath(); ctx.ellipse(vx,H*0.76+Math.sin(t+i3)*10,16,40,0,0,6.28); ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    var pcColor = bi===3? '#ffd9b0' : (bi===4? '#bfe9ff' : '#bfeee0');
+    for(var p=0;p<parts.length;p++){
+      var q=parts[p];
+      q.y-=speed*q.l.mul*dt;
+      if(q.y<-6){ q.y=H+6; q.x=Math.random()*W; }
+      ctx.globalAlpha=q.a; ctx.fillStyle=pcColor;
+      ctx.beginPath(); ctx.arc(q.x,q.y,q.r,0,6.28); ctx.fill();
+    }
+    ctx.globalAlpha=1;
+
+    var fishColor = bi===3? '#ffb27a' : (bi===4? '#8fd8ff' : '#5DCAA5');
+    for(var f2=0;f2<fish.length;f2++){
+      var f=fish[f2];
+      f.x+=f.vx*dt;
+      f.y+=Math.sin(t*0.8+f.ph)*4*dt;
+      if(f.x<-20){f.x=W+20;} if(f.x>W+20){f.x=-20;}
+      ctx.globalAlpha=Math.max(0.16,Math.min(0.6,f.s/10));
+      ctx.fillStyle=fishColor;
+      var s=f.s, dir=f.vx>0?1:-1;
+      ctx.beginPath(); ctx.ellipse(f.x,f.y,s,s*0.5,0,0,6.28); ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(f.x-s*dir,f.y);
+      ctx.lineTo(f.x-s*dir-6*dir,f.y-5);
+      ctx.lineTo(f.x-s*dir-6*dir,f.y+5);
+      ctx.closePath(); ctx.fill();
+    }
+    ctx.globalAlpha=1;
+
+    var cx=W/2, cy=H/2;
+    var g=ctx.createRadialGradient(cx,cy,4,cx,cy,92);
+    g.addColorStop(0,'rgba(180,240,255,0.30)');
+    g.addColorStop(1,'rgba(180,240,255,0)');
+    ctx.fillStyle=g; ctx.beginPath(); ctx.arc(cx,cy,92,0,6.28); ctx.fill();
+    ctx.fillStyle='#dff6ff';
+    ctx.beginPath(); ctx.ellipse(cx,cy,26,11,0,0,6.28); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(cx+26,cy); ctx.lineTo(cx+40,cy-8); ctx.lineTo(cx+40,cy+8); ctx.closePath(); ctx.fill();
+    ctx.fillStyle='#0e3a55'; ctx.beginPath(); ctx.arc(cx-8,cy,3.4,0,6.28); ctx.fill();
+
+    depEl.textContent=Math.round(depth);
+    bandEl.textContent=BANDS[bi].n;
+    pcEl.textContent=parts.length;
+
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
