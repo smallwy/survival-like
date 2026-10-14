@@ -29,8 +29,11 @@
  *   WorldRoot                       ← 锚点(0,0)、尺寸 W×H、位置 (-W/2,-H/2)
  *     ├ gBase     Graphics 不透明底色（外扩铺满）—— **必须在背景图之下**
  *     ├ bg        Sprite   环境背景图（cover 铺满世界，按层换图）
- *     ├ gBg       Graphics 海雪（**在背景图之上**）
+ *     ├ bgOld     Sprite   换带 crossfade 的**旧背景**（压在上面淡出，见 `beginXfade`）
+ *     ├ gBg       Graphics 海雪 / 悬浮物（**在背景图之上**）
  *     ├ gVeil     Graphics 环境色调 + 压暗 + 暗角 + 屏幕边框（**必须低于实体**）
+ *     ├ gAtmo     Graphics 光照与生态：远景鱼群 / 温跃层扫带
+ *     │                    （**必须夹在 gVeil 与 gBack 之间**，见 buildNodes 的注释）
  *     ├ gBack     Graphics 酸液 / 鱼骨 / 声呐波前 / 回声标记 / 爆炸环（**鱼之下**）
  *     ├ fishLayer Node     敌人贴图池
  *     ├ gEnt      Graphics 敌人矢量 + 子弹 + 发光核心（**必须鱼之上**，见 buildNodes 的注释）
@@ -128,7 +131,15 @@ interface Spark { x: number; y: number; vx: number; vy: number; life: number; ma
 interface ArcFx { pts: Array<{ x: number; y: number }>; life: number; color?: number; maxLife?: number }
 interface BlastFx { x: number; y: number; r: number; life: number }
 interface FloatFx { x: number; y: number; vy: number; life: number; text: string; color: number; size: number; delay: number; label: Label }
-interface Mote { x: number; y: number; r: number; vy: number; far: boolean }
+/**
+ * 一颗悬浮物（海雪 / 有机碎屑）。
+ *
+ * ⚠️ 这里**没有 `vy`** —— 速度不逐条存，而是每帧由 `MOTE_MUL[带] × scrollV` 现算（V6.56）。
+ *    逐条存速度的话，换带爆冲（`SCROLL_BURST`）只能推快**新生成**的颗粒，
+ *    屏幕上已有的那批还在按老速度走 ⇒ "换带时整片水没一起动"。
+ *    `jit` 只是每条 ±20% 的抖动，免得整屏颗粒像一块板在移动。
+ */
+interface Mote { x: number; y: number; r: number; jit: number; far: boolean }
 
 /**
  * 远景鱼群的一条剪影（V6.53）。
@@ -252,6 +263,62 @@ const ATM_FISH_ALPHA: ReadonlyArray<readonly [number, number]> = [
   [0.22, 0.40],   // L3 生物荧光
   [0.16, 0.30],   // L4 暖光轮廓
   [0.30, 0.48],   // L5 巨影（要"实"，压迫感全靠它）
+]
+
+// ===========================================================================
+// 下潜滚动与换带（V6.52 §3.1 / §3.2 / §3.3，2026-10-14 落 V6.56）
+// ===========================================================================
+/**
+ * 悬浮物的**基准上掠速度**（px/s）。玩家下潜 ⇒ 水里的东西**向上掠过**。
+ *
+ * V6.52 §3.2：现状 `vy = 6~20` 慢了一个数量级 —— 屏幕上几乎看不出在动，
+ * 所以"我在下潜"这件事**只有深度数字在说**，画面不说。46 px/s 是
+ * "一眼能看出在动、又不至于晕"的档位（≈ 屏幕高的 6%/s，13s 扫过一屏）。
+ */
+const SCROLL_BASE = 46
+/**
+ * 换带时的**爆冲速度**（px/s）。V6.52 §3.1：`4.8×`，指数衰减 `e^(-t/0.9)`。
+ *
+ * 这是"下潜是**动作**不是**切图**"的核心 —— 换带那一刻世界猛地往上一窜，
+ * 玩家读到的是"我在加速下潜"，而不是"背景图跳了一下"。
+ * 与 §3.3 的"起势 0.8s"是同一件事的两种描述：瞬时置顶 + 指数衰减，
+ * 视觉上就是"猛冲一下然后缓和"。
+ */
+const SCROLL_BURST = 220
+/** 爆冲的指数衰减时间常数（s）。越小收得越快 */
+const BURST_TAU = 0.9
+/** 温跃层扫带时长（s）。V6.52 §3.3 ② */
+const SCAN_DUR = 0.6
+/**
+ * 背景 crossfade 时长（s）。V6.52 §3.3 ③。
+ *
+ * ⚠️ **必须 < `descDur`（2.1s）**：下潜相位一结束就 `startWave()`，若 crossfade
+ *    还没跑完，屏幕上会留着一个"半透明的中间态"（两张图各一半），
+ *    而对面的鱼已经冲过来了。2.0 留 0.1s 余量。
+ */
+const XFADE_DUR = 2.0
+/** 水压环时长（s）。V6.52 §3.4：3 圈从屏幕中心外扩 */
+const RING_DUR = 0.9
+
+/**
+ * 颗粒的**视差系数**（按带，`[近景, 中景]`）。
+ *
+ * V6.52 §3.2 定的是三档：远景（背景图）静止 / 中景 0.35× / 近景 1.00×。
+ * 近快远慢 = 视差 = 深度线索。**远景不滚**（背景图没有可滚的特征，见 §3.1 说明），
+ * 所以这里只有两个系数。
+ *
+ * ⚠️ **L4 热泉带整组反向**：`ventPush = 190` 会把玩家顶开，热流本身是**向下**的
+ *    （被顶到上面的冷水沿着泉口往下补），所以那里颗粒逆着走。
+ *    **这是机制与视觉第一次说同一句话** —— 玩家看到颗粒往下走，
+ *    紧接着手感上被顶开，两件事互相解释。数值取 `-0.62`：反向但不满速，
+ *    读作"水流被顶住了"，而不是"整片水在倒流"。
+ */
+const MOTE_MUL: ReadonlyArray<readonly [number, number]> = [
+  [1.00, 0.35],    // L1 阳光带
+  [1.00, 0.35],    // L2 弱光带
+  [1.00, 0.35],    // L3 午夜带
+  [-0.62, -0.22],  // L4 热泉带 · **反向**（ventPush 的视觉证据）
+  [1.00, 0.35],    // L5 深渊带
 ]
 
 /**
@@ -380,10 +447,32 @@ export class DiveGame extends Component {
   private readonly art = new SpriteBank()
   private artLoaded = false
   private bgLayer = -1
+  // ---- 下潜滚动 / 换带（V6.52 §3，V6.56 落）----
+  /**
+   * 当前滚动速度（px/s）。**纯表现层 —— 绝不回写 sim**（V6.52 §3.1 的铁律）。
+   * 模拟层里没有任何东西读它，改它也不会动到弹道 / 碰撞 / 氧气。
+   */
+  private scrollV = SCROLL_BASE
+  /** 换带爆冲速度（px/s），指数衰减回 0。见 `SCROLL_BURST` */
+  private burstV = 0
+  /** 温跃层扫带计时（0→`SCAN_DUR`）；`< 0` = 未激活。见 §3.3 ② */
+  private scanT = -1
+  /** 背景 crossfade 计时（0→`XFADE_DUR`）；`< 0` = 未激活。见 §3.3 ③ */
+  private xfadeT = -1
+  /** 水压环计时（0→`RING_DUR`）；`< 0` = 未激活。见 §3.4 */
+  private ringT = -1
 
   // ---- 节点 ----
   private worldRoot!: Node
   private bgNode!: Sprite
+  /**
+   * **换带时的旧背景**（V6.52 §3.3 ③）。压在 `bgNode` **之上**、以满不透明起步淡出。
+   *
+   * 为什么是"旧层在上淡出"而不是"两层各淡一半"：
+   *   alpha 合成下 `旧×a + 新×(1-a)` **正好等于一次干净的 crossfade**；
+   *   两层都半透会先暗一档再亮回来（双重曝光），看起来像"闪了一下"。
+   */
+  private bgNodeOld!: Sprite
   /** 不透明底色（最底层）。**不能并进 gBg** —— gBg 在背景图之上，会把它盖死 */
   private gBase!: Gfx
   private gBg!: Gfx
@@ -546,6 +635,12 @@ export class DiveGame extends Component {
     this.runSaved = false
     this.clearFx()
     this.bgLayer = -1              // 强制重设背景（换层/重开都可能换了图）
+    // 别把上一局的余速带进新局：爆冲 / 扫带 / crossfade 三个计时器一律归零
+    this.burstV = 0
+    this.scrollV = SCROLL_BASE
+    this.scanT = -1
+    this.xfadeT = -1
+    this.ringT = -1
     this.shakeT = 0                // 别把上一局的余震带进新局
     this.title.setVisible(false)
     this.hideWorld()
@@ -616,6 +711,9 @@ export class DiveGame extends Component {
     this.hideFish()
     this.subNode.node.active = false
     this.bgNode.node.active = false
+    // bgOld 是 Sprite（持久节点），同样必须显式关 —— 否则一次换带正是
+    // 跑到一半时退回标题屏，那张旧背景会**一直挂在标题界面上**。
+    this.bgNodeOld.node.active = false
     // 位图特效是常驻节点（池化），必须一起关 —— 否则退回标题屏时
     // 上一波击杀的碎片会**留在屏幕上**（Graphics 那几层都被 clear 了，只有它不会自动清）。
     for (const f of this.fxBitPool) f.sp.node.active = false
@@ -674,6 +772,13 @@ export class DiveGame extends Component {
     this.bgNode.sizeMode = Sprite.SizeMode.CUSTOM    // 尺寸由 cover 计算显式给
     this.bgNode.node.active = false                  // 没图就不参与渲染
 
+    // bgOld（V6.52 §3.3 ③）：**换带 crossfade 的旧图**，压在 `bgNode` 之上淡出。
+    //   顺序就是设计：旧的在上、新的在下且恒满不透明 ⇒ 合成结果 = 干净的一次交叉淡入。
+    this.bgNodeOld = this.mkNode('bgOld', this.worldRoot).addComponent(Sprite)
+    this.bgNodeOld.trim = false
+    this.bgNodeOld.sizeMode = Sprite.SizeMode.CUSTOM
+    this.bgNodeOld.node.active = false
+
     // gBg：海雪。**在背景图之上**才是对的（雪是"我在水里"的近景证据，
     // 压在背景图下面等于看不见），但绝不能在这里画不透明底色。
     this.gBg = this.mkWrapped('gBg', this.worldRoot)
@@ -684,7 +789,6 @@ export class DiveGame extends Component {
     //     · 插在 gBack **之上** ⇒ 盖住敌人（战斗可读性崩）。
     //   这是全项目最容易放错的一层。
     this.gAtmo = this.mkWrapped('gAtmo', this.worldRoot)
-    this.gBack = this.mkWrapped('gBack', this.worldRoot)
     // web 的原话："声呐波前画在敌人之下，避免一圈圈环把鱼群剪影盖住"。
     this.gBack = this.mkWrapped('gBack', this.worldRoot)
 
@@ -868,6 +972,7 @@ export class DiveGame extends Component {
       this.updateCamera(dt)
     }
     this.syncBg(w)               // 换层换背景（只在 layerIdx 变化时真正干活）
+    this.stepWater(dt)           // 下潜滚动 + 换带过渡（爆冲衰减 / 扫带 / crossfade）
 
     // ⚠️ **每一层都要在这里 clear** —— Graphics 是累积顶点，漏一个 = 那一层每帧叠加
     //    成一团拖影。2026-10-14 踩过：`gAtmo`（V6.53 新增）漏在这一行之外，
@@ -1463,6 +1568,16 @@ export class DiveGame extends Component {
         break
       case 'descend':
         this.clearFx()
+        // V6.52 §3.1 / §3.3：换带的三个表现同时起 ——
+        //   ① 爆冲（世界猛地往上一窜 = "我在加速下潜"，不是"背景跳了一下"）
+        //   ② 温跃层扫带（一条波纹带从下往上扫过 = "我穿过了一层水"）
+        //   ③ 双图 crossfade（旧图淡出 = 新水域"化"出来，而不是"啪"地切）
+        // ⚠️ `beginXfade()` 必须在**本帧 `syncBg()` 之前**调 —— 那时 `bgNode` 上还是旧图。
+        //    `handleEvent` 天然满足（它在本帧 update 里、`syncBg` 在其后），别把这个顺序改掉。
+        this.burstV = SCROLL_BURST
+        this.scanT = 0
+        this.ringT = 0
+        this.beginXfade()
         break
       case 'shake':
         this.shake(ev.ms, ev.intensity)
@@ -1750,6 +1865,65 @@ export class DiveGame extends Component {
   // 绘制
   // =========================================================================
   /**
+   * 推进**下潜滚动**与**换带过渡**（V6.52 §3.1 / §3.3，V6.56 落）。
+   *
+   * 四件事，全是**表现层状态**，模拟层零改动：
+   *   ① 换带爆冲的指数衰减 → `scrollV`（`SCROLL_BASE + burstV`）
+   *   ② 温跃层扫带的推进
+   *   ③ 水压环的推进
+   *   ④ 背景 crossfade 的推进
+   *
+   * ⚠️ 与海雪一样**不受暂停影响**：暂停是"停住战斗"，不是"把水冻成冰"。
+   *    （`w.update` 被跳过，但 `gBg` / `gAtmo` 照旧每帧重画，这已经是既有口径。）
+   */
+  private stepWater(dt: number): void {
+    // ① 爆冲衰减（§3.1）：低于 0.05 直接归零，免得永远吊着一条看不见的尾巴
+    this.burstV = this.burstV > 0.05 ? this.burstV * Math.exp(-dt / BURST_TAU) : 0
+    this.scrollV = SCROLL_BASE + this.burstV
+
+    // ② 温跃层扫带（§3.3 ②）
+    if (this.scanT >= 0) {
+      this.scanT += dt
+      if (this.scanT > SCAN_DUR) this.scanT = -1
+    }
+
+    // ③ 水压环（§3.4）
+    if (this.ringT >= 0) {
+      this.ringT += dt
+      if (this.ringT > RING_DUR) this.ringT = -1
+    }
+
+    // ④ 背景 crossfade（§3.3 ③）：旧图在上**淡出**、新图在下面**恒定满不透明**
+    //    ⇒ 合成结果 = `旧×a + 新×(1-a)`，一次干净的交叉淡入（两层各半透会先暗一档再亮回来）
+    if (this.xfadeT >= 0) {
+      this.xfadeT += dt
+      const k = Math.min(1, this.xfadeT / XFADE_DUR)
+      const e = k * k * (3 - 2 * k)                       // smoothstep
+      this.bgNodeOld.color = col(0xffffff, 1 - e)
+      if (k >= 1) { this.xfadeT = -1; this.bgNodeOld.node.active = false }
+    }
+  }
+
+  /**
+   * 开始换带 crossfade：把**当前正显示的**背景图拷到 `bgNodeOld` 上准备淡出。
+   *
+   * ⚠️ 调用时机只有一处且不能挪：`handleEvent` 里处理 `descend` 的那一帧。
+   *    那时 `diveDeeper()` 已经把 `layerIdx` 加了 1，而本帧的 `syncBg()` **还没跑**
+   *    —— `bgNode` 上仍是**旧图**。挪到 `syncBg` 之后再调，拷到的就是新图（= 没有过渡）。
+   */
+  private beginXfade(): void {
+    if (!this.artLoaded || !this.bgNode.node.active || !this.bgNode.spriteFrame) return
+    const ut = this.bgNode.node.getComponent(UITransform)!
+    this.bgNodeOld.spriteFrame = this.bgNode.spriteFrame
+    this.bgNodeOld.node.getComponent(UITransform)!
+      .setContentSize(ut.contentSize.width, ut.contentSize.height)
+    this.bgNodeOld.node.setPosition(this.bgNode.node.position.x, this.bgNode.node.position.y)
+    this.bgNodeOld.color = col(0xffffff, 1)
+    this.bgNodeOld.node.active = true
+    this.xfadeT = 0
+  }
+
+  /**
    * 不透明底色（gBase）+ 海雪（gBg）。
    *
    * ⚠️ 两件事必须分两层：底色进 `gBase`（在背景图之下），海雪进 `gBg`（在背景图之上）。
@@ -1765,19 +1939,25 @@ export class DiveGame extends Component {
     this.gBase.fill(UI.abyss, 1)
     this.gBase.fillRect(-pw, -ph, this.W + pw * 2, this.H + ph * 2)
 
-    // ---- 海雪 / 悬浮物（V6.50 §3.2 + V6.53）----
-    // 三条修正，缺一条就读不出"在往下走"：
-    //   ① **提速**：原 `vy = -6~-20 px/s` 方向是对的（向上掠 = 下潜感），但**慢一个数量级**
-    //      —— 屏幕上几乎看不出在动。近景 46 px/s（`SCROLL_BASE`）、中景 0.35×。
-    //   ② **三层视差**：远景（背景图）静止 / 中景 ≈16 / 近景 ≈46。**视差本身就是深度线索**。
+    // ---- 海雪 / 悬浮物（V6.50 §3.2 + V6.53 + V6.56）----
+    // 四条，缺一条就读不出"在往下走"：
+    //   ① **提速**：原 `vy = 6~20 px/s` 方向是对的（向上掠 = 下潜感），但**慢一个数量级**，
+    //      屏幕上几乎看不出在动 ⇒ "我在下潜"只有深度数字在说、画面不说。
+    //   ② **三层视差**：远景（背景图）静止 / 中景 0.35× / 近景 1.00×。**视差本身就是深度线索**。
     //   ③ **数量走 `LAYERS.motes`**（34/48/70/90/110）：越深越密。原值写死 60。
+    //   ④ **速度走 `scrollV`**（V6.56）：这样换带爆冲能**同时**推快整片水，
+    //      而不是只有背景图在动。L4 反向见 `MOTE_MUL`。
     // ⛔ 深度**不影响速度** —— 别做"越深越慢"，那会削弱下潜感。深度只影响密度/尺寸/亮度。
     const want = w.layer().motes
     while (this.motes.length < want) this.motes.push(this.newMote(this.motes.length % 2 === 0))
     while (this.motes.length > want) this.motes.pop()
+    const mul = MOTE_MUL[w.layerIdx] ?? MOTE_MUL[0]
     for (const m of this.motes) {
-      m.y += m.vy * dt
+      m.y += (m.far ? mul[1] : mul[0]) * this.scrollV * m.jit * dt
+      // ⚠️ 回绕必须**双向**：L4 的颗粒是往下走的（`MOTE_MUL` 里的负数），
+      //    只判 `y < -4` 会让它们在屏幕下方越积越多，最后糊成一条静止的亮带。
       if (m.y < -4) { m.y = this.H + 4; m.x = Math.random() * this.W }
+      else if (m.y > this.H + 4) { m.y = -4; m.x = Math.random() * this.W }
       // 近景更亮更大、中景更暗更小 —— Graphics 没有景深，"远近"只能这样读出来
       this.gBg.fill(0x9fe1cb, m.far ? 0.15 : 0.30)
       this.gBg.fillCircle(m.x, m.y, m.r)
@@ -1785,7 +1965,7 @@ export class DiveGame extends Component {
   }
 
   /**
-   * 生成一颗悬浮物（V6.50 §3.2）。
+   * 生成一颗悬浮物（V6.50 §3.2 / V6.56）。
    * `far = true` ⇒ 中景（0.35× 速度、更小更暗）；否则近景（全速、更大更亮）。
    */
   private newMote(far: boolean): Mote {
@@ -1793,7 +1973,7 @@ export class DiveGame extends Component {
       x: Math.random() * this.W,
       y: Math.random() * this.H,
       r: far ? 0.7 + Math.random() * 1.0 : 1.3 + Math.random() * 2.2,
-      vy: -(far ? 16 : 46) * (0.8 + Math.random() * 0.4),
+      jit: 0.8 + Math.random() * 0.4,     // ±20% 抖动：免得整屏颗粒像一块板在移动
       far,
     }
   }
@@ -1881,13 +2061,22 @@ export class DiveGame extends Component {
     const idx = Math.min(LAYER_ECO.length - 1, w.layerIdx)
     if (this.schoolLayer !== idx) this.buildSchools(idx)
 
+    // 鱼群与水**同一个速度场**（中景档）。换带爆冲时它也跟着窜 ——
+    //   否则"颗粒在往上冲、鱼却钉在原地"，一看就是两个世界的东西。
+    const mul = MOTE_MUL[idx] ?? MOTE_MUL[0]
+
     for (const f of this.schools) {
       f.x += f.vx * dt
+      f.y += mul[1] * this.scrollV * dt
       f.fade = Math.min(1, f.fade + dt / 0.6)     // 渐入（换带时不能"啪"地出现）
       // 两侧回绕：比"出屏销毁 + 重新生成"省事，也不会出现鱼群凭空冒出来
       const wrap = f.size * 1.6
       if (f.vx > 0 && f.x > this.W + wrap) f.x = -wrap
       else if (f.vx < 0 && f.x < -wrap) f.x = this.W + wrap
+      // 上下回绕同理（L4 里 `mul[1]` 是负数 ⇒ 鱼群缓慢下沉）
+      const wY = f.size * 1.2
+      if (f.y < -wY) f.y = this.H + wY
+      else if (f.y > this.H + wY) f.y = -wY
       if (f.fade <= 0.01) continue
 
       const a = f.alpha * f.fade
@@ -1901,6 +2090,60 @@ export class DiveGame extends Component {
       const swing = Math.sin(w.t * 5 + f.phase) * h * 0.5
       this.gAtmo.fillTri(f.x - s * L * 0.48, f.y + swing,
         s > 0 ? Math.PI : 0, L * 0.42, h * 0.5)
+    }
+
+    this.drawScanBand(w)
+    this.drawPressureRings()
+  }
+
+  /**
+   * **水压环**（V6.52 §3.4）：换带时从屏幕中心外扩 3 圈，0.9s。
+   *
+   * 它是"下潜这件事有重量"的体感补充 —— 扫带说的是"我在穿过一层水"，
+   * 水压环说的是"**这一层比上一层更压**"。共用 `xfadeT` 计时（同一时刻起），
+   * 所以不需要第二个计时器；0.9s 之后自然不再画。
+   */
+  private drawPressureRings(): void {
+    if (this.ringT < 0) return
+    const k = this.ringT / RING_DUR
+    const a = 0.42 * (1 - k)
+    for (let i = 0; i < 3; i++) {
+      const kk = k - i * 0.12
+      if (kk <= 0) continue
+      const rr = 120 + kk * 520
+      this.gAtmo.line(UI.cyanHi, a, 2.5)
+      this.gAtmo.strokeEllipse(this.W / 2, this.H / 2, rr, rr)
+    }
+  }
+
+  /**
+   * **温跃层扫带**（V6.52 §3.3 ②）。换带时一条横向波纹带**从下往上**扫过屏幕。
+   *
+   * 为什么非有不可：crossfade 单独用读作"图片在化开"，那是**过渡**不是**运动**。
+   * 屏幕上有一样东西**真的在位移**，玩家才读得出"我在动"（用户原话："不是坐电梯"）。
+   * 扫带 = 温跃层，是下潜这件事在物理上真实存在的界面。
+   *
+   * 三个图元（§3.3 原文"3 图元"）：① 亮而细的头线（正在扫过的那个面）
+   * ② 它下方的过渡带 ③ 更淡的余晖（刚扫过的水还没静下来）。
+   * 分段 + 正弦偏移 = 波纹（`fillRect` 画不出曲线，用 26 段折出来）。
+   *
+   * ⛔ **不做全屏闪白**（§3.4）：深海里一次全白会瞬间毁掉"暗"的基调。
+   */
+  private drawScanBand(w: DiveWorld): void {
+    if (this.scanT < 0) return
+    const k = this.scanT / SCAN_DUR          // 0→1
+    const y = this.H * (1 - k)               // 底 → 顶
+    const a = 1 - k                          // 尾段自然收掉
+    const seg = 26
+    const sw = this.W / seg + 1
+    for (let i = 0; i < seg; i++) {
+      const yy = y + Math.sin(i * 0.85 + w.t * 5) * 6
+      this.gAtmo.fill(UI.cyanHi, 0.34 * a)
+      this.gAtmo.fillRect(i * sw, yy - 2, sw, 3)      // ① 头线
+      this.gAtmo.fill(UI.cyan, 0.13 * a)
+      this.gAtmo.fillRect(i * sw, yy + 1, sw, 14)     // ② 过渡带
+      this.gAtmo.fill(UI.cyanDim, 0.09 * a)
+      this.gAtmo.fillRect(i * sw, yy - 26, sw, 22)    // ③ 余晖
     }
   }
 
