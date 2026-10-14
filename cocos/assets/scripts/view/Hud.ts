@@ -40,7 +40,7 @@ import { SpriteBank } from './art'
 import { UI, TXT, MENU, BRIGHT, TXT_LIGHT } from '../shared/theme'
 import {
   LAYERS, RELIC_SLOTS, STAT_META, STAT_CARD, STAT_CAP, WEAPON_DEF, CARD_WEAPON_ID,
-  O2, MAX_SEATS, BONE, weaponFamily, evolutionBase, RELIC_DEF,
+  O2, MAX_SEATS, BONE, weaponFamily, evolutionBase, RELIC_DEF, layerO2,
   SEAT_RING_R, SEAT_ANGLES_DEG, TURRET_R, BASE_SEATS,
 } from '../shared/dive/tables'
 import type { DiveWorld } from '../shared/dive/world'
@@ -419,6 +419,15 @@ export class Hud {
       if (cur) { g.fill(UI.cyan, 0.25); g.fillRect(dx0 + 30, yy - 4, 6, 13) }
     }
     this.text(dx0, dy0 + 86 + LAYERS.length * 20 + 6, `×${w.mult.toFixed(1)}`, 14, TXT.amber)
+
+    // 本层氧耗预测（V6.53）：让"越深越费氧"**可见** ——
+    //   这是玩家决定"要不要升氧气罐"的唯一依据；藏在数值表里 = 养成没有目标。
+    // ⚠️ 显示的是**当前账户**的预测（含永久强化 `o2Bonus` / `regen`），不是裸表值 ——
+    //   否则买了养成也不会有"我能潜得更深了"的反馈。
+    // ⚠️ `sec` = 满氧**静止**能撑的秒数，不是平衡数字（实战要移动/爆发/拾取），只给量级。
+    const o2f = layerO2(w.layerIdx, w.st.o2Bonus, w.st.regen)
+    this.text(dx0, dy0 + 86 + LAYERS.length * 20 + 26,
+      `氧耗 ×${o2f.drain.toFixed(2)} · 静止 ${Math.round(o2f.sec)}s`, 12, TXT.dim)
 
     // ===== ② 氧气条（顶部居中 · 主 HUD）=====
     // 两段式：剩余氧（实心） | 本层上限被压缩的余量（灰）。

@@ -412,6 +412,69 @@ export const LAYERS: LayerDef[] = [
  * 每层 4 波的**节奏签名**（V6.23 从"全局一张表"拆开）。
  * ⚠️ **每层 4 个 dur 之和必须 = 156s**。DiveScene.ts:567-592
  */
+
+/**
+ * 每带的**生态配套**（V6.53）。
+ *
+ * 为什么单独一张表而不是塞进 `LayerDef`：`LayerDef` 是**玩法**字段（氧耗 / 敌人倍率 / 视距），
+ * 这张表是**表现**字段（鱼群 / 海生物 / 叙述）。分开的理由两条 ——
+ * ① 表现字段被渲染层与插画岗同时消费，混进玩法表会让"改画面"看起来像"改平衡"；
+ * ② 将来低端机要按平台降级表现（少画鱼群），不该动到玩法表。
+ *
+ * ⚠️ 必须与 `LAYERS` **同序同长**（5 条）。索引即 `world.layerIdx`。
+ */
+export interface LayerEco {
+  /** 远景鱼群条数（渲染层）。`0` = 该带不画 */
+  school: number
+  /** 鱼群单鱼尺寸倍率（相对远景基准长 26px）。深渊给 3.0 = 巨影 */
+  schoolSize: number
+  /** 该带的代表鱼种（图鉴 / 鱼情雷达 / 敌人贴图分配用） */
+  species: string
+  /** 生态元素清单（插画岗出图与渲染层程序化**共用同一份口径**） */
+  bio: string[]
+  /** 氧耗叙述（HUD 深度计）：这一层**为什么**更费氧 */
+  o2Note: string
+}
+
+export const LAYER_ECO: LayerEco[] = [
+  // L1 阳光带 —— 开阔水体：**没有底**（用户点名"浅层不该见底"），靠光柱与密集小鱼群撑"丰富"
+  { school: 46, schoolSize: 0.75, species: '表层鱼群',
+    bio: ['丁达尔光柱', '水面焦散', '密集小鱼群', '远处海龟剪影', '悬浮气泡'],
+    o2Note: '近水面 · 氧耗 ×1.0' },
+  // L2 弱光带 —— 鱼群变稀、开始出现中大型剪影；光只剩远处零星光斑
+  { school: 30, schoolSize: 0.85, species: '中层鱼群',
+    bio: ['远处光斑', '稀疏横游鱼群', '大型生物剪影', '暗流纹路'],
+    o2Note: '暗流推着你 · 氧耗 ×1.35' },
+  // L3 午夜带 —— **生物荧光**是这一带的主角：鱼群自身发光、连成链
+  { school: 38, schoolSize: 0.95, species: '荧光链鱼群',
+    bio: ['荧光浮游链', '发光水母群', '链状鱼群', '生物光斑'],
+    o2Note: '涌流不给退路 · 氧耗 ×1.8' },
+  // L4 热泉带 —— 鱼群**避开热泉**（散开、不聚团）；橙红辐射把水染暖
+  { school: 20, schoolSize: 0.90, species: '热泉散鱼',
+    bio: ['热泉烟柱', '橙红辐射', '避热散鱼', '管虫丛'],
+    o2Note: '热流顶着你 · 氧耗 ×2.4' },
+  // L5 深渊带 —— 不画鱼群，画**两条巨影**（schoolSize 3.0）：少而大 = 压迫
+  { school: 3, schoolSize: 3.00, species: '深渊巨影',
+    bio: ['呼吸点阵', '巨影横过', '稀疏发光点'],
+    o2Note: '压力每波再压上限 · 氧耗 ×3.0' },
+]
+
+/**
+ * 该层的**氧耗预测** —— 给玩家"我撑不撑得过这一层"的指引，也是养成卡属性的依据。
+ *
+ * 为什么不直接用 `LAYERS[i].drain`：玩家看到的应当是**自己的**账户（含永久强化
+ * `o2Bonus` / `regen`），而不是裸数值 —— 否则买了养成也不会有"我变强了"的反馈。
+ *
+ * `sec` = "满氧静止能撑多少秒"。**它不是平衡数字**（实战要移动 / 爆发 / 拾取），
+ * 只用来给玩家一个可比较的量级（"L3 连 L1 的一半都不到"）。
+ */
+export function layerO2(layerIdx: number, o2Bonus = 0, regen = 0): { drain: number; cap: number; sec: number } {
+  const L = LAYERS[Math.max(0, Math.min(LAYERS.length - 1, layerIdx))]
+  const drain = Math.max(0.05, L.drain - regen)
+  const cap = L.o2Max + o2Bonus
+  return { drain, cap, sec: cap / drain }
+}
+
 export const LAYER_WAVES: WaveShape[][] = [
   [ { count: 20, dashRatio: 0.00, hpMul: 1.00, dur: 34 },
     { count: 32, dashRatio: 0.16, hpMul: 1.10, dur: 38 },

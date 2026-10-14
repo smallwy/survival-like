@@ -81,6 +81,10 @@ export class Gfx {
   strokeEllipse(x: number, y: number, rx: number, ry: number): this {
     this.ellipse(x, y, rx, ry); this.g.stroke(); return this
   }
+  /** 填充椭圆。V6.53：**远景鱼群的鱼身** —— 侧视鱼是"压扁的长条"，不是圆 */
+  fillEllipse(x: number, y: number, rx: number, ry: number): this {
+    this.ellipse(x, y, rx, ry); this.g.fill(); return this
+  }
 
   /** 矩形，(x,y) 是**左上角** */
   rect(x: number, y: number, w: number, h: number): this {

@@ -103,7 +103,7 @@ import { codexGains } from '../shared/dive/codex'
 import type { Profile } from '../shared/dive/profile'
 import {
   CAM_ZOOM, TURRET_R, EMITTER_SIZE, SUB_D, BASE_SEATS, WEAPON_DEF, SEAT_RATIO, SEAT_RING_R,
-  BONE, weaponFamily,
+  BONE, weaponFamily, LAYER_ECO,
 } from '../shared/dive/tables'
 import { UI } from '../shared/theme'
 import { SUBS, getSub } from '../shared/subs'
@@ -128,7 +128,31 @@ interface Spark { x: number; y: number; vx: number; vy: number; life: number; ma
 interface ArcFx { pts: Array<{ x: number; y: number }>; life: number; color?: number; maxLife?: number }
 interface BlastFx { x: number; y: number; r: number; life: number }
 interface FloatFx { x: number; y: number; vy: number; life: number; text: string; color: number; size: number; delay: number; label: Label }
-interface Mote { x: number; y: number; r: number; vy: number }
+interface Mote { x: number; y: number; r: number; vy: number; far: boolean }
+
+/**
+ * 远景鱼群的一条剪影（V6.53）。
+ *
+ * 它属于 V6.51 定义的**生态两层**里的「远景剪影层」：
+ *   · **无 2px 发光核** —— 那枚核是敌人的定位铁律（见 `drawEnemies` 里的说明与
+ *     `DiveGame.ts` 文件头的层序注释）。破了它，玩家会朝打不到的鱼开火；
+ *   · 只表示"水里有别的东西"，**不可瞄准、不碰撞**。
+ *
+ * 俯视看不到"下"，所以**深度只能用大小 + 明暗表达**（近大亮 / 远小暗）。
+ */
+interface SchoolFish {
+  x: number; y: number
+  /** 水平游速（符号即方向）。远景鱼群**只横游** —— 斜着游会和"层"的读法打架 */
+  vx: number
+  /** 体长（px） */
+  size: number
+  /** 摆尾相位。每条不同，否则一群鱼像一块板 */
+  phase: number
+  /** 0→1 渐入。换带时新鱼群不能"啪"地出现（那读作 bug） */
+  fade: number
+  /** 目标不透明度。**硬上限 0.30**（0.35 已接近敌人剪影的可见度） */
+  alpha: number
+}
 /** 贴图池里的一条：`key` 让它能被同种敌人复用（与 web 的 fishPool 同构） */
 interface Fish { sp: Sprite; key: string }
 /**
@@ -175,6 +199,24 @@ const SPARK_CAP = 260
 const FLOAT_CAP = 32
 /** 敌人贴图池上限。web 侧的阈值是"同屏 >120 条就整体退回矢量" */
 const FISH_CAP = 140
+
+/**
+ * 侧视敌人的**最大仰俯倾角**（弧度）。`0.611 ≈ 35°`。
+ *
+ * V6.52 §2.1。敌人贴图（`fish/swarm.png` / `fish/dash.png`）本身是**侧视画法、头朝左**。
+ * 侧视只允许两个自由度：**左右镜像** + **±35° 仰俯**（鱼能仰冲 / 俯冲，但不能翻滚）——
+ * 头朝上/头朝下是**俯视**才有的自由度，也正是"体感奇怪"的来源。
+ */
+const SIDE_TILT = 0.611
+
+/**
+ * 远景鱼群的**体色**（按带，V6.53）。
+ *
+ * 全部是低饱和浅色 —— 鱼群只是"水里有别的东西"的暗示，**不能比敌人更抢眼**
+ * （敌人带 2px 发光核，见 `drawEnemies`）。L1 淡青白 / L2 淡青 / L3 淡紫（生物荧光带）/
+ * L4 淡橙（热泉）/ L5 淡靛（深渊巨影）。
+ */
+const ATM_FISH_TINT = [0xbfe9ff, 0x9fd8d8, 0xa89ce0, 0xd8a878, 0x6f7bb8]
 
 /**
  * 鱼骨辉光的**同心圈层数**（V6.48 性能）。
@@ -284,6 +326,8 @@ export class DiveGame extends Component {
   private gBase!: Gfx
   private gBg!: Gfx
   private gVeil!: Gfx
+  /** 光照与生态层（V6.53）。**必须夹在 gVeil 与 gBack 之间** —— 见 buildNodes 的注释 */
+  private gAtmo!: Gfx
   private gBack!: Gfx
   private gEnt!: Gfx
   private gPlayer!: Gfx
@@ -319,6 +363,9 @@ export class DiveGame extends Component {
   private readonly fxBitPool: Fish[] = []
   private floatSlots: Array<FloatFx | null> = new Array(FLOAT_CAP).fill(null)
   private motes: Mote[] = []
+  /** 远景鱼群（V6.53）。换带时整批重建（靠 `schoolLayer` 变号触发） */
+  private schools: SchoolFish[] = []
+  private schoolLayer = -1
   /** 表现层计时器（鱼雷气泡尾迹的正弦摆动等用；与 sim 的时间无关） */
   private fxT = 0
   /** 本帧的受击白闪（drawEnemies 登记 → drawFx 消费，见 FlashMark 的注释） */
@@ -554,7 +601,13 @@ export class DiveGame extends Component {
     // 压在背景图下面等于看不见），但绝不能在这里画不透明底色。
     this.gBg = this.mkWrapped('gBg', this.worldRoot)
     this.gVeil = this.mkWrapped('gVeil', this.worldRoot)
-    // gBack：地面性质的东西（酸液云 / 鱼骨 / 声呐波前 / 爆炸环）—— 画在鱼**之下**。
+    // gAtmo（V6.53）：**光照与生态层** —— 远景鱼群 / 能见度雾 / 光柱 / 荧光群。
+    //   ⚠️ 必须夹在 gVeil 与 gBack **之间**：
+    //     · 插在 gVeil **之下** ⇒ 光被自己的压暗层吃掉（等于没画，白工）；
+    //     · 插在 gBack **之上** ⇒ 盖住敌人（战斗可读性崩）。
+    //   这是全项目最容易放错的一层。
+    this.gAtmo = this.mkWrapped('gAtmo', this.worldRoot)
+    this.gBack = this.mkWrapped('gBack', this.worldRoot)
     // web 的原话："声呐波前画在敌人之下，避免一圈圈环把鱼群剪影盖住"。
     this.gBack = this.mkWrapped('gBack', this.worldRoot)
 
@@ -716,7 +769,7 @@ export class DiveGame extends Component {
     // （Graphics 是累积顶点，不 clear 就一直画）。
     if (!this.started) {
       this.title.update(dt)
-      this.gBase.clear(); this.gBg.clear(); this.gVeil.clear(); this.gBack.clear()
+      this.gBase.clear(); this.gBg.clear(); this.gVeil.clear(); this.gAtmo.clear(); this.gBack.clear()
       this.gEnt.clear(); this.gPlayer.clear(); this.gFront.clear()
       this.hud.begin()
       return
@@ -750,6 +803,7 @@ export class DiveGame extends Component {
       this.hideWorld()
     }
     this.drawVeil(w)
+    this.drawAtmo(w, dt)
     this.drawFx()
     this.drawFxBits()
 
@@ -1630,17 +1684,36 @@ export class DiveGame extends Component {
     this.gBase.fill(UI.abyss, 1)
     this.gBase.fillRect(-pw, -ph, this.W + pw * 2, this.H + ph * 2)
 
-    // 海雪（纯表现）。越深越密是 web 的做法，这里密度固定 60，够用。
-    if (this.motes.length === 0) {
-      for (let i = 0; i < 60; i++) {
-        this.motes.push({ x: Math.random() * this.W, y: Math.random() * this.H, r: 0.8 + Math.random() * 1.8, vy: -6 - Math.random() * 14 })
-      }
-    }
+    // ---- 海雪 / 悬浮物（V6.50 §3.2 + V6.53）----
+    // 三条修正，缺一条就读不出"在往下走"：
+    //   ① **提速**：原 `vy = -6~-20 px/s` 方向是对的（向上掠 = 下潜感），但**慢一个数量级**
+    //      —— 屏幕上几乎看不出在动。近景 46 px/s（`SCROLL_BASE`）、中景 0.35×。
+    //   ② **三层视差**：远景（背景图）静止 / 中景 ≈16 / 近景 ≈46。**视差本身就是深度线索**。
+    //   ③ **数量走 `LAYERS.motes`**（34/48/70/90/110）：越深越密。原值写死 60。
+    // ⛔ 深度**不影响速度** —— 别做"越深越慢"，那会削弱下潜感。深度只影响密度/尺寸/亮度。
+    const want = w.layer().motes
+    while (this.motes.length < want) this.motes.push(this.newMote(this.motes.length % 2 === 0))
+    while (this.motes.length > want) this.motes.pop()
     for (const m of this.motes) {
       m.y += m.vy * dt
       if (m.y < -4) { m.y = this.H + 4; m.x = Math.random() * this.W }
-      this.gBg.fill(0x9fe1cb, 0.16)
+      // 近景更亮更大、中景更暗更小 —— Graphics 没有景深，"远近"只能这样读出来
+      this.gBg.fill(0x9fe1cb, m.far ? 0.15 : 0.30)
       this.gBg.fillCircle(m.x, m.y, m.r)
+    }
+  }
+
+  /**
+   * 生成一颗悬浮物（V6.50 §3.2）。
+   * `far = true` ⇒ 中景（0.35× 速度、更小更暗）；否则近景（全速、更大更亮）。
+   */
+  private newMote(far: boolean): Mote {
+    return {
+      x: Math.random() * this.W,
+      y: Math.random() * this.H,
+      r: far ? 0.7 + Math.random() * 1.0 : 1.3 + Math.random() * 2.2,
+      vy: -(far ? 16 : 46) * (0.8 + Math.random() * 0.4),
+      far,
     }
   }
 
@@ -1702,6 +1775,78 @@ export class DiveGame extends Component {
         this.gVeil.fill(UI.danger, 0.12 * k)
         this.gVeil.fillRect(x, vr.y, bw, vr.h)
       }
+    }
+  }
+
+  /**
+   * **光照与生态层**（V6.53）。
+   *
+   * 为什么单独一层：**"越深越黑"物理上正确、游戏上是死路** —— 玩家需要"看得见水里有东西"，
+   * 而不是"一团黑"。所以每一带换一个「光的主角」来替代被减掉的亮度：
+   *   L1 阳光 → L2 残光 → L3 生物荧光 → L4 热泉 → L5 探照灯 + 呼吸点阵。
+   * 详见 `docs/水域光照与生态规格_V6.51.md`。
+   *
+   * v1 只落**远景鱼群剪影**这一件事（用户点名："不同水域要有海生物、鱼群"）。
+   * 探照灯 / 能见度雾 / 荧光群按 §9 的落地顺序排在后面 —— 一次改太多，
+   * 实机出问题时分不清是哪一块的账。
+   *
+   * ⚠️ 鱼群**绝不给 2px 发光核**（那是敌人的定位铁律，见 `drawEnemies`）：
+   *    远景剪影不可瞄准、不碰撞，给了核玩家会朝打不到的鱼开火。
+   */
+  private drawAtmo(w: DiveWorld, dt: number): void {
+    // 弹窗相位不画环境层（与 `drawVeil` 同规）：那几个页面是一整张实底页，环境不该透上来。
+    if (w.phase === 'shop' || w.phase === 'decide' || w.phase === 'result') return
+
+    const idx = Math.min(LAYER_ECO.length - 1, w.layerIdx)
+    if (this.schoolLayer !== idx) this.buildSchools(idx)
+
+    for (const f of this.schools) {
+      f.x += f.vx * dt
+      f.fade = Math.min(1, f.fade + dt / 0.6)     // 渐入（换带时不能"啪"地出现）
+      // 两侧回绕：比"出屏销毁 + 重新生成"省事，也不会出现鱼群凭空冒出来
+      const wrap = f.size * 1.6
+      if (f.vx > 0 && f.x > this.W + wrap) f.x = -wrap
+      else if (f.vx < 0 && f.x < -wrap) f.x = this.W + wrap
+      if (f.fade <= 0.01) continue
+
+      const a = f.alpha * f.fade
+      const L = f.size
+      const h = L * 0.40
+      // 身体：压扁的椭圆（侧视鱼是长条，不是圆）。**无发光核**。
+      this.gAtmo.fill(ATM_FISH_TINT[idx] ?? 0x9fd8d8, a)
+      this.gAtmo.fillEllipse(f.x, f.y, L * 0.5, h * 0.5)
+      // 尾鳍：摆尾相位逐条错开，否则一群鱼像一块板。尾在身后（贴图基准朝左，这里按游向定）
+      const s = f.vx > 0 ? 1 : -1
+      const swing = Math.sin(w.t * 5 + f.phase) * h * 0.5
+      this.gAtmo.fillTri(f.x - s * L * 0.48, f.y + swing,
+        s > 0 ? Math.PI : 0, L * 0.42, h * 0.5)
+    }
+  }
+
+  /**
+   * 按当前带**整批重建**远景鱼群（V6.53）。
+   *
+   * 为什么不增量调整数量：换带时连**种类与尺寸**都变了（L1 是 46 条小鱼，L5 是 3 条巨影），
+   * 逐条改属性反而更绕。整批重建 + `fade` 渐入，读起来就是"换了一片水域"。
+   * ⚠️ 渐入是必须的：换带瞬间 46 条鱼"啪"地出现会读作 bug（用户在意的正是"丝滑"）。
+   */
+  private buildSchools(layerIdx: number): void {
+    this.schoolLayer = layerIdx
+    const eco = LAYER_ECO[layerIdx]
+    this.schools.length = 0
+    for (let i = 0; i < eco.school; i++) {
+      const dir = Math.random() < 0.5 ? -1 : 1
+      // 巨影（深渊）要慢：体型越大越慢，否则读作"一条大鱼在冲刺"
+      const big = eco.schoolSize > 2
+      this.schools.push({
+        x: Math.random() * this.W,
+        y: Math.random() * this.H,
+        vx: dir * (big ? 6 + Math.random() * 6 : 12 + Math.random() * 20),
+        size: 26 * eco.schoolSize * (0.72 + Math.random() * 0.56),
+        phase: Math.random() * Math.PI * 2,
+        fade: 0,
+        alpha: 0.13 + Math.random() * 0.15,       // ≤ 0.28，低于敌人剪影的可见度
+      })
     }
   }
 
@@ -1941,7 +2086,27 @@ export class DiveGame extends Component {
         || (e.kind === 'boss' && e.phase === 'charge')
       // ⚠️ 本地变量不要叫 `col` —— 会遮蔽从 Gfx 导入的同名颜色构造函数。
       const body = charging ? UI.danger : (e.flash > 0 ? 0xffffff : e.color)
-      const face = Math.atan2(w.py - e.y, w.px - e.x)
+
+      // ---- 侧视朝向（V6.52 §2.1，2026-10-14）----
+      // 贴图（`fish/swarm.png`、`fish/dash.png`）本身就是**侧视画法、头朝左**。
+      // 旧写法 `angle = -((atan2(玩家-敌) - texRot) × 180/π)` 是**俯视语义** ——
+      //   它把贴图对着玩家整圈旋转，于是从正上/正下方游来的敌人被转 90°，
+      //   屏幕上就是"一条头朝下的鱼"。这就是用户说的「体感奇怪」的直接来源。
+      // 侧视只给两个自由度：**左右镜像** + **±35° 仰俯**（`SIDE_TILT`）。
+      // ⚠️ 镜像必须用 `scale.x = -1`，不能用旋转 180° —— 转 180° 会把鱼**肚皮朝上**。
+      // ⚠️ 后续新增敌人的贴图**必须与 swarm/dash 同向（头朝左）**，否则镜像基准要改。
+      const spd = Math.hypot(e.vx, e.vy)
+      let flip = 1
+      let tilt = 0
+      if (spd > 0.5) {
+        const ux = e.vx / spd
+        const uy = e.vy / spd                     // sim 的 y 向上 ⇒ 屏幕上移 = uy > 0
+        flip = ux > 0 ? -1 : 1                    // 朝右游 ⇒ 水平镜像（贴图基准朝左）
+        // 屏幕坐标 y 向下，故"屏幕上移"分量是 `-uy`；`|ux|` 保证仰角落在右半平面、
+        //   天然不翻滚（否则正上/正下方来的敌人会转 90°）。
+        const a = Math.atan2(-uy, Math.abs(ux) + 1e-4)
+        tilt = Math.max(-SIDE_TILT, Math.min(SIDE_TILT, a))
+      }
       // ⚠️ 闪白**绝不能**把贴图置空。曾经写成 `e.flash > 0 ? null : this.fishSprite(e)`，
       //    于是命中那一瞬间掉进下面的矢量兜底 → `fillTri` → 屏幕上变成一颗**白色实心三角**，
       //    既认不出是鱼、也读不出"打中了哪一条"。
@@ -1952,7 +2117,8 @@ export class DiveGame extends Component {
 
       if (sp) {
         sp.node.setPosition(e.x, this.H - e.y)
-        sp.node.angle = -((face - e.texRot) * 180) / Math.PI
+        sp.node.setScale(flip, 1, 1)              // 侧视镜像（贴图基准朝左）
+        sp.node.angle = -(tilt * 180) / Math.PI   // 侧视仰俯（±35°，不翻滚）
         sp.color = col(0xffffff, charging ? 0.92 : 0.88)
         // 深层的可读性兜底：只留**描边环**（不填充）。
         // web 明确否掉了"暗色实心椭圆衬底"那版 —— 衬底比小鱼还大，把鱼盖成亮斑。
@@ -1963,10 +2129,18 @@ export class DiveGame extends Component {
           this.gEnt.strokeEllipse(e.x, e.y, (e.r * 2.05) / 2, (e.r * 1.5) / 2)
         }
       } else {
-        // 矢量兜底（美术未就绪 / 太小 / 太多 / 闪白那一帧）
+        // 矢量兜底（美术未就绪 / 太小 / 太多）—— 必须与贴图**同一套侧视语汇**，
+        //   否则同屏 >120 条整体退回矢量时画风突变（贴图是斜着游的鱼、矢量是朝玩家的三角）。
         this.gEnt.fill(body, 0.95)
         if (e.kind === 'boss') this.gEnt.fillCircle(e.x, e.y, e.r)
-        else this.gEnt.fillTri(e.x, e.y, face, e.r * 1.25, e.r * 0.85)
+        else {
+          // sim 坐标（y 向上）：沿运动方向、限幅 ±35°，朝左游时反射到左半平面。
+          const ux = spd > 0.5 ? e.vx / spd : 1
+          const uy = spd > 0.5 ? e.vy / spd : 0
+          let va = Math.atan2(uy, Math.abs(ux) + 1e-4)
+          va = Math.max(-SIDE_TILT, Math.min(SIDE_TILT, va))
+          this.gEnt.fillTri(e.x, e.y, ux < 0 ? Math.PI - va : va, e.r * 1.25, e.r * 0.85)
+        }
       }
 
       // 蓄力预警圈（V4 §3.4：致命预警必须醒目）
