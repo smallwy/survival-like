@@ -1,5 +1,5 @@
 """
-光的主权转移 · 合成预览（V6.59）。
+光的主权转移 · 合成预览（V6.60）。
 
 复刻 `DiveGame` 的 **drawBg → drawVeil → drawAtmo** 三层合成结果，回答一个
 单帧代码看不出来的问题：**五带各自"有光"之后，合起来是什么样**。
@@ -68,10 +68,15 @@ ALPHA_FISH = [(0.26, 0.44), (0.18, 0.32), (0.22, 0.40), (0.16, 0.30), (0.30, 0.4
 PER_BIG, PER_SMALL, SPREAD = 1, 6, 62
 
 # ---- V6.59 光照层 ----
-LAMP_COLOR, LAMP_R, LAMP_STEP = 0xBFF4FF, 140, 11
+LAMP_COLOR, LAMP_R, LAMP_STEP = 0xBFF4FF, 168, 9
 LAMP_D0, LAMP_D1 = 120, 600
+LAMP_ALPHA, LAMP_BANDS, LAMP_POW = 0.044, 14, 1.35
+LAMP_EDGE_N, LAMP_EDGE_RAMP = 3, [0.35, 0.60, 0.85]
 FOG_R, FOG_BANDS, FOG_ALPHA = [0, 640, 480, 380, 300], 12, 0.22
 BEAM_N, BEAM_TILT = 4, 0.314
+BEAM_COLOR = 0xDFF2FF
+BEAM_SPREAD, BEAM_SEG, BEAM_FALLOFF, BEAM_OVERLAP = 1.45, 3, 1.6, 0.04
+BEAM_W0, BEAM_W1 = 24, 44
 FLUO_CHAINS, FLUO_C1, FLUO_C2 = 7, 0xA88CFF, 0x6FF0D0
 VENT_N, VENT_HOT, VENT_EDGE = 6, 0xFF8A3C, 0x8A3A18
 DOTS_N, DOTS_PERIOD, DOTS_SAFE_R = 48, 3.2, 260
@@ -158,10 +163,12 @@ def draw_lamp(lay, d, i):
     if k <= 0.01:
         return 0
     R = (LAMP_R - LAMP_STEP * i) / CAM_ZOOM
-    bands = 8
+    bands = LAMP_BANDS
+    a = LAMP_ALPHA * k
     for j in range(bands):
-        r = R * (1 - j / bands)
-        d.ellipse([W / 2 - r, H / 2 - r, W / 2 + r, H / 2 + r], fill=rgba(LAMP_COLOR, 0.030 * k))
+        edge = LAMP_EDGE_RAMP[j] if j < LAMP_EDGE_N else 1.0
+        r = R * ((1 - j / bands) ** LAMP_POW)
+        d.ellipse([W / 2 - r, H / 2 - r, W / 2 + r, H / 2 + r], fill=rgba(LAMP_COLOR, a * edge))
     return bands
 
 
@@ -173,17 +180,25 @@ def draw_beams(lay, d, i, rnd):
     y_top, y_bot = -80, H + 40
     for b in range(BEAM_N):
         bx = W * ((b + 0.5 + (rnd.random() - 0.5) * 1.1) / BEAM_N)
-        bw = 34 + rnd.random() * 66
-        bright = 1.35 - (bw - 34) / 66 * 0.9
+        bw = BEAM_W0 + rnd.random() * BEAM_W1
+        bright = 1.30 - (bw - BEAM_W0) / BEAM_W1 * 0.80
         for L in range(3):
-            wd = (bw * (1.45 - 0.32 * L)) / CAM_ZOOM
-            a = (0.030 + 0.022 * L) * bright
+            w_top = (bw * (1.45 - 0.32 * L)) / CAM_ZOOM
+            w_bot = w_top * BEAM_SPREAD
+            a_base = (0.030 + 0.022 * L) * bright
             x_top = bx - tan * (H * 0.5)
-            dx = wd * 0.5
-            x_bot = x_top + tan * (y_bot - y_top)
-            d.polygon([(x_top - dx, y_top), (x_top + dx, y_top),
-                       (x_bot + dx, y_bot), (x_bot - dx, y_bot)], fill=rgba(CYAN_HI, a))
-            n += 1
+            span = y_bot - y_top
+            for sg in range(BEAM_SEG):
+                t0 = sg / BEAM_SEG
+                t1 = min(1.0, (sg + 1) / BEAM_SEG + BEAM_OVERLAP)
+                ya, yb = y_top + span * t0, y_top + span * t1
+                wa = w_top + (w_bot - w_top) * t0
+                wb = w_top + (w_bot - w_top) * t1
+                cxa, cxb = x_top + tan * (ya - y_top), x_top + tan * (yb - y_top)
+                a = a_base * ((1 - t0) ** BEAM_FALLOFF)
+                d.polygon([(cxa - wa * 0.5, ya), (cxa + wa * 0.5, ya),
+                           (cxb + wb * 0.5, yb), (cxb - wb * 0.5, yb)], fill=rgba(BEAM_COLOR, a))
+                n += 1
     return n
 
 
@@ -334,7 +349,7 @@ def main():
         cols.append(b)
         if not args.old_only:
             a, st = compose(i, True, tw, th)
-            label(a, f'{ECO[i]["tag"]}  AFTER (V6.59)', (190, 255, 220))
+            label(a, f'{ECO[i]["tag"]}  AFTER (V6.60)', (190, 255, 220))
             cols.append(a)
             print(f'L{i + 1} 图元：', {k: v for k, v in st.items() if v})
         sheet = Image.new('RGB', (tw * len(cols) + 6 * (len(cols) - 1), th), rgb(ABYSS))
@@ -355,7 +370,7 @@ def main():
             rows.append([b])
         else:
             a, _ = compose(i, True, tw, th)
-            label(a, 'AFTER (V6.59)', (190, 255, 220))
+            label(a, 'AFTER (V6.60)', (190, 255, 220))
             rows.append([b, a])
     cols = len(rows[0])
     sheet = Image.new('RGB', (tw * cols + 6 * (cols - 1), th * 5), rgb(ABYSS))

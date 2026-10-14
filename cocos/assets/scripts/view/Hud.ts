@@ -35,7 +35,7 @@
 
 import { Node, Label, Graphics, Sprite, SpriteFrame, UITransform } from 'cc'
 import { Gfx, col } from './Gfx'
-import { neon, neonLine, neonCircle } from './neon'
+import { neon, neonLine, neonCircle, lerpColor } from './neon'
 import { SpriteBank } from './art'
 import { UI, TXT, MENU, BRIGHT, TXT_LIGHT } from '../shared/theme'
 import {
@@ -410,15 +410,44 @@ export class Hud {
     this.text(dx0, dy0 + 26, `L${w.layerIdx + 1} ${L.name}`, 13, TXT.cyber)
     this.text(dx0, dy0 + 44, L.sub, 12, TXT.mute)
     if (L.mech) this.text(dx0, dy0 + 62, `◆ ${L.mech}`, 13, TXT.amber)
-    // 5 层刻度：层色随深度变，让玩家用余光也知道自己在第几层
-    for (let i = 0; i < LAYERS.length; i++) {
-      const yy = dy0 + 86 + i * 20
-      const cur = i === w.layerIdx, done = i < w.layerIdx
-      g.fill(cur ? UI.cyan : (done ? UI.cyanDim : UI.line), cur ? 1 : 0.6)
-      g.fillRect(dx0, yy, cur ? 26 : 16, 5)
-      if (cur) { g.fill(UI.cyan, 0.25); g.fillRect(dx0 + 30, yy - 4, 6, 13) }
+    this.text(dx0, dy0 + 86, `×${w.mult.toFixed(1)}`, 14, TXT.amber)
+
+    // ===== ①b 深度计（左侧竖直 · V6.51 §9 第 12 步）=====
+    // 原先是 5 条小横杠：它只能回答"我在第几层"，回答不了"我在这一层的哪儿"。
+    // 而本作的核心体感恰恰是「我想再往下一点，但氧不够了」—— 那就必须**看得见还剩多深**。
+    //
+    // ⚠️ 五段**等分**（不是按真实米数比例）：0–200m 只占总深度的 1.8%，
+    //   按真实比例 L1 会是一条 7px 的线。这是**地铁图式**的刻意失真 ——
+    //   深度计的主信息是"我在旅程的哪一站"（米数由左上角的大字负责）；
+    //   而**段内游标仍按真实深度插值** ⇒ 带内是连续的，"刻度失真"没换来"进度失真"。
+    {
+      const mgX = dx0, mgW = 9
+      const mgY0 = 262, mgY1 = H - 128
+      const mgH = mgY1 - mgY0, segH = mgH / LAYERS.length
+      g.fill(UI.abyss, 0.5); g.fillRect(mgX, mgY0, mgW, mgH)
+      for (let i = 0; i < LAYERS.length; i++) {
+        const sy = mgY0 + i * segH
+        const cur = i === w.layerIdx, done = i < w.layerIdx
+        // 段色取该带的 `tint` 并**提亮 38%**（tint 是水色，直接当 UI 色太暗、L5 更是近黑）。
+        // 用 tint 而不是另配一套色板：**深度计的颜色与水里看到的颜色对上**，玩家不用学两套配色。
+        const sc = lerpColor(LAYERS[i].tint, 0xffffff, 0.38)
+        g.fill(sc, done ? 0.75 : (cur ? 1 : 0.30))
+        g.fillRect(mgX, sy + 1.5, mgW, segH - 3)
+        if (i > 0) { g.line(UI.line, 0.5, 1); g.strokeSeg(mgX - 4, sy, mgX, sy) }
+        this.text(mgX + mgW + 12, sy + segH / 2 - 7, LAYERS[i].name, 11,
+          cur ? TXT.cyber : (done ? TXT.dim : TXT.mute))
+      }
+      g.line(UI.cyanDim, 0.6, 1); g.strokeRect(mgX, mgY0, mgW, mgH)
+
+      // 游标：带内按真实深度插值（见上方 ⚠️），所以越往下走它越慢/越快是真实比例
+      const Lc = LAYERS[w.layerIdx]
+      const kIn = clamp01((w.depthM - Lc.depthTop) / Math.max(1, Lc.depthBot - Lc.depthTop))
+      const py = mgY0 + (w.layerIdx + kIn) * segH
+      g.line(UI.cyanHi, 0.95, 2); g.strokeSeg(mgX - 5, py, mgX + mgW + 5, py)
+      g.fill(UI.cyanHi, 1); g.fillRect(mgX + mgW + 1, py - 3, 5, 6)
+      g.fill(UI.cyanHi, 0.45 + 0.55 * Math.abs(Math.sin(t * 2.2)))
+      g.fillCircle(mgX + mgW / 2, py, 2.6)          // 呼吸锚点：余光里"我在这儿"
     }
-    this.text(dx0, dy0 + 86 + LAYERS.length * 20 + 6, `×${w.mult.toFixed(1)}`, 14, TXT.amber)
 
     // 本层氧耗预测（V6.53）：让"越深越费氧"**可见** ——
     //   这是玩家决定"要不要升氧气罐"的唯一依据；藏在数值表里 = 养成没有目标。
@@ -684,11 +713,12 @@ export class Hud {
     g.fill(ready ? UI.cyan : UI.cyanDim, 0.25); g.fillCircle(W / 2, sy + 22, 20 * kk)
     this.center(W / 2, sy + 22, ready ? '空格' : `${Math.ceil(w.burstTimer)}`, 13, ready ? TXT.cyber : TXT.mute)
 
-    // ===== ⑧ 环境状态提示（左，深度块下方）=====
+    // ===== ⑧ 环境状态提示（左，**深度计右侧**）=====
+    // x 从 24 移到 106：深度计的带名标签占到 x≈78，两个挤在一起会互相压字。
     let ty = 250
-    if (w.vpCur > 0) { this.text(24, ty, `暗流 ${w.vpCur.toFixed(0)}`, 13, TXT.amber); ty += 20 }
-    if (w.vpPush > 0) { this.text(24, ty, `热泉上推 ${w.vpPush.toFixed(0)}`, 13, TXT.amber); ty += 20 }
-    if (w.burstTimer > 0) this.text(24, ty, `排气冷却 ${w.burstTimer.toFixed(1)}s`, 13, TXT.mute)
+    if (w.vpCur > 0) { this.text(106, ty, `暗流 ${w.vpCur.toFixed(0)}`, 13, TXT.amber); ty += 20 }
+    if (w.vpPush > 0) { this.text(106, ty, `热泉上推 ${w.vpPush.toFixed(0)}`, 13, TXT.amber); ty += 20 }
+    if (w.burstTimer > 0) this.text(106, ty, `排气冷却 ${w.burstTimer.toFixed(1)}s`, 13, TXT.mute)
 
     // ===== ⑨ 低氧压迫：心跳边框 + "O₂ 告急" =====
     // 玩家要能把"我为什么喘不上气"归因到正确原因，就必须有常驻显式指示。

@@ -87,7 +87,26 @@ def draw(show_old):
         d.text((W - 130, 56), '旧 暂停键', fill=(110, 70, 90), font=F(13))
 
     # ---- ① 深度指示（左上）----
-    box(d, 24, 22, 210, 200, C_CYAN, '深度指示 / 层刻度 / 氧耗')
+    box(d, 24, 22, 210, 200, C_CYAN, '深度数字 / 层名 / 倍率 / 氧耗')
+    # ---- ①b 深度计（V6.60 §9-12）：竖直标尺，五段等分 + 段内真实插值游标 ----
+    mgX, mgW, mgY0, mgY1 = 24, 9, 262, H - 128
+    segH = (mgY1 - mgY0) / 5
+    names = ['阳光带', '弱光带', '午夜带', '热泉带', '深渊带']
+    d.line([(mgX - 4, mgY0), (mgX + mgW + 60, mgY0)], fill=(40, 80, 96), width=1)
+    for i in range(5):
+        sy = mgY0 + i * segH
+        d.rectangle([mgX, sy + 1.5, mgX + mgW, sy + segH - 1.5],
+                    fill=(46, 100, 120) if i == 1 else None,
+                    outline=C_CYAN if i == 1 else (40, 80, 96))
+        if i > 0:
+            d.line([(mgX - 4, sy), (mgX, sy)], fill=(40, 80, 96), width=1)
+        d.text((mgX + mgW + 12, sy + segH / 2 - 8), names[i],
+               fill=C_CYAN if i == 1 else C_DIM, font=F(12))
+    py = mgY0 + (1 + 0.4) * segH          # 游标：L2 带内 40%
+    d.line([(mgX - 5, py), (mgX + mgW + 5, py)], fill=C_CYAN_HI, width=2)
+    d.rectangle([mgX + mgW + 1, py - 3, mgX + mgW + 6, py + 3], fill=C_CYAN_HI)
+    d.text((mgX + mgW + 12, mgY1 + 6), '深度计（V6.60 §9-12）', fill=C_CYAN_HI, font=F(13))
+    d.text((106, 250), '环境提示块移到这里\n（避开带名标签）', fill=C_AMBER, font=F(12))
     # ---- ② 氧气条（顶部居中）----
     bx, by, bw, bh = (W - 420) / 2, 26, 420, 20
     box(d, bx, by, bw, bh, C_CYAN_HI, '氧气条')

@@ -106,7 +106,7 @@ import { codexGains } from '../shared/dive/codex'
 import type { Profile } from '../shared/dive/profile'
 import {
   CAM_ZOOM, TURRET_R, EMITTER_SIZE, SUB_D, BASE_SEATS, WEAPON_DEF,
-  BONE, weaponFamily, LAYER_ECO,
+  BONE, weaponFamily, LAYER_ECO, LAYERS,
 } from '../shared/dive/tables'
 import { UI } from '../shared/theme'
 import { SUBS, getSub } from '../shared/subs'
@@ -139,7 +139,17 @@ interface FloatFx { x: number; y: number; vy: number; life: number; text: string
  *    屏幕上已有的那批还在按老速度走 ⇒ "换带时整片水没一起动"。
  *    `jit` 只是每条 ±20% 的抖动，免得整屏颗粒像一块板在移动。
  */
-interface Mote { x: number; y: number; r: number; jit: number; far: boolean }
+interface Mote {
+  x: number
+  y: number
+  r: number
+  jit: number
+  far: boolean
+  /** 自身不透明度（**个体固定**，不是每帧随机 —— 每帧随机会闪成"雪花屏"）*/
+  a: number
+  /** 横向摆动相位（L2 悬浮絮随暗流左右摆；其余带 `wob = 0` 时无敌）*/
+  ph: number
+}
 
 /**
  * 远景鱼群的一条剪影（V6.53）。
@@ -166,6 +176,32 @@ interface SchoolFish {
   /** 目标不透明度。**硬上限 0.30**（0.35 已接近敌人剪影的可见度） */
   alpha: number
 }
+
+/**
+ * **每带的水体物质**（V6.51 §9 第 4 步「海雪 → 五带物质」）。
+ *
+ * 为什么必须分层：五带现在**换了背景图、换了光**，但如果悬浮物还是同一种白点，
+ * 玩家会觉得"我只是换了张壁纸"。物质是**最贴脸的深度线索** —— 它就在眼前 20cm 处。
+ *
+ * | 带 | 物质 | 读法 |
+ * |---|---|---|
+ * | L1 | 海雪 | 冷白圆点，最亮（阳光穿过，什么都照得见）|
+ * | L2 | 悬浮絮 | **拉长成条 + 左右摆** —— 暗流把絮状物拽成丝 |
+ * | L3 | 荧光碎屑 | 青紫，**亮度跨度最大**（少数特别亮 = 会闪的东西）|
+ * | L4 | 热泉微粒 | 暖橙（被热泉与矿物染过）|
+ * | L5 | 深渊雪 | 靛白，最小最暗（这里没有光，只有微弱散射）|
+ *
+ * `sq` = 长宽比（>1 拉成横条）；`wob` = 横向摆动幅度（px）；
+ * `aLo/aHi` 是**近景**的 alpha 区间，中景乘 0.5（见 `drawBg`）。
+ */
+interface MoteStyle { col: number; sq: number; wob: number; aLo: number; aHi: number; sMul: number }
+const MOTE_STYLE: readonly MoteStyle[] = [
+  { col: 0xdff2ff, sq: 1, wob: 0,  aLo: 0.18, aHi: 0.34, sMul: 1.00 },   // L1 海雪
+  { col: 0xa8d8e0, sq: 5, wob: 16, aLo: 0.14, aHi: 0.26, sMul: 1.15 },   // L2 悬浮絮
+  { col: 0x9a86e8, sq: 1, wob: 0,  aLo: 0.16, aHi: 0.52, sMul: 0.85 },   // L3 荧光碎屑
+  { col: 0xffb070, sq: 1, wob: 0,  aLo: 0.18, aHi: 0.38, sMul: 1.05 },   // L4 热泉微粒
+  { col: 0xa8b8e8, sq: 1, wob: 0,  aLo: 0.10, aHi: 0.20, sMul: 0.75 },   // L5 深渊雪
+]
 
 // ---------------------------------------------------------------------------
 // 光照层的四个元素（V6.59，V6.51 §4.2–§4.5）
@@ -194,6 +230,30 @@ interface Vent { x: number; y: number; w: number; ph: number }
 
 /** 深渊呼吸点阵的一颗（§4.5）*/
 interface AtmoDot { x: number; y: number; r: number; ph: number; halo: boolean }
+
+/**
+ * **交互光反馈**的一条（V6.51 §6）。
+ *
+ * 解决的问题：**战斗打得再猛，背景一点反应都没有** ⇒ 背景读作"贴纸"。
+ * 环境亮一下，就是把"战斗"与"水"缝在一起的那一针。
+ *
+ * ⚠️ 与 `gBack` 的「爆炸环」**不是一回事**：那个是**冲击波**（几何环、硬边、跟随弹体尺寸），
+ *   这个是**环境反光**（亮斑、软边、大范围、低 alpha）。两者叠加才是
+ *   "炸了一下，**整个水都亮了**"。
+ */
+interface AtmoFlash {
+  x: number
+  y: number
+  /** 起止半径（px）。扩散类（爆炸/拾取）r1 > r0；开火是短促亮斑，r1 ≈ r0 */
+  r0: number
+  r1: number
+  /** 已存活 / 总时长（s）*/
+  life: number
+  dur: number
+  col: number
+  /** 峰值 alpha（在 `life = 0` 处）*/
+  a: number
+}
 
 /** 贴图池里的一条：`key` 让它能被同种敌人复用（与 web 的 fishPool 同构） */
 interface Fish { sp: Sprite; key: string }
@@ -319,10 +379,40 @@ const ATMO_QUALITY: number = 2
  * 玩家会以为那是可交互的东西。
  */
 const LAMP_COLOR = 0xbff4ff
-/** 探照灯**基准半径**（屏幕 px）。越深越聚焦 ⇒ L5 = 96 */
-const LAMP_R = 140
-/** 每带收缩步长：`LAMP_R - LAMP_STEP × layerIdx` ⇒ L1 140 → L5 96 */
-const LAMP_STEP = 11
+/**
+ * 探照灯**基准半径**（屏幕 px）。
+ * ⚠️ V6.60 从 140 提到 **168**（步长 11→9 ⇒ L5 = 132）：用户实机反馈
+ *   「探照灯是柔和光晕**不明显**」。半径是"照到多大一片水"的直接表达 ——
+ *   140 在 1304 宽上只覆盖直径 280 ≈ 屏幕宽的 21%，读作"贴了个贴纸在船身上"。
+ */
+const LAMP_R = 168
+/** 每带收缩步长：`LAMP_R - LAMP_STEP × layerIdx` ⇒ L1 168 → L5 132 */
+const LAMP_STEP = 9
+/**
+ * **单层** alpha（内层同 alpha 由外向内叠，中心被覆盖 `LAMP_BANDS` 次）。
+ * 0.030 → **0.044**：14 层累积 ≈ 1 − 0.956¹⁴ = **0.47**（原 8 层 ×0.030 ≈ 0.22）。
+ * ⚠️ **内层**绝不能用"每层一个不同 alpha"来提亮 —— 那会显出**靶环**（V6.59 预览图实测）。
+ *   提亮只能靠**层数**与**单层值**。
+ * ⚠️ 但**最外 `LAMP_EDGE_N` 层**必须走淡入梯度（`LAMP_EDGE_RAMP`）：最外那层
+ *   是从"零覆盖"直接跳到"一次覆盖"，在**圆的边界**上留下一条可见的圆周线
+ *   （V6.60 预览图里就是个清清楚楚的圆盘边）。边界跳变 0.044 → 0.015 之后消失。
+ *   区别在于：**外圈的淡入不是靶环**（靶环要的是"内层之间的台阶"）。
+ */
+const LAMP_ALPHA = 0.044
+/** 最外几层做淡入梯度（消掉圆的边界线）*/
+const LAMP_EDGE_N = 3
+/** 那几层的 alpha 倍率（外 → 内）*/
+const LAMP_EDGE_RAMP = [0.35, 0.60, 0.85]
+/** 外圈→中心的层数（越大越平滑）*/
+const LAMP_BANDS = 14
+/**
+ * 半径分布指数：`r_i = R × (1 − i/n)^LAMP_POW`。
+ * ⚠️ 值 >1 ⇒ **内层更密** ⇒ 覆盖次数在中心快速上升 ⇒ 自然形成一个"亮斑"。
+ *   V6.60 第一版是**加两层独立亮芯**（0.30R / 0.15R），预览图里那两层在 0.30R 处
+ *   留下一条**清晰的圆周硬边**，读作"圆盘"而不是"光晕"。硬边来自"半径突变的层"，
+ *   不来自 alpha —— 所以修法是**换半径分布**，不是调 alpha。
+ */
+const LAMP_POW = 1.35
 /**
  * 探照灯的**淡入深度区间**（`depthM`，m）：120 → 600 线性 0→1。
  *
@@ -331,6 +421,25 @@ const LAMP_STEP = 11
  */
 const LAMP_D0 = 120
 const LAMP_D1 = 600
+
+// ---- 交互光反馈（§6）----
+/**
+ * 同时在场的 flash 上限。开火很频繁（6 座 × 各 0.3s 间隔 ≈ 20 次/s），
+ * 0.12s 的命也想叠满 8 个得 66 次/s —— 实际常态 2~3 个，上限只是防御性封顶。
+ */
+const FLASH_CAP = 8
+/** 每条的同心层数（同 alpha 累叠 ⇒ 中心最亮、边缘柔）。3 层 × 8 条 = 24 图元封顶 */
+const FLASH_LAYERS = 3
+/**
+ * 三种触发的参数。`r0 → r1` 是**扩散**：爆炸与拾取要"亮起来并散开"，
+ * 开火是短促亮斑（r0 ≈ r1，几乎不散，只是闪一下）。
+ *
+ * 颜色分工：开火**冷白**（与探照灯同源 = 我的灯打出去的）/ 爆炸**暖白**（高温）/
+ * 拾取**青**（与鱼骨、磁吸特效同色 = "这是收入"）。
+ */
+const FLASH_MUZZLE = { r0: 20, r1: 38, dur: 0.12, col: 0xdff2ff, a: 0.26 }
+const FLASH_BLAST = { r0: 56, r1: 158, dur: 0.28, col: 0xffe6bc, a: 0.30 }
+const FLASH_PICK = { r0: 140, r1: 248, dur: 0.20, col: 0x6fe8ff, a: 0.13 }
 
 // ---- 能见度雾（§4.6）----
 /**
@@ -358,6 +467,29 @@ const BEAM_N = 4
 const BEAM_TILT = 0.314
 /** 摆动周期（s）。**不能静止 —— 静止读作贴图** */
 const BEAM_SWAY_T = 11
+/**
+ * 光柱颜色：**天光冷白**，不是 `UI.cyanHi`。
+ * ⚠️ V6.60 换色 —— 阳光从水面透下来是**偏白的**，用饱和青（cyanHi）在蓝绿背景上
+ *   色相跳得太狠，用户实机反馈「几道透下来的光**有点突兀**」。
+ *   冷白偏一点点青（0xdff2ff）= "水把阳光滤过一遍"，与环境同源 ⇒ 不跳。
+ */
+const BEAM_COLOR = 0xdff2ff
+/**
+ * 底宽 / 顶宽。**等宽直条是"突兀"的一半来源** —— 扩散成梯形才读作"光散开了"。
+ * ⚠️ 1.7 → **1.45**：扩散太狠时最外层（×1.45）× 底宽会到 150px，
+ *    四条铺满 45% 屏宽 ⇒ 读作"一片光幕"而不是"几道透下来的光"。
+ */
+const BEAM_SPREAD = 1.45
+/** 单条**顶宽**区间（px，屏幕坐标）。34–100 → **24–68**：
+ *  同上 —— 宽度是"几道"与"一片"的分界，比亮度分配更敏感 */
+const BEAM_W0 = 24
+const BEAM_W1 = 44
+/** 纵向分段数：顶亮 → 底淡。**上下一样亮 = 一条贯穿全屏的硬条**（贴纸感的真凶）*/
+const BEAM_SEG = 3
+/** 纵向衰减指数：`alpha ∝ (1 - t) ** BEAM_FALLOFF` ⇒ 顶 1.00 / 中 0.53 / 底 0.19 */
+const BEAM_FALLOFF = 1.6
+/** 段与段的重叠比例（消接缝：相邻段之间留一条 4% 的搭边）*/
+const BEAM_OVERLAP = 0.04
 /** 光柱随 `depthM` 淡出：900 → 1200 归零（再深就照不进太阳了）*/
 const BEAM_D0 = 900
 const BEAM_D1 = 1200
@@ -470,6 +602,25 @@ const MAX_DT = 0.05
 function clamp1(v: number, lo: number, hi: number): number {
   return v < lo ? lo : (v > hi ? hi : v)
 }
+
+/**
+ * 两个 `0xRRGGBB` 按 `t` 线性混合（V6.51 §9 第 9 步：`tint` 连续化要用）。
+ * 逐通道插值 —— **不能在打包整数上插**（进位会串色，红通道会污染绿通道）。
+ */
+function mixCol(a: number, b: number, t: number): number {
+  const ar = (a >> 16) & 255, ag = (a >> 8) & 255, ab = a & 255
+  const br = (b >> 16) & 255, bg = (b >> 8) & 255, bb = b & 255
+  return ((Math.round(ar + (br - ar) * t) << 16)
+    | (Math.round(ag + (bg - ag) * t) << 8)
+    | Math.round(ab + (bb - ab) * t))
+}
+
+/**
+ * 带内过渡的**起点**（占比）。本带前 70% 保持本色、后 30% 才开始"变味"。
+ * ⛔ 改成 0（全程线性）会让"刚进带就半只脚在下一带"，每带的辨识度全丢 ——
+ *   那比"换带台阶"更糟。
+ */
+const BLEND_FROM = 0.70
 
 /**
  * 机体（玩家潜航器）的船体基色 —— 中亮青蓝。
@@ -642,6 +793,13 @@ export class DiveGame extends Component {
   private readonly fxBitPool: Fish[] = []
   private floatSlots: Array<FloatFx | null> = new Array(FLOAT_CAP).fill(null)
   private motes: Mote[] = []
+  /**
+   * 颗粒当前的**物质带**（`-1` = 还没构建过）。
+   * ⚠️ 与 `atmoLayer` **分开记**：`drawBg`（颗粒）与 `drawAtmo`（鱼群/光）是两次独立调用，
+   *   共用一个字段会出现"先跑的那个把带号改掉，后跑的那个以为已经建过了"⇒ 一半新一半旧。
+   *   两个字段各自管自己的整批重建，互不可见。
+   */
+  private moteLayer = -1
   /** 远景鱼群（V6.53）。换带时整批重建（靠 `atmoLayer` 变号触发） */
   private schools: SchoolFish[] = []
   /**
@@ -663,6 +821,8 @@ export class DiveGame extends Component {
   private vents: Vent[] = []
   /** 深渊呼吸点阵（§4.5，仅 L5）*/
   private dots: AtmoDot[] = []
+  /** 交互光反馈（§6）：开火 / 爆炸 / 拾取在水里留下的反光。**不随换带清空**（瞬时事件）*/
+  private atmoFlashes: AtmoFlash[] = []
   /** 表现层计时器（鱼雷气泡尾迹的正弦摆动等用；与 sim 的时间无关） */
   private fxT = 0
   /** 本帧的受击白闪（drawEnemies 登记 → drawFx 消费，见 FlashMark 的注释） */
@@ -1706,12 +1866,15 @@ export class DiveGame extends Component {
         // 补一圈扩散环：环是"已进账"的确认信号，在余光里比火花更容易被感知到。
         this.pushShock(ev.x, ev.y, 30, 0.24, UI.cyan, 2, 14, 1)
         this.pushRadialSparks(ev.x, ev.y, 6, 70, 30, 1.6, UI.cyan)
+        // §6：环境也亮一下（"这片水因为我的收入而亮"）—— 特效是"东西"，反光是"水"
+        this.pushFlash(ev.x, ev.y, FLASH_PICK)
         break
       case 'float':
         this.pushFloat(ev.x, ev.y, ev.text, ev.color, ev.size)
         break
       case 'muzzle':
         this.muzzleFx(ev.x, ev.y, ev.ang, ev.color, ev.fam, ev.power ?? 1)
+        this.pushFlash(ev.x, ev.y, FLASH_MUZZLE)         // §6：枪口把周围的水照亮一下
         break
       case 'burst':
         this.pushShock(ev.x, ev.y, ev.r, 0.4, UI.cyanHi, 3, ev.r * 0.12, 1)
@@ -1721,6 +1884,8 @@ export class DiveGame extends Component {
         break
       case 'blast':
         this.blasts.push({ x: ev.x, y: ev.y, r: ev.r, life: 0.32 })
+        // §6：硬边冲击波（`blasts`）+ 软边环境反光（这里）叠加才是"炸了一下，整个水都亮了"
+        this.pushFlash(ev.x, ev.y, FLASH_BLAST)
         break
       case 'descend':
         this.clearFx()
@@ -1972,6 +2137,8 @@ export class DiveGame extends Component {
     this.sparks.length = 0
     this.arcs.length = 0
     this.blasts.length = 0
+    // 环境反光（§6）也归零：换带/结算之后不该还留着一团 0.2s 前的亮斑
+    this.atmoFlashes.length = 0
     this.fxBits.length = 0
     for (const f of this.fxBitPool) f.sp.node.active = false
     for (const f of this.floatSlots) {
@@ -2108,9 +2275,17 @@ export class DiveGame extends Component {
     //      而不是只有背景图在动。L4 反向见 `MOTE_MUL`。
     // ⛔ 深度**不影响速度** —— 别做"越深越慢"，那会削弱下潜感。深度只影响密度/尺寸/亮度。
     const want = w.layer().motes
-    while (this.motes.length < want) this.motes.push(this.newMote(this.motes.length % 2 === 0))
+    const idx = Math.min(MOTE_STYLE.length - 1, w.layerIdx)
+    const st = MOTE_STYLE[idx]
+    // ⑤ **换带整批重建**（V6.59+）：物质随带变（颜色/形状/摆动），逐条改属性反而更绕。
+    //    与 `schools` 同规：换带瞬间整片水"换了一种东西"，本来就有扫带+爆冲盖住这一帧。
+    if (this.moteLayer !== idx) {
+      this.moteLayer = idx
+      this.motes.length = 0
+    }
+    while (this.motes.length < want) this.motes.push(this.newMote(this.motes.length % 2 === 0, idx))
     while (this.motes.length > want) this.motes.pop()
-    const mul = MOTE_MUL[w.layerIdx] ?? MOTE_MUL[0]
+    const mul = MOTE_MUL[idx] ?? MOTE_MUL[0]
     for (const m of this.motes) {
       // **减号**：`scrollV > 0` ⇒ y 减小 ⇒ 颗粒向上掠过（见上方 ① 的符号说明）
       m.y -= (m.far ? mul[1] : mul[0]) * this.scrollV * m.jit * dt
@@ -2119,8 +2294,16 @@ export class DiveGame extends Component {
       if (m.y < -4) { m.y = this.H + 4; m.x = Math.random() * this.W }
       else if (m.y > this.H + 4) { m.y = -4; m.x = Math.random() * this.W }
       // 近景更亮更大、中景更暗更小 —— Graphics 没有景深，"远近"只能这样读出来
-      this.gBg.fill(0x9fe1cb, m.far ? 0.15 : 0.30)
-      this.gBg.fillCircle(m.x, m.y, m.r)
+      const a = m.a * (m.far ? 0.5 : 1)
+      const r = m.r * st.sMul
+      this.gBg.fill(st.col, a)
+      if (st.sq > 1) {
+        // 悬浮絮：拉成横条 + 随暗流左右摆（`wob`）。**摆动是 L2 机制的可见化** ——
+        //   玩家光看数字不知道"有暗流"，但看到絮被拽着走就知道了。
+        this.gBg.fillEllipse(m.x + Math.sin(w.t * 2.6 + m.ph) * st.wob, m.y, r, r / st.sq)
+      } else {
+        this.gBg.fillCircle(m.x, m.y, r)
+      }
     }
   }
 
@@ -2128,13 +2311,18 @@ export class DiveGame extends Component {
    * 生成一颗悬浮物（V6.50 §3.2 / V6.56）。
    * `far = true` ⇒ 中景（0.35× 速度、更小更暗）；否则近景（全速、更大更亮）。
    */
-  private newMote(far: boolean): Mote {
+  private newMote(far: boolean, idx: number): Mote {
+    const st = MOTE_STYLE[Math.min(MOTE_STYLE.length - 1, idx)] ?? MOTE_STYLE[0]
     return {
       x: Math.random() * this.W,
       y: Math.random() * this.H,
       r: far ? 0.7 + Math.random() * 1.0 : 1.3 + Math.random() * 2.2,
       jit: 0.8 + Math.random() * 0.4,     // ±20% 抖动：免得整屏颗粒像一块板在移动
       far,
+      // 亮度**个体固定**（不是每帧随机）：L3 的 aHi 特意拉到 0.52，
+      //   靠"少数颗粒明显更亮"做出"水里有会闪的东西"，每帧随机会把这件事冲掉。
+      a: st.aLo + Math.random() * (st.aHi - st.aLo),
+      ph: Math.random() * Math.PI * 2,
     }
   }
 
@@ -2150,22 +2338,54 @@ export class DiveGame extends Component {
    *
    * 暗角必须用**同心环带**而不是径向渐变：环带每像素只画一次，渐变会被反复叠加成死黑。
    */
+  /**
+   * **连续化**：按 `depthM` 在相邻带之间插值 `tint` / `vis` / 雾半径（V6.51 §9 第 9 步）。
+   *
+   * 为什么只有这三样必须连续：带每 156s 才跳一次，但水色与能见度是**一直**在变的。
+   * 玩家在带内划水时，画面应该"缓慢地越来越深"，而不是到了 `depthBot` 那一帧"啪"地换色。
+   * 台阶在"下潜"这个题材里是致命的 —— 它把**"我在深处"**变成**"我触发了换带事件"**。
+   *
+   * 过渡形状：本带**前 `BLEND_FROM` 保持本色**（保住每带的辨识度），
+   * **后 1−BLEND_FROM 才开始"变味"** —— 那段就是"我快到了"的预告。
+   * ⛔ 全程线性会让"刚进带就半只脚在下一带"，段感全丢（那比台阶更糟）。
+   */
+  private layerBlend(w: DiveWorld): { tint: number; vis: number; fogR: number } {
+    const i = Math.max(0, Math.min(LAYERS.length - 1, w.layerIdx))
+    const L = LAYERS[i]
+    const fog0 = FOG_R[Math.min(FOG_R.length - 1, i)]
+    const nx = i + 1 < LAYERS.length ? LAYERS[i + 1] : null
+    if (!nx) return { tint: L.tint, vis: L.vis, fogR: fog0 }
+    const span = Math.max(1, nx.depthTop - L.depthTop)
+    const k = clamp1((w.depthM - L.depthTop) / span, 0, 1)
+    const r = clamp1((k - BLEND_FROM) / (1 - BLEND_FROM), 0, 1)
+    const t = r * r * (3 - 2 * r)                  // smoothstep：两头都平，接缝看不见
+    const fog1 = FOG_R[Math.min(FOG_R.length - 1, i + 1)]
+    return {
+      tint: mixCol(L.tint, nx.tint, t),
+      vis: L.vis + (nx.vis - L.vis) * t,
+      // L1 的"无雾"是**设计**（阳光带全清）⇒ `fog0 = 0` 时整段都不长雾，别插值
+      fogR: fog0 <= 0 ? 0 : fog0 + (fog1 - fog0) * t,
+    }
+  }
+
   private drawVeil(w: DiveWorld): void {
     // 弹窗相位不画环境层：那几个页面是一整张实底页，环境不该透上来。
     if (w.phase === 'shop' || w.phase === 'decide' || w.phase === 'result') return
 
     const vr = this.viewRect()
-    const L = w.layer()
+    // ⚠️ V6.60 §9-9：颜色与能见度走**连续曲线**（`layerBlend`），不再取 `w.layer()` 的常量 ——
+    //    取常量就会在 `depthBot` 那一帧"啪"地换色，把"我在深处"变成"我触发了换带事件"。
+    const bl = this.layerBlend(w)
     const z = this.zoom > 0 ? this.zoom : 1
 
-    this.gVeil.fill(L.tint, 0.16); this.gVeil.fillRect(vr.x, vr.y, vr.w, vr.h)
-    this.gVeil.fill(UI.abyss, (1 - L.vis) * 0.24); this.gVeil.fillRect(vr.x, vr.y, vr.w, vr.h)
+    this.gVeil.fill(bl.tint, 0.16); this.gVeil.fillRect(vr.x, vr.y, vr.w, vr.h)
+    this.gVeil.fill(UI.abyss, (1 - bl.vis) * 0.24); this.gVeil.fillRect(vr.x, vr.y, vr.w, vr.h)
 
     // 暗角：环带宽度按 zoom 折算，这样放大后屏幕上的视觉宽度保持一致
     const BANDS = 18
     const band = Math.min(vr.w, vr.h) / BANDS
     const descBoost = w.phase === 'descending' ? 0.38 : 0
-    const strength = 0.10 + (1 - L.vis) * 0.42 + descBoost
+    const strength = 0.10 + (1 - bl.vis) * 0.42 + descBoost
     for (let i = 0; i < BANDS; i++) {
       const o = i * band
       const e = o + band
@@ -2231,8 +2451,44 @@ export class DiveGame extends Component {
     this.drawFog(w)
     this.drawLamp(w)
     this.drawLayerLights(w, idx, dt)
+    // 交互反光：**画在光源之上**（它是"刚发生的事"，不该被雾压暗），
+    // 但在扫带之下（换带的仪式感要压住一切瞬时特效）。
+    this.drawFlashes(dt)
     this.drawScanBand(w)
     this.drawPressureRings()
+  }
+
+  /**
+   * **交互光反馈**（V6.51 §6）：让战斗在**水**上留下反应。
+   *
+   * 每条 = `FLASH_LAYERS` 个同心圆、**同一个 alpha** 由外向内叠 ⇒ 中心亮、边缘柔。
+   * （同 `drawLamp` 的道理；同心异 alpha 会显出硬环。）
+   *
+   * 衰减用 `e²`（先快后慢）：闪光要"炸开就收"，线性衰减会显得绵软。
+   */
+  private drawFlashes(dt: number): void {
+    for (let i = this.atmoFlashes.length - 1; i >= 0; i--) {
+      const f = this.atmoFlashes[i]
+      f.life += dt
+      const t = f.life / f.dur
+      if (t >= 1) { this.atmoFlashes.splice(i, 1); continue }
+      const e = 1 - t
+      const a = f.a * e * e
+      const r = f.r0 + (f.r1 - f.r0) * t
+      // 层数是**降级旋钮**的一部分：flash 会叠加（齐射时同时好几条），
+      //   极端情况下它是光照层里最不可控的一项 ⇒ 降级时先砍它（3 → 2 层）。
+      const layers = ATMO_QUALITY >= 2 ? FLASH_LAYERS : 2
+      for (let k = 0; k < layers; k++) {
+        this.gAtmo.fill(f.col, a)
+        this.gAtmo.fillCircle(f.x, f.y, r * (0.45 + 0.275 * k))
+      }
+    }
+  }
+
+  /** 追加一条环境反光（超上限时丢最旧的）。参数直接用 §6 的三个常量表 */
+  private pushFlash(x: number, y: number, p: { r0: number; r1: number; dur: number; col: number; a: number }): void {
+    if (this.atmoFlashes.length >= FLASH_CAP) this.atmoFlashes.shift()
+    this.atmoFlashes.push({ x, y, r0: p.r0, r1: p.r1, life: 0, dur: p.dur, col: p.col, a: p.a })
   }
 
   /**
@@ -2287,8 +2543,10 @@ export class DiveGame extends Component {
    *   每像素只被一条环带覆盖一次，不叠加。
    */
   private drawFog(w: DiveWorld): void {
-    const idx = Math.min(FOG_R.length - 1, w.layerIdx)
-    const r0 = FOG_R[idx]
+    // 半径与颜色都走 `layerBlend`（§9-9）：雾是**最不该跳变**的一样 —— 它铺满整个屏幕，
+    // 一旦在换带那一帧突然换色，玩家会以为"画面闪了一下"。
+    const bl = this.layerBlend(w)
+    const r0 = bl.fogR
     if (r0 <= 0 || ATMO_QUALITY === 0) return      // L1 是白天：能见度无限
     const vr = this.viewRect()
     const z = this.zoom > 0 ? this.zoom : 1
@@ -2297,7 +2555,7 @@ export class DiveGame extends Component {
     const band = Math.max(20, (rOut - rIn) / FOG_BANDS)
     const cx = vr.x + vr.w / 2
     const cy = vr.y + vr.h / 2
-    const tint = w.layer().tint
+    const tint = bl.tint
     for (let i = 0; i < FOG_BANDS; i++) {
       const k = (i + 0.5) / FOG_BANDS
       // 内圈几乎为 0（近处是清的）→ 外圈最浊。
@@ -2315,7 +2573,7 @@ export class DiveGame extends Component {
    * 它是「我能看见」的**因果来源**：没有它，深水就是"环境本身很亮"；
    * 有了它才是"**我在**照亮环境"。
    *
-   * 半径随带收缩（140 → 96）：越深越聚焦 —— 这不是物理，是**叙事**
+   * 半径随带收缩（168 → 132）：越深越聚焦 —— 这不是物理，是**叙事**
    * （光够不到那么远了）。淡入走 `depthM` **连续插值**而不是带的索引：
    * 带是离散的，用索引一定会有台阶（L1 是白天不需要灯，L2 起逐渐登场）。
    *
@@ -2333,10 +2591,14 @@ export class DiveGame extends Component {
     if (k <= 0.01) return                            // L1 是白天：不需要灯
     const z = this.zoom > 0 ? this.zoom : 1
     const R = (LAMP_R - LAMP_STEP * w.layerIdx) / z
-    const bands = ATMO_QUALITY >= 1 ? 8 : 5
+    const bands = ATMO_QUALITY >= 2 ? LAMP_BANDS : (ATMO_QUALITY >= 1 ? 6 : 4)
+    const a = LAMP_ALPHA * k
+    // **每层同一个 alpha**，靠"被覆盖几次"爬升 —— 硬边只能来自半径突变，不能来自 alpha。
+    // 半径走 `^LAMP_POW`（内层密）⇒ 亮斑自然收在中心，不需要额外的亮芯层。
     for (let i = 0; i < bands; i++) {
-      this.gAtmo.fill(LAMP_COLOR, 0.030 * k)
-      this.gAtmo.fillCircle(w.px, w.py, R * (1 - i / bands))
+      const edge = i < LAMP_EDGE_N ? LAMP_EDGE_RAMP[i] : 1
+      this.gAtmo.fill(LAMP_COLOR, a * edge)
+      this.gAtmo.fillCircle(w.px, w.py, R * Math.pow(1 - i / bands, LAMP_POW))
     }
   }
 
@@ -2374,26 +2636,38 @@ export class DiveGame extends Component {
     const tan = Math.tan(tilt)
     const yTop = -80
     const yBot = this.H + 40
+    const span = yBot - yTop
+    const layers = ATMO_QUALITY >= 2 ? 3 : 2
+    const segs = ATMO_QUALITY >= 2 ? BEAM_SEG : 2
+    const xTop = (b: Beam) => b.x - tan * (this.H * 0.5)
     for (const b of this.beams) {
       // **越窄越亮**：宽窄差是"不是栅栏"的一半，亮度差是另一半
-      const bright = 1.35 - (b.w - 34) / 66 * 0.9
+      const bright = 1.30 - (b.w - BEAM_W0) / BEAM_W1 * 0.80
       // ⚠️ 三层**同心嵌套**（宽淡包窄亮）⇒ 合成出来是**一条带软边的光柱**。
       //    第一版给每层加了 16px 横向偏移，结果读作"三根并排的条纹"（预览图当场看出）。
       //    "最宽最淡、最窄最亮"说的是**同一根柱子**的内外关系，不是三根柱子。
-      for (let L = 0; L < 3; L++) {
-        const wd = (b.w * (1.45 - 0.32 * L)) / z
-        const a = (0.030 + 0.022 * L) * fade * bright
-        const xTop = b.x - tan * (this.H * 0.5)
-        const dx = wd * 0.5
-        const xBot = xTop + tan * (yBot - yTop)
-        // 平行四边形（`fillRect` 画不出斜的，手工四个点）
-        this.gAtmo.fill(UI.cyanHi, a)
-        this.gAtmo.moveTo(xTop - dx, yTop)
-        this.gAtmo.lineTo(xTop + dx, yTop)
-        this.gAtmo.lineTo(xBot + dx, yBot)
-        this.gAtmo.lineTo(xBot - dx, yBot)
-        this.gAtmo.close()
-        this.gAtmo.fillPath()
+      for (let L = 0; L < layers; L++) {
+        const wTop = (b.w * (1.45 - 0.32 * L)) / z
+        const wBot = wTop * BEAM_SPREAD
+        const aBase = (0.030 + 0.022 * L) * fade * bright
+        // 纵向分段：光在水里是**越深越弱**的。上下一样亮 = 一条贯穿全屏的硬条，
+        // 那正是"贴纸感"的来源（用户：光柱"有点突兀"）。
+        for (let s = 0; s < segs; s++) {
+          const t0 = s / segs
+          const t1 = Math.min(1, (s + 1) / segs + BEAM_OVERLAP)   // 搭边消接缝
+          const yA = yTop + span * t0, yB = yTop + span * t1
+          const wA = wTop + (wBot - wTop) * t0, wB = wTop + (wBot - wTop) * t1
+          // 中心线随倾角平移（顶部锚在 `xTop`）
+          const cxA = xTop(b) + tan * (yA - yTop), cxB = xTop(b) + tan * (yB - yTop)
+          const a = aBase * Math.pow(1 - t0, BEAM_FALLOFF)
+          this.gAtmo.fill(BEAM_COLOR, a)
+          this.gAtmo.moveTo(cxA - wA * 0.5, yA)
+          this.gAtmo.lineTo(cxA + wA * 0.5, yA)
+          this.gAtmo.lineTo(cxB + wB * 0.5, yB)
+          this.gAtmo.lineTo(cxB - wB * 0.5, yB)
+          this.gAtmo.close()
+          this.gAtmo.fillPath()
+        }
       }
     }
   }
@@ -2606,7 +2880,7 @@ export class DiveGame extends Component {
       this.beams.push({
         // 横向铺开 + 较大抖动：等距会读作**栅栏**（预览图里一眼看出来过）
         x: this.W * ((i + 0.5 + (Math.random() - 0.5) * 1.1) / BEAM_N),
-        w: 34 + Math.random() * 66,
+        w: BEAM_W0 + Math.random() * BEAM_W1,
       })
     }
   }
