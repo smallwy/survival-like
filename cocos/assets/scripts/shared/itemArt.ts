@@ -45,7 +45,9 @@ export const ITEM_ART_PATH: Record<string, string> = {
   // —— V6.30 批 4：6 条新进化（鱼叉/回声/酸液 三族各 2 条）——
   // harp_tr 三重鱼叉 / echo_fo 聚焦回声 / acid_fd 持久酸池（第一批）
   // harp_cb 回旋鱼叉 / echo_mu 多重回声 / acid_ra 酸雨（第二批）
-  // 全部 image-to-image 由基础武器改造，`EVO_ART_FALLBACK` 已清空。
+  // 全部 image-to-image 由基础武器改造。
+  // ⚠️ V6.46 起回退表改名 `WEAPON_ART_FALLBACK` 并**重新启用**（三把新机制武器尚未出图，
+  //    先借语义相近的图）。本清单只列**已出图**的条目 —— 新武器出图后才加到这里。
   harp_tr: 'items/item_harp_tr.png',
   echo_fo: 'items/item_echo_fo.png',
   acid_fd: 'items/item_acid_fd.png',

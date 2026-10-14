@@ -45,11 +45,23 @@ export interface CodexEntry {
 }
 
 /** 7 个武器族（与 `WeaponFamily` 一一对应） */
-const WEAPON_FAMILIES: WeaponFamily[] = ['gun', 'torpedo', 'arc', 'sonar', 'harpoon', 'echo', 'acid']
+/**
+ * 武器族的**唯一一份**顺序表与中文名。
+ *
+ * ⚠️ 这两条曾经在 `codex.ts` 与 `unlocks.ts` **各有一份**（重复真源）。
+ *    V6.46 加了三个族时，只改了 codex 那份、unlocks 那份漏了，TS 当场报
+ *    "missing properties: mine, net, lure"。现在只有 codex 这一份，unlocks 引用它。
+ */
+export const WEAPON_FAMILIES: WeaponFamily[] = [
+  'gun', 'torpedo', 'arc', 'sonar', 'harpoon', 'echo', 'acid',
+  // V6.46 三个机制族
+  'mine', 'net', 'lure',
+]
 
-const WEAPON_NAME: Record<WeaponFamily, string> = {
+export const WEAPON_NAME: Record<WeaponFamily, string> = {
   gun: '脉冲机枪', torpedo: '追踪鱼雷', arc: '链式电弧', sonar: '声呐共振',
   harpoon: '穿透鱼叉', echo: '回声炮', acid: '酸液喷射',
+  mine: '气泡雷', net: '网发射器', lure: '生物光诱饵',
 }
 
 /**

@@ -36,6 +36,8 @@
 import type { Profile } from './profile'
 import { RELIC_DEF } from './tables'
 import { CARD_POOL } from './pool'
+// 武器族的顺序表与中文名从 `codex.ts` 取 —— 全局只有那一份（见下方注释）
+import { WEAPON_FAMILIES, WEAPON_NAME } from './codex'
 import type { UpgradeDef, RelicId, WeaponFamily } from './types'
 
 // ---------------------------------------------------------------------------
@@ -56,11 +58,9 @@ export interface UnlockDef {
 /** 潜航器 id → 展示名（与 `subs.ts` 的顺序一致） */
 const SUB_NAME: Record<string, string> = { lumen: '灯艇', raia: '刺鳐', bathy: '深潜者' }
 
-const WEAPON_FAMILIES: WeaponFamily[] = ['gun', 'torpedo', 'arc', 'sonar', 'harpoon', 'echo', 'acid']
-const WEAPON_NAME: Record<WeaponFamily, string> = {
-  gun: '脉冲机枪', torpedo: '追踪鱼雷', arc: '链式电弧', sonar: '声呐共振',
-  harpoon: '穿透鱼叉', echo: '回声炮', acid: '酸液喷射',
-}
+// ⚠️ `WEAPON_FAMILIES` / `WEAPON_NAME` **不在这里定义** —— 唯一的定义在 `codex.ts`。
+//    这里曾经有一份副本，V6.46 加三个族时只改了 codex 那份，这份漏掉当场编译报错。
+//    两份定义看着"只是重复"，实际是**每个新增武器族都要记得改两处**的陷阱。
 /** 默认解锁的武器族（开局能抽到的三把） */
 const DEFAULT_WEAPONS: WeaponFamily[] = ['gun', 'harpoon', 'echo']
 /** 默认解锁的遗物（其余 6 条按里程碑解锁） */
@@ -92,6 +92,15 @@ export const UNLOCKS: UnlockDef[] = [
     reached: p => (p.seen['enemy:dash'] ?? 0) >= 80 },
   { id: 'weapon:acid', kind: 'weapon', name: WEAPON_NAME.acid, cond: '抵达 L3 午夜带',
     reached: p => p.bestLayer >= 2 },
+  // V6.46 三把机制武器。三条解锁条件刻意**各用不同维度**（经济 / 遇见 / 深度），
+  // 且都排在"玩家已经会玩"之后 —— 这三把都是"换思路"的武器，
+  // 开局白送会被当成弱武器跳过，反而没人发现它们的价值。
+  { id: 'weapon:mine', kind: 'weapon', name: WEAPON_NAME.mine, cond: '累计沉淀 ≥ 900',
+    reached: p => p.totalBanked >= 900 },
+  { id: 'weapon:net', kind: 'weapon', name: WEAPON_NAME.net, cond: '遇见冲刺体 ≥ 150 只',
+    reached: p => (p.seen['enemy:dash'] ?? 0) >= 150 },
+  { id: 'weapon:lure', kind: 'weapon', name: WEAPON_NAME.lure, cond: '抵达 L4 热泉带',
+    reached: p => p.bestLayer >= 3 },
 
   // ---- 遗物（默认 6 + 里程碑 6）----
   ...DEFAULT_RELICS.map((id): UnlockDef => ({

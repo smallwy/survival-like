@@ -40,8 +40,9 @@ import { UI } from '../theme'
 import { SUBS } from '../subs'
 import type { SubDef } from '../subs'
 import type {
-  Enemy, Bone, Pulse, Bullet, Echo, Acid, Kind, Weapon, WeaponId,
+  Enemy, Bone, Pulse, Bullet, Echo, Acid, Mine, Lure, Kind, Weapon, WeaponId,
   Stats, LayerDef, WaveShape, RelicId, SimEvent, InputState, UpgradeDef, ShopTarget,
+  DamageCause,
 } from './types'
 import {
   O2, BONE_O2, PLAYER, WEAPON_DEF, STAT_CAP, NEW_STATS, RELIC_DEF, RELIC_SLOTS,
@@ -80,6 +81,58 @@ export interface WorldOptions {
 
 /** 单帧最大步长（秒）—— 与 `DiveScene`: `Math.min(deltaMs, 50) / 1000` 一致 */
 const MAX_DT = 0.05
+
+// ---------------------------------------------------------------------------
+// V6.46 机制型武器的配平常量
+// ---------------------------------------------------------------------------
+// 集中放在这里而不是散在各武器分支里：这几条数**互相牵制**（雷的触发半径必须
+// 大于敌人半径、连锁半径必须大于爆炸半径才有意义），放一起才看得见关系。
+
+/**
+ * 气泡雷：布防时长（s）／同时在场上限／存活时长（s）／触发半径／爆炸半径。
+ *
+ * - `arm` 0.4s：**不加这个，玩家一布雷就自己踩上去** —— 每次都在自己脚下炸，
+ *   武器直接废掉。0.4s 是"走出爆炸半径所需时间"的下界（玩家移速约 200px/s，
+ *   34px 触发半径 ⇒ 0.17s，留一倍余量）。
+ * - `cap` 6 枚：不加上限的话 0.55s 一颗、活 12s ⇒ 稳态 21 枚，满屏是雷，
+ *   退化成"地毯式轰炸"，玩家不需要走位也能赢。
+ * - `life` 12s：比"一个波次的长度"短，保证场上雷是**这一波布的**。
+ */
+const MINE_ARM = 0.4
+const MINE_CAP = 6
+const MINE_LIFE = 12
+const MINE_TRIG = 34
+const MINE_R = 88
+/** 连锁雷的连锁半径（90 = 略大于爆炸半径 88，相邻两枚必然互引） */
+const MINE_CHAIN_R = 90
+/** 连锁递归深度上限 —— 同 `explode` 的共鸣腔限深理由：不限深会递归到栈溢出 */
+const MINE_CHAIN_DEPTH = 4
+/** 氧气雷：每炸到一个敌人回氧／**单次爆炸回氧总量上限** */
+const MINE_O2_PER = 2.5
+const MINE_O2_CAP = 10
+
+/** 网：命中半径／减速倍率／减速时长（s） */
+const NET_R = 46
+const NET_SLOW_MUL = 0.5
+const NET_SLOW_T = 2.0
+/** 电网：加深的减速与灼烧 */
+const NET_EL_SLOW_MUL = 0.45
+const NET_EL_SLOW_T = 2.5
+const NET_EL_BURN_DPS = 6
+const NET_EL_BURN_T = 3.0
+/** 驯化网：内讧时长（s）。与诱饵的吸引时长分开 —— 两者是不同机制 */
+const NET_CHARM_T = 4.0
+
+/** 内讧撕咬：单次伤害／节流（s）。10 伤 / 0.5s = 20 dps，4s 能咬死 1–2 只游群 */
+const CHARM_BITE = 10
+
+/** 诱饵：吸引半径／存活时长（s）／爆炸诱饵的自爆半径 */
+const LURE_R = 130
+const LURE_LIFE = 5.0
+const LURE_BOOM_R = 120
+/** 光墙：一次三个，间距 / 各自的吸引半径（比单诱饵小 —— 三个叠加会过强） */
+const LURE_WALL_GAP = 70
+const LURE_WALL_R = 90
 
 export class DiveWorld implements ShopTarget {
   // ---- 画布 ----
@@ -139,6 +192,10 @@ export class DiveWorld implements ShopTarget {
   bullets: Bullet[] = []
   echoes: Echo[] = []
   acids: Acid[] = []
+  /** V6.46 气泡雷：玩家脚下布下的雷。**唯一不索敌**的实体 */
+  mines: Mine[] = []
+  /** V6.46 生物光诱饵：半径内敌人改追它 */
+  lures: Lure[] = []
   weapons: Weapon[] = []
   private eid = 0
 
@@ -266,6 +323,7 @@ export class DiveWorld implements ShopTarget {
     this.layerCardT = 2.6
     this.weapons = []
     this.bullets = []; this.echoes = []; this.acids = []
+    this.mines = []; this.lures = []
     // 开局武器：由「出击准备」面板选定（V6.41）；不传则回落到机关枪
     // —— 这是原版一直用的开局武器，缺省值保持它以免改变老存档玩家的第一局手感。
     // 其余三把基础武器（声呐 / 鱼雷 / 电弧）在商店里都能买到，所以选谁都不锁死 build。
@@ -360,18 +418,16 @@ export class DiveWorld implements ShopTarget {
     const relicSpd = this.hasRelic('abyss_mark') ? 1.1 : 1
     const spd = (kind === 'drift' ? 42 : kind === 'dash' ? 96 : 68) * relicSpd
 
-    this.enemies.push({
-      x, y, vx: 0, vy: 0, kx: 0, ky: 0,
-      hp, maxHp: hp,
+    this.enemies.push(this.mkEnemy({
+      x, y,
+      hp,
       r: kind === 'drift' ? 34 : kind === 'dash' ? 25 : 19,
       kind,
       color: kind === 'drift' ? UI.amber : kind === 'dash' ? UI.magenta : UI.jade,
       speed: spd,
-      phase: 'chase', t: 0, dirX: 0, dirY: 0,
-      alive: true, flash: 0,
       tex: ENEMY_TEX[kind],
       texRot: TEX_BASE_ROT[kind] ?? 0,
-    })
+    }))
     this.eid++
     this.spawned[kind] = (this.spawned[kind] ?? 0) + 1
   }
@@ -420,21 +476,42 @@ export class DiveWorld implements ShopTarget {
     return n
   }
 
+  /**
+   * 敌人对象的**字段全集工厂**。`spawnEnemy` 与 `spawnBoss` 都从这里展开。
+   *
+   * ⚠️ 抽这个工厂是有代价换来的：V6.46 加三个控制字段（slow/burn/charm）时，
+   *    手写两处对象字面量**只改了一处**，TS 立刻报了一串 "not assignable"。
+   *    以后新增字段只改这里 ⇒ 物理上不可能只改一半。
+   *
+   * 调用方只需给"这个敌人才有的"字段，其余（速度归零 / 相位 / 控制状态）自动补齐。
+   */
+  private mkEnemy(p: Partial<Enemy> & Pick<Enemy, 'x' | 'y' | 'hp' | 'r' | 'kind' | 'color' | 'speed' | 'tex'>): Enemy {
+    return {
+      vx: 0, vy: 0, kx: 0, ky: 0,
+      maxHp: p.hp,
+      phase: 'chase', t: 0, dirX: 0, dirY: 0,
+      alive: true, flash: 0,
+      texRot: 0,
+      slowT: 0, slowMul: 1,
+      burnT: 0, burnDps: 0, burnTick: 0,
+      charmT: 0, charmTick: 0,
+      ...p,
+    }
+  }
+
   /** DiveScene.ts:1561-1575 */
   spawnBoss(): void {
     const W = this.W
     const hp = Math.round(1500 * this.layer().hpMul)
-    this.enemies.push({
-      x: W / 2, y: -90, vx: 0, vy: 0, kx: 0, ky: 0,
-      hp, maxHp: hp,
+    this.enemies.push(this.mkEnemy({
+      x: W / 2, y: -90,
+      hp,
       r: 44, kind: 'boss',
       color: UI.violet,
       speed: 46 * (this.hasRelic('abyss_mark') ? 1.1 : 1),
-      phase: 'chase', t: 0, dirX: 0, dirY: 0,
-      alive: true, flash: 0,
       tex: ENEMY_TEX.boss,
       texRot: TEX_BASE_ROT.dash ?? 0,
-    })
+    }))
     this.spawned.boss = (this.spawned.boss ?? 0) + 1
   }
 
@@ -489,7 +566,11 @@ export class DiveWorld implements ShopTarget {
       // 炮圈摆动夹在两者中间：先按本帧航向摆到位，再让炮管对着（摆动后的）原点索敌。
       this.slewSeatSway(dt)
       this.slewTurretAims(dt)
+      // V6.46：诱饵寿命**先**推进（本帧 `enemyAim()` 读到的是最新状态）；
+      // 地雷触发**后**结算（用敌人移动后的最新位置判"踩没踩到"）。
+      this.updateLures(dt)
       this.updateEnemies(dt)
+      this.updateMines(dt)
       this.updatePulses(dt)
       this.updateBullets(dt)
       this.updateEchoes(dt)
@@ -556,7 +637,7 @@ export class DiveWorld implements ShopTarget {
       this.burstTimer = O2.burstCd
       this.emit({ t: 'burst', x: this.px, y: this.py, r: O2.burstR })
       for (const e of this.enemies) {
-        if (dist(this.px, this.py, e.x, e.y) <= O2.burstR) this.hurt(e, 40)
+        if (dist(this.px, this.py, e.x, e.y) <= O2.burstR) this.hurt(e, 40, 'blast')
       }
     }
   }
@@ -565,14 +646,68 @@ export class DiveWorld implements ShopTarget {
   // 敌人 AI
   // ==========================================================================
   /** DiveScene.ts:1886-1977 */
+  /**
+   * 这条敌人**这一帧该往哪追**（V6.46）。
+   *
+   * 优先级：**内讧 > 诱饵 > 玩家**。
+   * - 内讧（`charmT > 0`）：追**最近的同类**，返回的 `mob` 非空 ⇒ 接触时改为咬同类；
+   * - 诱饵：半径内有诱饵就追它（不改阵营，只是被牵着走）；
+   * - 默认：玩家。
+   *
+   * 把"追谁"集中到一个函数是刻意的：三个机制（驯化网 / 诱饵 / 光墙）本质都是
+   * "改写寻路目标"，分散在各自的 update 里写会互相打架。
+   *
+   * ⚠️ 内讧分支是 O(k × n)（k = 被策反的数量）。**这里不需要空间索引**：
+   *    网的 `iv` 是 1.1s、策反只持续 4s ⇒ 同时被策反的最多 3–4 只。
+   *    150 敌人时约 600 次距离比较/帧，可以忽略。如果哪天有武器能**群体**策反，
+   *    这里必须改成网格查询 —— 那时 k 会等于 n。
+   */
+  private enemyAim(e: Enemy): { x: number; y: number; mob: Enemy | null } {
+    if (e.charmT > 0) {
+      let best: Enemy | null = null
+      let bd = Infinity
+      for (const o of this.enemies) {
+        if (o === e || !o.alive) continue
+        if (o.charmT > 0) continue              // 不去咬同样被策反的（否则两只互咬成死循环）
+        const d = dist(e.x, e.y, o.x, o.y)
+        if (d < bd) { bd = d; best = o }
+      }
+      // ⚠️ 找不到同类就回落到"追玩家"而不是原地发呆 —— 否则一只被策反的鱼
+      //    在场上只剩自己时会杵在原地，读作"卡死了"。
+      if (best) return { x: best.x, y: best.y, mob: best }
+    }
+    for (const l of this.lures) {
+      if (!l.alive) continue
+      if (dist(e.x, e.y, l.x, l.y) < l.r) return { x: l.x, y: l.y, mob: null }
+    }
+    return { x: this.px, y: this.py, mob: null }
+  }
+
   updateEnemies(dt: number): void {
-    const dx0 = this.px, dy0 = this.py
     const cur = this.layer().current
     for (const e of this.enemies) {
       if (!e.alive) continue
       if (e.flash > 0) e.flash -= dt
-      const d = dist(e.x, e.y, dx0, dy0) || 1
-      const nx = (dx0 - e.x) / d, ny = (dy0 - e.y) / d
+
+      // ---- V6.46 控制状态结算（放在位移之前 ⇒ 本帧立即生效，不滞后一帧）----
+      if (e.slowT > 0) { e.slowT -= dt; if (e.slowT < 0) e.slowT = 0 }
+      if (e.charmT > 0) { e.charmT -= dt; if (e.charmT < 0) e.charmT = 0 }
+      if (e.burnT > 0) {
+        e.burnT -= dt
+        e.burnTick -= dt
+        if (e.burnTick <= 0) {
+          e.burnTick = 0.35                      // 与酸池同频，复用同一套手感
+          e.flash = 0.05
+          this.hurt(e, e.burnDps * 0.35, 'burn')
+          if (!e.alive) continue                 // 灼烧可能当场烧死
+        }
+      }
+      const slow = e.slowT > 0 ? e.slowMul : 1
+
+      // 目标改写（内讧 / 诱饵 / 玩家三选一）
+      const aim = this.enemyAim(e)
+      const da = dist(e.x, e.y, aim.x, aim.y) || 1
+      const nx = (aim.x - e.x) / da, ny = (aim.y - e.y) / da
 
       // L2「暗流」：加在敌人身上（敌人吃满）
       if (cur > 0 && e.kind !== 'boss') {
@@ -581,18 +716,18 @@ export class DiveWorld implements ShopTarget {
       }
 
       if (e.kind === 'swarm') {
-        e.x += nx * e.speed * dt
-        e.y += ny * e.speed * dt
+        e.x += nx * e.speed * slow * dt
+        e.y += ny * e.speed * slow * dt
       } else if (e.kind === 'drift') {
         // 水母：脉冲式漂移（一鼓一缩）
         const pulse = 0.6 + 0.4 * Math.sin(this.t * 2.2 + e.x * 0.01)
-        e.x += nx * e.speed * pulse * dt
-        e.y += ny * e.speed * pulse * dt
+        e.x += nx * e.speed * pulse * slow * dt
+        e.y += ny * e.speed * pulse * slow * dt
       } else if (e.kind === 'boss') {
         e.t += dt
         if (e.phase === 'chase') {
-          e.x += nx * e.speed * dt
-          e.y += ny * e.speed * dt
+          e.x += nx * e.speed * slow * dt
+          e.y += ny * e.speed * slow * dt
           if (e.t >= 5) { e.phase = 'charge'; e.t = 0 }
         } else if (e.phase === 'charge') {
           if (e.t >= 1.2) { this.bossSlam(e); e.phase = 'dash'; e.t = 0 }
@@ -602,15 +737,16 @@ export class DiveWorld implements ShopTarget {
       } else {
         e.t += dt
         if (e.phase === 'chase') {
-          e.x += nx * e.speed * dt
-          e.y += ny * e.speed * dt
-          if (d < 240) { e.phase = 'charge'; e.t = 0 }
+          e.x += nx * e.speed * slow * dt
+          e.y += ny * e.speed * slow * dt
+          if (da < 240) { e.phase = 'charge'; e.t = 0 }
         } else if (e.phase === 'charge') {
           e.dirX = nx; e.dirY = ny
           if (e.t >= 0.5) { e.phase = 'dash'; e.t = 0 }
         } else if (e.phase === 'dash') {
-          e.x += e.dirX * 460 * dt
-          e.y += e.dirY * 460 * dt
+          // ⚠️ 冲刺速度也吃减速：否则"网住了但一个冲刺就飞走"，减速就白给了
+          e.x += e.dirX * 460 * slow * dt
+          e.y += e.dirY * 460 * slow * dt
           if (e.t >= 0.35) { e.phase = 'rest'; e.t = 0 }
         } else {
           if (e.t >= 0.7) { e.phase = 'chase'; e.t = 0 }
@@ -627,7 +763,26 @@ export class DiveWorld implements ShopTarget {
         if (Math.abs(e.ky) < 2) e.ky = 0
       }
 
+      // ---- V6.46 内讧：咬同类（此时它**不**攻击玩家）----
+      if (aim.mob) {
+        const m = aim.mob
+        if (m.alive && dist(e.x, e.y, m.x, m.y) < e.r + m.r) {
+          e.charmTick -= dt
+          if (e.charmTick <= 0) {
+            e.charmTick = 0.5
+            m.flash = 0.06
+            this.hurt(m, CHARM_BITE, 'bite')
+          }
+          e.x -= nx * 30 * dt
+          e.y -= ny * 30 * dt
+        } else {
+          e.charmTick = 0                          // 脱离接触就重置节流，下一次贴上立刻咬
+        }
+        continue                                   // 内讧中不再结算"咬玩家"
+      }
+
       // 接触伤害：氧气就是血条。贴着不放 = 24 氧/秒
+      const d = dist(e.x, e.y, this.px, this.py) || 1
       if (d < e.r + PLAYER.r) {
         // 刺鳐的撞击伤害（节流 0.25s）
         if (this.sub.ram > 0 && this.ramT <= 0) {
@@ -640,10 +795,11 @@ export class DiveWorld implements ShopTarget {
         this.noHitT = 0
         this.plateT = 1.5
         // nx/ny 是「敌人 → 玩家」，取反才是伤害的来向
-        this.hurtDirX = -nx; this.hurtDirY = -ny; this.hurtDirT = 0.45
+        const px = (this.px - e.x) / d, py = (this.py - e.y) / d
+        this.hurtDirX = -px; this.hurtDirY = -py; this.hurtDirT = 0.45
         // 轻微弹开，避免贴脸站桩
-        e.x -= nx * 40 * dt
-        e.y -= ny * 40 * dt
+        e.x -= px * 40 * dt
+        e.y -= py * 40 * dt
       }
     }
   }
@@ -693,7 +849,7 @@ export class DiveWorld implements ShopTarget {
         if (Math.abs(d - p.r) < p.width * 0.5 + e.r) {
           p.hit.add(i)
           e.flash = 0.08
-          this.hurt(e, p.dmg)
+          this.hurt(e, p.dmg, 'pulse')
           // 共振炮：命中后向**邻近敌人**弹射 40% 伤害
           if (p.resonant) {
             let best: Enemy | null = null, bd = 150
@@ -702,7 +858,7 @@ export class DiveWorld implements ShopTarget {
               const dd = dist(e.x, e.y, o.x, o.y)
               if (dd < bd) { bd = dd; best = o }
             }
-            if (best) { best.flash = 0.06; this.hurt(best, p.dmg * 0.4) }
+            if (best) { best.flash = 0.06; this.hurt(best, p.dmg * 0.4, 'pulse') }
           }
         }
       }
@@ -719,6 +875,134 @@ export class DiveWorld implements ShopTarget {
     this.echoes = this.echoes.filter(e => e.t > 0)
   }
 
+  /**
+   * 生物光诱饵（V6.46 聚怪族）。寿命归零：爆炸诱饵自爆，普通诱饵只是消失。
+   *
+   * ⚠️ 诱饵本身**不造成任何伤害**（`lure` / `lure_wl` 的 `boom` 为 false）——
+   *    它的回报必须来自"把怪聚起来让别的 AoE 打"，这是它占一个槽的代价。
+   */
+  updateLures(dt: number): void {
+    for (const l of this.lures) {
+      if (!l.alive) continue
+      l.life -= dt
+      if (l.life <= 0) {
+        l.alive = false
+        if (l.boom) this.explode(l.x, l.y, l.br, l.dmg)
+      }
+    }
+    this.lures = this.lures.filter(l => l.alive)
+  }
+
+  /**
+   * 气泡雷（V6.46 陷阱族）：布防 → 待机 → 敌人进入触发半径即爆。
+   *
+   * 三层状态在**同一个 for 里**推进（不拆成三个循环）：
+   * 布防 0.4s → 激活（画面上点亮）→ 有人踩 / 超时自毁。
+   */
+  updateMines(dt: number): void {
+    // ⚠️ 倒序遍历：`detonateMine` 可能连锁引爆数组里的**其它**雷（改动数组长度），
+    //    正序会在 splice 后跳过元素，读起来像"雷偶尔不漏爆"。
+    for (let i = this.mines.length - 1; i >= 0; i--) {
+      const m = this.mines[i]
+      if (!m.alive) continue
+      if (m.arm > 0) { m.arm -= dt; continue }       // 布防中：**不触发**
+      m.life -= dt
+      if (m.life <= 0) { m.alive = false; continue } // 超时**自毁**（不爆）
+      for (const e of this.enemies) {
+        if (!e.alive) continue
+        // ⚠️ 友军化的敌人不踩雷（内讧中它正忙着咬同类，不该被自己的雷炸）
+        if (e.charmT > 0) continue
+        if (dist(m.x, m.y, e.x, e.y) < m.trig + e.r) {
+          this.detonateMine(m, 0)
+          break
+        }
+      }
+    }
+    this.mines = this.mines.filter(m => m.alive)
+  }
+
+  /**
+   * 引爆一枚雷。`depth` = 连锁递归深度（0 = 被踩 / 自爆的原始雷）。
+   *
+   * ⚠️ 连锁必须限深：A→B→A 的互引会无限递归（同 `explode` 共鸣腔的限深理由）。
+   */
+  detonateMine(m: Mine, depth: number): void {
+    if (!m.alive) return
+    m.alive = false
+    // 回氧上限在**这一颗雷**上钳制（不是整场），所以把 cap 透传给 explode
+    this.explode(m.x, m.y, m.r, m.dmg, m.o2per, 0, m.o2cap)
+    if (depth >= MINE_CHAIN_DEPTH) return
+    for (const o of this.mines) {
+      if (!o.alive || o.arm > 0) continue             // 还在布防的不参与连锁
+      if (dist(m.x, m.y, o.x, o.y) <= o.chainR) {
+        this.detonateMine(o, depth + 1)
+      }
+    }
+  }
+
+  /**
+   * 网**张开**：把一颗 `kind === 'net'` 的弹转成一片覆盖（V6.46）。
+   *
+   * 两个入口共用：① 撞到第一个敌人 ② 飞到射程尽头。两处都必须调用它，
+   * 否则会出现"网飞到头就凭空消失"。分裂逻辑放在这里，不在调用点内联。
+   */
+  private openNet(b: Bullet): void {
+    if (!b.net) return
+    // 视觉先于伤害：先抛事件（渲染层这一帧就能画网），再结算效果
+    this.emit({ t: 'burst', x: b.x, y: b.y, r: NET_R })
+    for (const e of this.enemies) {
+      if (!e.alive) continue
+      if (e.charmT > 0) continue                  // 已是友方的别再网一遍
+      if (dist(b.x, b.y, e.x, e.y) < NET_R + e.r) this.applyNet(b.net, e)
+    }
+  }
+
+  /**
+   * 网张开：对半径 `NET_R` 内所有敌人施加控制（V6.46）。
+   *
+   * 三种网共用这一处，只有参数不同：
+   * | id | 减速 | 灼烧 | 策反 |
+   * |---|---|---|---|
+   * | `net` | 50% × 2.0s | — | — |
+   * | `net_el` | 55% × 2.5s | 6 dps × 3.0s | — |
+   * | `net_cv` | 50% × 2.0s | — | **4s 内讧** |
+   */
+  private applyNet(id: WeaponId, e: Enemy): void {
+    const el = id === 'net_el'
+    e.slowT = el ? NET_EL_SLOW_T : NET_SLOW_T
+    e.slowMul = el ? NET_EL_SLOW_MUL : NET_SLOW_MUL
+    if (el) { e.burnT = NET_EL_BURN_T; e.burnDps = NET_EL_BURN_DPS; e.burnTick = 0.35 }
+    if (id === 'net_cv') {
+      // ⚠️ **Boss 免疫策反**。否则"网住 Boss 让它帮你打小怪"直接摧毁关卡设计意图
+      //    （Boss 是压力源，不该能被解除）。减速仍然生效 —— 弱化但不取消控制。
+      if (e.kind !== 'boss') { e.charmT = NET_CHARM_T; e.charmTick = 0 }
+    }
+    e.flash = 0.08
+    this.hurt(e, WEAPON_DEF[id].dmg, 'net')
+  }
+
+  /**
+   * 敌人**密度最高处**（V6.46 诱饵投放点）。
+   *
+   * 判据是"以它为中心 `LURE_R` 内有几个敌人"，不是"离我最近"。
+   * ⚠️ 复杂度 O(n²)：150 敌人 = 22.5k 次距离比较，而诱饵 `iv` 是 2.4s ⇒
+   *    约每 2.4s 才跑一次 ⇒ 完全可接受。**不要**把它挪进每帧路径。
+   */
+  private densestSpot(): { x: number; y: number } | null {
+    let best: Enemy | null = null
+    let bestN = 0
+    for (const a of this.enemies) {
+      if (!a.alive || a.charmT > 0) continue
+      let n = 0
+      for (const b of this.enemies) {
+        if (!b.alive || b.charmT > 0) continue
+        if (dist(a.x, a.y, b.x, b.y) < LURE_R) n++
+      }
+      if (n > bestN) { bestN = n; best = a }
+    }
+    return best ? { x: best.x, y: best.y } : null
+  }
+
   /** 酸液云：每 0.35s 结算一次，本体持续 3s。DiveScene.ts:2063-2079 */
   updateAcids(dt: number): void {
     for (const a of this.acids) {
@@ -730,7 +1014,7 @@ export class DiveWorld implements ShopTarget {
           if (!e.alive) continue
           if (dist(a.x, a.y, e.x, e.y) < a.r + e.r) {
             e.flash = 0.05
-            this.hurt(e, a.dmg)
+            this.hurt(e, a.dmg, 'burn')
           }
         }
       }
@@ -744,7 +1028,11 @@ export class DiveWorld implements ShopTarget {
    * 属性加成（伤害 % / 暴击）放在这层，新加伤害来源自动吃到加成。
    * DiveScene.ts:2089-2185
    */
-  hurt(e: Enemy, dmg: number): void {
+  /**
+   * @param cause 伤害来源（V6.46）。**只影响表现**，不影响数值 ——
+   *   渲染层按它选打击/击杀特效的形状。缺省 `'bullet'` ⇒ 老调用点一行都不用改。
+   */
+  hurt(e: Enemy, dmg: number, cause: DamageCause = 'bullet'): void {
     const crit = this.rng.chance(this.st.crit)
     let d = dmg * this.dmgMulNow()
     if (crit) d *= 1 + this.st.critMul
@@ -759,7 +1047,7 @@ export class DiveWorld implements ShopTarget {
       e.ky += ny * kd
     }
     // 命中事件（渲染层据此画：冲击波 + 击打痕 + 迸溅火星 + 飘字）
-    this.emit({ t: 'hit', x: e.x, y: e.y, r: e.r, color: crit ? UI.violet : e.color, crit, dmg: d, nx, ny })
+    this.emit({ t: 'hit', x: e.x, y: e.y, r: e.r, color: crit ? UI.violet : e.color, crit, dmg: d, nx, ny, cause })
     if (crit) {
       // 命中震屏：只给暴击（普通命中频率太高，每次都震会变廉价且让人晕）
       this.emit({ t: 'shake', ms: 90, intensity: 0.0022 })
@@ -788,7 +1076,7 @@ export class DiveWorld implements ShopTarget {
       // 加粗 + 深色描边在渲染层（DiveGame.pushFloat）统一加，描边宽随字号比例走。
       this.emit({ t: 'float', x: e.x, y: e.y - e.r - 12, text: `${Math.round(d)}`, color: 0xe8f4ff, size: 16 })
     }
-    this.tryKill(e)
+    this.tryKill(e, cause)
   }
 
   /**
@@ -798,12 +1086,12 @@ export class DiveWorld implements ShopTarget {
    * 刻意不吃暴击与共振核心以防连锁），但它**必须**能触发死亡 —— 抽成共用函数，
    * 避免"补刀打死了怪却不掉骨头"这类静默错。
    */
-  tryKill(e: Enemy): void {
+  tryKill(e: Enemy, cause: DamageCause = 'bullet'): void {
     if (e.hp <= 0 && e.alive) {
       e.alive = false
       this.biomass += e.kind === 'boss' ? 20 : 1
       if (e.kind === 'boss') this.bossDown = true
-      this.emit({ t: 'kill', x: e.x, y: e.y, r: e.r, color: e.color, kind: e.kind })
+      this.emit({ t: 'kill', x: e.x, y: e.y, r: e.r, color: e.color, kind: e.kind, cause })
       // 击杀震屏：按体型分三档，**频率越高的震得越轻**。
       //   普通小鱼（swarm/dash）不震 —— 每秒可能死十几只，全震就是持续抖动；
       //   大水母（drift，r=27）轻震一记 —— 它是"值得打的大目标"，死了该有反馈；
@@ -1081,13 +1369,17 @@ export class DiveWorld implements ShopTarget {
 
       if (fam === 'sonar') {
         if (!this.nearestEnemy(rng)) continue
+        const sx = pose ? pose.x : this.px, sy = pose ? pose.y : this.py
         this.pulses.push({
-          x: pose ? pose.x : this.px, y: pose ? pose.y : this.py,
+          x: sx, y: sy,
           r: PLAYER.r * 0.6, maxR: rng,
           dmg: w.dmg, width: PLAYER.pulseWidth,
           hit: new Set<number>(), alive: true,
           resonant: w.id === 'sonar_rs',
         })
+        // V6.46：声呐原来**一个开火事件都不发** —— 波前从机体扩散出去是"结果"，
+        // 但"我开火了"这个**因**没有任何反馈。补一个无方向的爆闪。
+        this.emit({ t: 'muzzle', x: sx, y: sy, ang: 0, color: wcol, fam: 'sonar' })
       } else if (fam === 'gun') {
         const e = this.nearestEnemy(rng); if (!e) continue
         const base = pose ? pose.ang : Math.atan2(e.y - this.py, e.x - this.px)
@@ -1107,7 +1399,7 @@ export class DiveWorld implements ShopTarget {
             hit: new Set<number>(), alive: true,
           })
         }
-        this.emit({ t: 'muzzle', x: ox, y: oy, ang: base, color: wcol })
+        this.emit({ t: 'muzzle', x: ox, y: oy, ang: base, color: wcol, fam: 'gun', power: pellets > 1 ? 2 : 1 })
       } else if (fam === 'torpedo') {
         const e = this.nearestEnemy(rng); if (!e) continue
         const base = pose ? pose.ang : Math.atan2(e.y - this.py, e.x - this.px)
@@ -1127,7 +1419,7 @@ export class DiveWorld implements ShopTarget {
             er: w.id === 'torp_hv' ? 1.5 : 1,
           })
         }
-        this.emit({ t: 'muzzle', x: ox, y: oy, ang: base, color: wcol })
+        this.emit({ t: 'muzzle', x: ox, y: oy, ang: base, color: wcol, fam: 'torpedo', power: 2 })
       } else if (fam === 'harpoon') {
         const e = this.nearestEnemy(rng); if (!e) continue
         const base = pose ? pose.ang : Math.atan2(e.y - this.py, e.x - this.px)
@@ -1148,7 +1440,7 @@ export class DiveWorld implements ShopTarget {
           if (w.id === 'harp_cb') { b.o2 = 1; b.boomerAt = life0 * 0.5 }
           this.bullets.push(b)
         }
-        this.emit({ t: 'muzzle', x: ox, y: oy, ang: base, color: wcol })
+        this.emit({ t: 'muzzle', x: ox, y: oy, ang: base, color: wcol, fam: 'harpoon' })
       } else if (fam === 'echo') {
         const e = this.nearestEnemy(rng); if (!e) continue
         const LEAD = 0.5, DLY = 0.75
@@ -1171,7 +1463,7 @@ export class DiveWorld implements ShopTarget {
         const base = pose ? pose.ang : Math.atan2(e.y - this.py, e.x - this.px)
         const ox = pose ? pose.x + Math.cos(base) * MUZ : this.px
         const oy = pose ? pose.y + Math.sin(base) * MUZ : this.py
-        this.emit({ t: 'muzzle', x: ox, y: oy, ang: base, color: wcol })
+        this.emit({ t: 'muzzle', x: ox, y: oy, ang: base, color: wcol, fam: 'echo', power: big ? 3 : 2 })
       } else if (fam === 'acid') {
         const e = this.nearestEnemy(rng); if (!e) continue
         // V6.29 持久酸池：更大更久；酸雨：落点三池成排
@@ -1185,7 +1477,59 @@ export class DiveWorld implements ShopTarget {
         const base = pose ? pose.ang : Math.atan2(e.y - this.py, e.x - this.px)
         const ox = pose ? pose.x + Math.cos(base) * MUZ : this.px
         const oy = pose ? pose.y + Math.sin(base) * MUZ : this.py
-        this.emit({ t: 'muzzle', x: ox, y: oy, ang: base, color: wcol })
+        this.emit({ t: 'muzzle', x: ox, y: oy, ang: base, color: wcol, fam: 'acid' })
+      } else if (fam === 'mine') {
+        // 气泡雷：**落在自己脚下**，不索敌 —— 这是它与其他 10 把武器的根本区别。
+        // ⚠️ 场上有上限：满了就 `continue`（不消耗 timer）⇒ 一旦有空位立刻补一颗。
+        //    这读作"布雷节奏被走位卡住"，而不是"武器坏了"。
+        let live = 0
+        for (const m of this.mines) if (m.alive) live++
+        if (live >= MINE_CAP) continue
+        const o2per = w.id === 'mine_o2' ? MINE_O2_PER : 0
+        this.mines.push({
+          x: this.px, y: this.py,
+          arm: MINE_ARM, life: MINE_LIFE,
+          dmg: w.dmg, trig: MINE_TRIG, r: MINE_R,
+          o2per, o2cap: o2per > 0 ? MINE_O2_CAP : Infinity,
+          chainR: w.id === 'mine_ch' ? MINE_CHAIN_R : 0,
+          alive: true,
+        })
+        // 布雷的位置反馈：不发光环的话，玩家不知道雷落在哪（尤其是移动中）
+        this.emit({ t: 'burst', x: this.px, y: this.py, r: MINE_TRIG })
+      } else if (fam === 'net') {
+        const e = this.nearestEnemy(rng); if (!e) continue
+        const base = pose ? pose.ang : Math.atan2(e.y - this.py, e.x - this.px)
+        const ox = pose ? pose.x + Math.cos(base) * MUZ : this.px
+        const oy = pose ? pose.y + Math.sin(base) * MUZ : this.py
+        // 网是**慢速弹**（420，比枪弹 780 慢一半）⇒ 看得见飞出去的过程，
+        // 才能预判"网要在哪张开"。这是控场武器该有的可读性。
+        this.bullets.push({
+          x: ox, y: oy,
+          vx: Math.cos(base) * 420, vy: Math.sin(base) * 420,
+          life: rng / 420, dmg: w.dmg, kind: 'net',
+          hit: new Set<number>(), alive: true,
+          net: w.id,
+        })
+        this.emit({ t: 'muzzle', x: ox, y: oy, ang: base, color: wcol, fam: 'net', power: 2 })
+      } else if (fam === 'lure') {
+        // 诱饵：投放点是**敌人密度最高处**，不是最近敌人 ——
+        // 投在最近敌人身上没用，它本来就在朝你来了（见 `densestSpot`）。
+        const spot = this.densestSpot()
+        if (!spot) continue
+        const wall = w.id === 'lure_wl'
+        const n = wall ? 3 : 1
+        for (let k = 0; k < n; k++) {
+          const off = wall ? (k - 1) * LURE_WALL_GAP : 0
+          this.lures.push({
+            x: spot.x + off, y: spot.y,
+            life: LURE_LIFE,
+            r: wall ? LURE_WALL_R : LURE_R,
+            boom: w.id === 'lure_bo', dmg: w.dmg, br: LURE_BOOM_R,
+            alive: true,
+          })
+        }
+        // 投放反馈用 `burst`（扩散环）而不是 muzzle：诱饵是"放下去"不是"打出去"
+        this.emit({ t: 'burst', x: spot.x, y: spot.y, r: wall ? LURE_R : LURE_R * 0.8 })
       } else {
         const first = this.nearestEnemy(rng); if (!first) continue
         this.fireArc(first, w, pose)
@@ -1209,7 +1553,7 @@ export class DiveWorld implements ShopTarget {
       hit.add(cur)
       pts.push({ x: cur.x, y: cur.y })
       cur.flash = 0.08
-      this.hurt(cur, w.dmg)
+      this.hurt(cur, w.dmg, 'arc')
       // 导体缠绕：每跳回氧。V6.33 —— 把「续航」接到「电弧跳数」上
       if (this.hasRelic('conductor_coil')) o2Gain += 0.8
       let next: Enemy | null = null, bd = 190
@@ -1237,7 +1581,13 @@ export class DiveWorld implements ShopTarget {
     for (const b of this.bullets) {
       if (!b.alive) continue
       b.life -= dt
-      if (b.life <= 0) { b.alive = false; continue }
+      if (b.life <= 0) {
+        // V6.46 网：飞到射程尽头也要**张开**再消失。不张开的话"打了但没网到"
+        // 在视觉上等同于"子弹凭空消失"，玩家读不出这是控场武器。
+        if (b.net) this.openNet(b)
+        b.alive = false
+        continue
+      }
 
       // 回旋鱼叉：到程掉头（清 hit ⇒ 回程可对同一目标二次穿刺）。V6.29
       if (b.boomerAt !== undefined && !b.reversed && b.life <= b.boomerAt) {
@@ -1272,6 +1622,10 @@ export class DiveWorld implements ShopTarget {
           b.hit.add(i)
           e.flash = 0.08
           this.hurt(e, b.dmg)
+          // 网：**撞到第一个敌人就张开**（半径内的全部一起网住），然后消散。
+          // ⚠️ 用 `openNet` 而不是在这里内联 —— 射程尽头也要走同一段逻辑，
+          //    分开写迟早只有一处生效（而漏的那处不会有任何报错）。
+          if (b.kind === 'net') { this.openNet(b); b.alive = false; break }
           // 爆炸半径吃 er：重型鱼雷 1.5 倍
           if (b.kind === 'torpedo') { this.explode(b.x, b.y, 120 * (b.er ?? 1), b.dmg * 0.6); b.alive = false; break }
           // 鱼叉：穿透（不销毁）+ 把命中的鱼**拉向玩家**
@@ -1299,20 +1653,25 @@ export class DiveWorld implements ShopTarget {
   /** 鱼雷爆炸：范围伤害随距离衰减。DiveScene.ts:2955-2988 */
   /** `o2per` = 每炸到一个敌人回氧（多重回声 0.6）。缺省 0 = 不回氧。V6.29 氧耦合 A */
   /** `depth` = 连锁深度：0 = 武器直接投放（可触发共鸣腔）；≥1 = 小回声（不再连锁）。V6.33 */
-  explode(x: number, y: number, r: number, dmg: number, o2per = 0, depth = 0): void {
+  /** `o2cap` = **单次爆炸**的回氧总量上限。缺省 `Infinity`。V6.46 氧气雷的第三条锁 */
+  explode(x: number, y: number, r: number, dmg: number, o2per = 0, depth = 0, o2cap = Infinity): void {
     this.emit({ t: 'shake', ms: 130, intensity: 0.006 })
     this.emit({ t: 'blast', x, y, r })
     let o2gain = 0
+    const seen = new Set<Enemy>()      // 同一敌人只计一次（爆炸环可能重叠判定）
     for (const e of this.enemies) {
       if (!e.alive) continue
       const d = dist(x, y, e.x, e.y)
       if (d < r + e.r) {
         e.flash = 0.08
         const falloff = 1 - clamp(d / (r + e.r), 0, 1) * 0.5
-        this.hurt(e, dmg * falloff)
-        o2gain += o2per
+        this.hurt(e, dmg * falloff, 'blast')
+        if (!seen.has(e)) { seen.add(e); o2gain += o2per }
       }
     }
+    // ⚠️ 封顶：不封顶的话，一次炸到 8 个敌人就是 +20 氧（氧气雷 2.5×8），
+    //    "站雷堆里无限回血" —— 直接把氧气机制作废。见 `MINE_O2_CAP` 的三条锁。
+    if (o2gain > o2cap) o2gain = o2cap
     if (o2gain > 0) {
       const before = this.o2
       this.o2 = Math.min(this.o2Max, this.o2 + o2gain)

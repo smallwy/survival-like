@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>V6.46 特效预览 · 施法 / 打击 / 击杀</title>
+<style>
+  :root{
+    --abyss:#04070d; --panel:#08111c; --panelHi:#0e1a29; --line:#1b3348;
+    --cyan:#4fe8ff; --cyanHi:#c8f8ff; --jade:#7fffd4; --amber:#ffd166;
+    --violet:#a06bff; --magenta:#ff4fd8; --danger:#ff2e63;
+    --txt:#c8dbe8; --txtDim:#5d7d92;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--abyss); color:var(--txt);
+    font:13px/1.6 "Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+  }
+  header{
+    padding:18px 24px 14px; border-bottom:1px solid var(--line);
+    display:flex; align-items:baseline; gap:14px; flex-wrap:wrap;
+  }
+  h1{font-size:17px; margin:0; letter-spacing:.04em; color:var(--cyanHi)}
+  .sub{color:var(--txtDim); font-size:12px}
+  .warn{
+    margin-left:auto; font-size:11px; color:var(--amber);
+    border:1px solid #3a2f12; background:#181204; padding:3px 9px; border-radius:3px;
+  }
+  nav{display:flex; gap:0; padding:0 24px; border-bottom:1px solid var(--line); background:var(--panel)}
+  nav button{
+    background:none; border:none; color:var(--txtDim); padding:11px 20px; cursor:pointer;
+    font:inherit; font-size:13px; border-bottom:2px solid transparent; transition:.15s;
+  }
+  nav button:hover{color:var(--txt)}
+  nav button.on{color:var(--cyanHi); border-bottom-color:var(--cyan)}
+  main{padding:22px 24px 40px}
+  .panel{display:none}
+  .panel.on{display:block}
+  .row{display:flex; gap:20px; align-items:flex-start; flex-wrap:wrap}
+  .cvwrap{
+    border:1px solid var(--line); border-radius:4px; background:
+      radial-gradient(circle at 50% 40%, #0a1520 0%, var(--abyss) 78%);
+    padding:0; line-height:0; flex:0 0 auto;
+  }
+  canvas{display:block; border-radius:4px}
+  .legend{flex:1 1 320px; min-width:300px}
+  .legend h2{font-size:13px; margin:0 0 10px; color:var(--cyanHi); letter-spacing:.05em}
+  table{border-collapse:collapse; width:100%; font-size:12px}
+  td{padding:6px 8px; border-bottom:1px solid #10202e; vertical-align:top}
+  td:first-child{white-space:nowrap; color:var(--cyanHi); font-weight:600}
+  .swatch{display:inline-block; width:9px; height:9px; border-radius:2px; margin-right:6px; vertical-align:-1px}
+  .note{margin-top:14px; padding:11px 13px; background:var(--panel); border-left:2px solid var(--cyan);
+    border-radius:0 3px 3px 0; font-size:12px; color:#9fbccd}
+  .note b{color:var(--cyanHi)}
+  code{background:#0d1b28; padding:1px 5px; border-radius:2px; color:var(--jade); font-size:11px}
+</style>
+</head>
+<body>
+<header>
+  <h1>V6.46 特效预览</h1>
+  <span class="sub">施法 · 打击 · 击杀 —— 渲染层算法复刻（非引擎实拍）</span>
+  <span class="warn">这只是形状预览，最终手感以 Creator 内为准</span>
+</header>
+
+<nav>
+  <button data-t="cast" class="on">施法 · muzzleFx</button>
+  <button data-t="hit">打击 · hitFx</button>
+  <button data-t="kill">击杀 · killFx</button>
+  <button data-t="charge">前摇 · 蓄力环</button>
+</nav>
+
+<main>
+  <section class="panel on" id="p-cast">
+    <div class="row">
+      <div class="cvwrap"><canvas id="cv-cast" width="720" height="360"></canvas></div>
+      <div class="legend">
+        <h2>为什么按武器族分形状</h2>
+        <table>
+          <tr><td><span class="swatch" style="background:#c8f8ff"></span>声呐</td><td>无方向爆闪环 —— 波前从机体往外扩，没有"枪口方向"</td></tr>
+          <tr><td><span class="swatch" style="background:#ffd166"></span>枪</td><td>尖头短闪 + 散射火花</td></tr>
+          <tr><td><span class="swatch" style="background:#ff2e63"></span>鱼雷</td><td>双层：冷焰芯 + 压力环（发射管的推背感）</td></tr>
+          <tr><td><span class="swatch" style="background:#7fffd4"></span>鱼叉</td><td>细长直线喷流（"一根东西穿出去"）</td></tr>
+          <tr><td><span class="swatch" style="background:#a06bff"></span>回声</td><td>三层光点<b>反向排列</b> —— 它打的是延迟爆发，枪口该是"聚"不是"放"</td></tr>
+          <tr><td><span class="swatch" style="background:#c4fff0"></span>酸液</td><td>锥形雾团（喷嘴雾化，不是火光）</td></tr>
+          <tr><td><span class="swatch" style="background:#7fffd4"></span>网</td><td>三根散开的细索</td></tr>
+        </table>
+        <div class="note">
+          <b>改动前：</b>11 把武器共用一个黄色小闪光 + 3 颗火花，只有暴击换色 ——
+          加特林和满蓄重炮看起来一样大。<br>
+          <b>现在：</b><b>形状认族，尺寸认威力</b>（<code>power</code> 1/2/3），两条信息正交，互不干扰。
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel" id="p-hit">
+    <div class="row">
+      <div class="cvwrap"><canvas id="cv-hit" width="720" height="360"></canvas></div>
+      <div class="legend">
+        <h2>7 种伤害来源</h2>
+        <table>
+          <tr><td>bullet</td><td>冲击环 + <b>斩击痕</b> + 火花 —— 唯一带方向的一套</td></tr>
+          <tr><td>blast</td><td>双层同心环 + 无方向迸溅，<b>不画斩</b>（爆炸没有来向）</td></tr>
+          <tr><td>pulse</td><td>纯同心环（声呐不可能有"来向"）</td></tr>
+          <tr><td>arc</td><td>沿来向拉一道<b>折线</b>残影 —— 链击的辨识度全在"电是折的"</td></tr>
+          <tr><td>burn</td><td>只冒余烬，<b>环和斩都不画</b>（DoT 每 0.35s 一次，画环会叠出不散的亮圈）</td></tr>
+          <tr><td>net</td><td>十字<b>网目</b>折线（"缠上了"而不是"打疼了"）</td></tr>
+          <tr><td>bite</td><td>品红 —— 与玩家造成的伤害<b>颜色切开</b>，避免以为自己漏了输出</td></tr>
+        </table>
+        <div class="note">
+          <b>暴击是覆盖式的：</b>不管什么来源，暴击一律换紫罗兰 + 加大。
+          "这刀更重"这个信号优先于"这是什么武器打的"。
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel" id="p-kill">
+    <div class="row">
+      <div class="cvwrap"><canvas id="cv-kill" width="720" height="360"></canvas></div>
+      <div class="legend">
+        <h2>基础三层 + 死因语汇</h2>
+        <table>
+          <tr><td>基础层</td><td>双层冲击环 + 径向迸溅 + 位图碎块（<b>所有击杀都有</b>）</td></tr>
+          <tr><td>blast</td><td>补一圈外扩余波（琥珀）</td></tr>
+          <tr><td>arc</td><td>四条折线向外炸开</td></tr>
+          <tr><td>burn</td><td>余烬<b>上飘</b> —— 唯一一条带方向的死法语汇</td></tr>
+          <tr><td>bite</td><td>品红双环</td></tr>
+          <tr><td>net</td><td>网目<b>向内</b>收拢（与爆炸相反）</td></tr>
+          <tr><td>pulse</td><td>干净同心环（被震散，不带火）</td></tr>
+        </table>
+        <div class="note">
+          <b>改动前：</b>只按体型分（Boss 大一点），于是"被炸死"和"被电死"结束得一模一样 ——
+          玩家换了一把武器，在视觉上看不出重量差。
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel" id="p-charge">
+    <div class="row">
+      <div class="cvwrap"><canvas id="cv-charge" width="720" height="240"></canvas></div>
+      <div class="legend">
+        <h2>前摇 = 施法感的真正来源</h2>
+        <table>
+          <tr><td>触发条件</td><td><code>ivLast ≥ 1.4</code>（鱼雷 / 回声 / 诱饵）且开火前 28% 的装填窗口</td></tr>
+          <tr><td>外环</td><td>半径 36 → 9 <b>向内收拢</b>，透明度同步上升</td></tr>
+          <tr><td>内环</td><td>后 55% 才出现，反向同步收 —— 两环一正一反读作"在咬合"</td></tr>
+        </table>
+        <div class="note">
+          <b>一个没有任何前摇的攻击，无论命中时多大特效，读起来都只是"突然发生了"。</b><br><br>
+          ⚠️ 进度直接读 <code>weapon.timer / weapon.ivLast</code> —— 模拟层<b>不需要</b>再维护
+          一份"我正在蓄力"的状态（两份状态迟早不一致，而且那种不一致不会报错）。<br>
+          ⚠️ 不能走 <code>pushShock</code> 池：那是"一次性扩散"，收拢环要每帧重画，
+          走池会每帧 push 一个、把 <code>SHOCK_CAP</code> 挤爆 —— 症状是打击特效<b>整体消失</b>。
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script>
+// ---------------------------------------------------------------------------
+// 配色（与 shared/theme.ts 的 PALETTE 逐字一致）
+// ---------------------------------------------------------------------------
+const C = {
+  abyss: 0x04070d, cyan: 0x4fe8ff, cyanHi: 0xc8f8ff, jade: 0x7fffd4, jadeHi: 0xc4fff0,
+  amber: 0xffd166, violet: 0xa06bff, magenta: 0xff4fd8, danger: 0xff2e63,
+}
+const hex = n => '#' + n.toString(16).padStart(6, '0')
+const rgba = (n, a) => {
+  const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255
+  return `rgba(${r},${g},${b},${Math.max(0, Math.min(1, a))})`
+}
+
+// ---------------------------------------------------------------------------
+// 特效池 —— 与 DiveGame.ts 的 shocks / slashes / sparks / arcs 四池同构
+// ---------------------------------------------------------------------------
+class Fx {
+  constructor() { this.shocks = []; this.slashes = []; this.sparks = []; this.arcs = [] }
+  clear() { this.shocks = []; this.slashes = []; this.sparks = []; this.arcs = [] }
+
+  pushShock(x, y, rMax, dur, color, width, core, rings) {
+    this.shocks.push({ x, y, r: 0, rMax, life: dur, maxLife: dur, color, width, core, rings, ringDelay: rings > 1 ? .3 : 0 })
+  }
+  pushSlash(x, y, ang, scale, color) {
+    this.slashes.push({ x, y, ang, scale, color, life: .22, maxLife: .22, len: 46 * scale, width: 3.4 * scale })
+  }
+  pushSparks(x, y, ang, color, n) {
+    for (let i = 0; i < n; i++) {
+      const a = ang + (Math.random() - .5) * 1.5
+      const sp = 90 + Math.random() * 240
+      this.sparks.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+        life: .26, maxLife: .26, color, size: 1.4 + Math.random() * 1.7, ang: a })
+    }
+  }
+  pushRadialSparks(x, y, n, spMin, spVar, size, color) {
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2
+      const sp = spMin + Math.random() * spVar
+      this.sparks.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+        life: .32, maxLife: .32, color, size: size * (.6 + Math.random() * .8), ang: a })
+    }
+  }
+  pushArc(pts, life, color) { this.arcs.push({ pts, life, maxLife: life, color }) }
+
+  step(dt) {
+    for (const s of this.shocks) { s.life -= dt; s.r = s.rMax * (1 - Math.max(0, s.life / s.maxLife)) }
+    for (const s of this.slashes) { s.life -= dt }
+    for (const s of this.sparks) {
+      s.life -= dt
+      s.x += s.vx * dt; s.y += s.vy * dt
+      s.vx *= Math.exp(-4 * dt); s.vy *= Math.exp(-4 * dt)
+    }
+    for (const a of this.arcs) a.life -= dt
+    this.shocks = this.shocks.filter(s => s.life > 0)
+    this.slashes = this.slashes.filter(s => s.life > 0)
+    this.sparks = this.sparks.filter(s => s.life > 0)
+    this.arcs = this.arcs.filter(a => a.life > 0)
+  }
+
+  draw(ctx) {
+    for (const s of this.shocks) {
+      const k = Math.max(0, s.life / s.maxLife)
+      const w = s.width * (.4 + .6 * k)
+      ctx.strokeStyle = rgba(s.color, Math.min(1, k * 1.2)); ctx.lineWidth = w
+      ctx.beginPath(); ctx.arc(s.x, s.y, Math.max(1, s.r), 0, 7); ctx.stroke()
+      if (s.rings > 1) {
+        const r2 = s.r - s.rMax * s.ringDelay
+        if (r2 > .6) {
+          ctx.strokeStyle = rgba(0xffffff, Math.min(.8, k)); ctx.lineWidth = w * .6
+          ctx.beginPath(); ctx.arc(s.x, s.y, r2, 0, 7); ctx.stroke()
+        }
+      }
+      if (s.core * k > .6) {
+        ctx.fillStyle = rgba(0xffffff, Math.min(.9, k * 1.1))
+        ctx.beginPath(); ctx.arc(s.x, s.y, s.core * k, 0, 7); ctx.fill()
+      }
+    }
+    for (const s of this.slashes) {
+      const k = Math.max(0, s.life / s.maxLife)
+      const nx = Math.sin(s.ang), ny = -Math.cos(s.ang)
+      ctx.strokeStyle = rgba(s.color, Math.min(1, k)); ctx.lineWidth = s.width
+      ctx.beginPath()
+      ctx.moveTo(s.x - nx * s.len * .5, s.y - ny * s.len * .5)
+      ctx.lineTo(s.x + nx * s.len * .5, s.y + ny * s.len * .5)
+      ctx.stroke()
+    }
+    for (const a of this.arcs) {
+      const k = Math.max(0, a.life / a.maxLife)
+      const c = a.color || 0xa06bff
+      ctx.lineJoin = 'round'; ctx.lineCap = 'round'
+      ctx.strokeStyle = rgba(c, .9 * k); ctx.lineWidth = 3
+      ctx.beginPath(); a.pts.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)); ctx.stroke()
+      ctx.strokeStyle = rgba(0xffffff, .7 * k); ctx.lineWidth = 1.2
+      ctx.beginPath(); a.pts.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)); ctx.stroke()
+    }
+    for (const s of this.sparks) {
+      const k = Math.max(0, s.life / s.maxLife)
+      ctx.fillStyle = rgba(s.color, k)
+      ctx.beginPath(); ctx.arc(s.x, s.y, s.size * (.4 + .6 * k), 0, 7); ctx.fill()
+    }
+  }
+
+  // ---- 与 DiveGame.hitFx 逐条对应 ----
+  hit(cause, x, y, r, crit) {
+    const ang = -0.7
+    if (crit) {
+      this.pushShock(x, y, r * 1.5, .19, C.violet, 2.8, r, 1)
+      this.pushSlash(x, y, ang, 1.5, C.violet)
+      this.pushSparks(x, y, ang, C.violet, 7)
+      return
+    }
+    switch (cause) {
+      case 'blast':
+        this.pushShock(x, y, r * 1.9, .22, C.danger, 2.4, r * .85, 2)
+        this.pushRadialSparks(x, y, 5, 90, 120, 1.4, C.danger); break
+      case 'pulse':
+        this.pushShock(x, y, r * 1.32, .2, 0x4fe8ff, 1.8, r * .58, 1); break
+      case 'arc':
+        this.pushArc([
+          { x: x - Math.cos(ang) * r * 2.4, y: y - Math.sin(ang) * r * 2.4 },
+          { x: x - Math.cos(ang) * r * 1.1 + r * .35, y: y - Math.sin(ang) * r * 1.1 },
+          { x, y },
+        ], .14)
+        this.pushShock(x, y, r * 1.1, .14, C.violet, 1.6, r * .5, 1); break
+      case 'burn':
+        for (let i = 0; i < 2; i++) {
+          const a = -Math.PI / 2 + (Math.random() - .5) * 1.6
+          this.sparks.push({ x: x + (Math.random() - .5) * r, y: y + (Math.random() - .5) * r,
+            vx: Math.cos(a) * 26, vy: Math.sin(a) * 46, life: .34, maxLife: .34, color: 0xff9a3c, size: 2, ang: a })
+        }
+        break
+      case 'net': {
+        const rr = r * 1.5, ca = Math.cos(ang) * rr, sa = Math.sin(ang) * rr
+        this.pushArc([{ x: x - ca - sa * .75, y: y - sa + ca * .75 }, { x, y },
+          { x: x + ca + sa * .75, y: y + sa - ca * .75 }], .22, C.jade)
+        this.pushArc([{ x: x - ca + sa * .75, y: y - sa - ca * .75 }, { x, y },
+          { x: x + ca - sa * .75, y: y + sa + ca * .75 }], .22, C.jade)
+        break
+      }
+      case 'bite':
+        this.pushShock(x, y, r * 1.15, .14, 0xff4fd8, 1.8, r * .48, 1)
+        this.pushSparks(x, y, ang, 0xff4fd8, 3); break
+      default:
+        this.pushShock(x, y, r * 1.35, .17, 0xdff4ff, 1.8, r * .62, 1)
+        this.pushSlash(x, y, ang, 1, C.jade)
+        this.pushSparks(x, y, ang, C.jade, 4)
+    }
+  }
+
+  // ---- 与 DiveGame.killFx 逐条对应 ----
+  kill(cause, x, y, r, boss) {
+    const col = C.jade
+    this.pushShock(x, y, r * (boss ? 4.2 : 2.6), boss ? .5 : .32, col, boss ? 4 : 2.6, r * (boss ? 1.5 : 1), 2)
+    this.pushShock(x, y, r * (boss ? 2.6 : 1.7), boss ? .32 : .2, 0xffffff, boss ? 3 : 2, r * (boss ? .9 : .62), 1)
+    this.pushRadialSparks(x, y, boss ? 26 : 8 + Math.round(r * .25), boss ? 200 : 120, boss ? 280 : 160, boss ? 2.4 : 1.6, col)
+    switch (cause) {
+      case 'blast':
+        this.pushShock(x, y, r * (boss ? 3.4 : 2) * 1.5, boss ? .34 : .24, C.amber, boss ? 2.4 : 1.8, 0, 1); break
+      case 'arc':
+        for (let k = 0; k < 4; k++) {
+          const a = (k / 4) * Math.PI * 2 + Math.random() * .6
+          const r0 = r * .5, r1 = r * (1.6 + Math.random() * 1.2)
+          this.pushArc([
+            { x: x + Math.cos(a) * r0, y: y + Math.sin(a) * r0 },
+            { x: x + Math.cos(a) * (r0 + r1) * .55 + Math.cos(a + 1.2) * r * .4,
+              y: y + Math.sin(a) * (r0 + r1) * .55 + Math.sin(a + 1.2) * r * .4 },
+            { x: x + Math.cos(a) * r1, y: y + Math.sin(a) * r1 },
+          ], .16)
+        }
+        break
+      case 'burn':
+        for (let i = 0; i < 6; i++) {
+          const a = -Math.PI / 2 + (Math.random() - .5) * 2.4, sp = 40 + Math.random() * 60
+          this.sparks.push({ x: x + (Math.random() - .5) * r, y: y + (Math.random() - .5) * r,
+            vx: Math.cos(a) * sp * .4, vy: Math.sin(a) * sp, life: .5, maxLife: .5,
+            color: 0xff9a3c, size: 1.8 + Math.random() * 1.4, ang: a })
+        }
+        break
+      case 'bite':
+        this.pushShock(x, y, r * 1.5, .22, 0xff4fd8, 2, 0, 2); break
+      case 'net':
+        for (let k = 0; k < 3; k++) {
+          const a = (k / 3) * Math.PI * 2 + .4, r1 = r * 1.8
+          this.pushArc([
+            { x: x + Math.cos(a) * r1, y: y + Math.sin(a) * r1 },
+            { x: x + Math.cos(a + .5) * r * .6, y: y + Math.sin(a + .5) * r * .6 },
+            { x: x + Math.cos(a + 1) * r1, y: y + Math.sin(a + 1) * r1 },
+          ], .24, C.jade)
+        }
+        break
+      case 'pulse':
+        this.pushShock(x, y, r * 2.2, .26, 0x4fe8ff, 2, 0, 1); break
+    }
+  }
+
+  // ---- 与 DiveGame.muzzleFx 逐条对应 ----
+  muzzle(fam, power, x, y, ang, color) {
+    const S = power >= 3 ? 1.9 : power >= 2 ? 1.4 : 1
+    const addSparks = (n, spread, sp0, sp1, size, col) => {
+      for (let i = 0; i < n; i++) {
+        const a = ang + (Math.random() - .5) * spread, sp = (sp0 + Math.random() * (sp1 - sp0)) * S
+        this.sparks.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+          life: .18, maxLife: .18, color: col, size, ang: a })
+      }
+    }
+    switch (fam) {
+      case 'sonar':
+        this.pushShock(x, y, 26 * S, .14, 0x4fe8ff, 2, 7 * S, 1)
+        this.pushRadialSparks(x, y, 3, 50, 60, 1.2, 0x4fe8ff); break
+      case 'gun':
+        this.pushShock(x, y, 4, .11, color, 1, 7 * S, 1)
+        addSparks(power >= 2 ? 6 : 3, .7, 70, 160, 1.4, color); break
+      case 'torpedo':
+        this.pushShock(x, y, 2, .16, 0xfff0d0, 1, 11 * S, 1)
+        this.pushShock(x, y, 22 * S, .18, color, 2.4, 0, 1)
+        addSparks(5, .42, 90, 200, 1.8, color); break
+      case 'harpoon':
+        for (let i = 0; i < 4; i++) {
+          const d = (4 + i * 8) * S
+          this.sparks.push({ x: x + Math.cos(ang) * d, y: y + Math.sin(ang) * d,
+            vx: Math.cos(ang) * 130, vy: Math.sin(ang) * 130, life: .14, maxLife: .14,
+            color: i === 0 ? 0xffffff : color, size: 2.6 - i * .4, ang })
+        }
+        break
+      case 'echo':
+        for (let k = 0; k < 3; k++) {
+          const rr = (30 - k * 8) * S
+          this.pushShock(x + Math.cos(ang) * rr, y + Math.sin(ang) * rr, 1, .14 + k * .03,
+            k === 1 ? 0xffffff : color, 1, 5 * S, 1)
+        }
+        break
+      case 'acid':
+        for (let i = 0; i < 4; i++) {
+          const a = ang + (Math.random() - .5) * .9, d = 12 + Math.random() * 26
+          this.sparks.push({ x: x + Math.cos(a) * d, y: y + Math.sin(a) * d,
+            vx: Math.cos(a) * 40, vy: Math.sin(a) * 40, life: .3, maxLife: .3,
+            color, size: 3 + Math.random() * 2.4, ang: a })
+        }
+        break
+      case 'net':
+        for (let i = 0; i < 3; i++) {
+          const a = ang + (i - 1) * .24
+          this.sparks.push({ x, y, vx: Math.cos(a) * 150, vy: Math.sin(a) * 150,
+            life: .18, maxLife: .18, color, size: 1.6, ang: a })
+        }
+        break
+      default:
+        addSparks(5, 1.4, 90, 210, 1.4, 0xd8c4ff)
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 页面装配
+// ---------------------------------------------------------------------------
+const CASTS = [
+  { fam: 'sonar',   power: 1, col: C.cyanHi, name: '声呐共振' },
+  { fam: 'gun',     power: 1, col: C.amber,  name: '脉冲机关枪' },
+  { fam: 'torpedo', power: 2, col: C.danger, name: '追踪鱼雷' },
+  { fam: 'harpoon', power: 1, col: C.jade,   name: '穿透鱼叉' },
+  { fam: 'echo',    power: 2, col: C.violet, name: '回声炮' },
+  { fam: 'acid',    power: 1, col: C.jadeHi, name: '酸液喷射' },
+  { fam: 'net',     power: 2, col: C.jade,   name: '网发射器' },
+]
+const HITS = [
+  { cause: 'bullet', name: '弹丸（枪/鱼叉/鱼雷直击）' },
+  { cause: 'blast',  name: '爆炸（鱼雷/回声/气泡雷）' },
+  { cause: 'pulse',  name: '声呐波前' },
+  { cause: 'arc',    name: '链式电弧' },
+  { cause: 'burn',   name: '灼烧 DoT（电网）' },
+  { cause: 'net',    name: '网命中' },
+  { cause: 'bite',   name: '内讧撕咬' },
+]
+const KILLS = [
+  { cause: 'bullet', name: '弹丸击杀（基础三层）' },
+  { cause: 'blast',  name: '炸死' },
+  { cause: 'arc',    name: '电死' },
+  { cause: 'burn',   name: '烧死' },
+  { cause: 'bite',   name: '被同类咬死' },
+  { cause: 'net',    name: '网死' },
+  { cause: 'pulse',  name: '声呐震散' },
+]
+
+/** 每个 canvas 跑一条独立的演示循环 */
+function runDemo(canvasId, items, period, fire, cellW, cellH, cols) {
+  const cv = document.getElementById(canvasId)
+  const ctx = cv.getContext('2d')
+  const fx = new Fx()
+  let t = 0, idx = 0, acc = 0, last = performance.now()
+
+  // 预先算好每个 item 的格中心
+  const centers = items.map((_, i) => {
+    const gx = (i % cols) * cellW + cellW / 2
+    const gy = Math.floor(i / cols) * cellH + cellH / 2
+    return { x: gx, y: gy }
+  })
+
+  function frame(now) {
+    const dt = Math.min(.05, (now - last) / 1000); last = now
+    t += dt; acc += dt
+    if (acc >= period) {
+      acc = 0
+      const c = centers[idx]
+      fire(fx, items[idx], c.x, c.y, idx)
+      idx = (idx + 1) % items.length
+    }
+    fx.step(dt)
+
+    ctx.fillStyle = hex(C.abyss); ctx.fillRect(0, 0, cv.width, cv.height)
+    // 背景网格 + 格标签
+    ctx.strokeStyle = 'rgba(27,51,72,.55)'; ctx.lineWidth = 1
+    for (let i = 0; i <= cols; i++) {
+      ctx.beginPath(); ctx.moveTo(i * cellW, 0); ctx.lineTo(i * cellW, cv.height); ctx.stroke()
+    }
+    for (let r = 0; r * cellH < cv.height; r++) {
+      ctx.beginPath(); ctx.moveTo(0, r * cellH); ctx.lineTo(cv.width, r * cellH); ctx.stroke()
+    }
+    // 靶心（敌人占位）
+    items.forEach((it, i) => {
+      const c = centers[i]
+      const on = i === idx
+      ctx.fillStyle = on ? 'rgba(79,232,255,.10)' : 'rgba(79,232,255,.035)'
+      ctx.beginPath(); ctx.arc(c.x, c.y, 26, 0, 7); ctx.fill()
+      ctx.strokeStyle = on ? 'rgba(79,232,255,.55)' : 'rgba(79,232,255,.16)'
+      ctx.lineWidth = on ? 1.6 : 1
+      ctx.beginPath(); ctx.arc(c.x, c.y, 26, 0, 7); ctx.stroke()
+    })
+
+    fx.draw(ctx)
+
+    // 当前项名称
+    ctx.font = '11px "Segoe UI","Microsoft YaHei",sans-serif'
+    ctx.textAlign = 'center'
+    items.forEach((it, i) => {
+      const c = centers[i]
+      if (i !== idx) {
+        ctx.fillStyle = 'rgba(93,125,146,.85)'
+        ctx.fillText(it.name, c.x, Math.floor(i / cols) * cellH + cellH - 8)
+      }
+    })
+    const cc = centers[idx]
+    ctx.fillStyle = hex(C.cyanHi)
+    ctx.fillText(items[idx].name, cc.x, Math.floor(idx / cols) * cellH + cellH - 8)
+
+    requestAnimationFrame(frame)
+  }
+  requestAnimationFrame(frame)
+}
+
+const ANGS = [-.7, -1.9, .5, -2.6, .2, -1.2, .9]
+runDemo('cv-cast', CASTS, .95,
+  (fx, it, x, y, i) => fx.muzzle(it.fam, it.power, x - 30, y, ANGS[i % ANGS.length], it.col),
+  180, 180, 4)
+
+runDemo('cv-hit', HITS, 1.1,
+  (fx, it, x, y) => fx.hit(it.cause, x, y, 24, false),
+  180, 180, 4)
+
+runDemo('cv-kill', KILLS, 1.25,
+  (fx, it, x, y) => fx.kill(it.cause, x, y, 24, false),
+  180, 180, 4)
+
+// 前摇：单独一条 —— 画收拢环（每帧重画，不是池）
+;(function chargeDemo() {
+  const cv = document.getElementById('cv-charge')
+  const ctx = cv.getContext('2d')
+  const cv2 = cv
+  let t = 0, last = performance.now()
+  const IV = 2.4   // 诱饵的 iv
+  function frame(now) {
+    const dt = Math.min(.05, (now - last) / 1000); last = now
+    t += dt
+    ctx.fillStyle = hex(C.abyss); ctx.fillRect(0, 0, cv2.width, cv2.height)
+
+    // 三把长 CD 武器并排演示，各自相位错开
+    const lanes = [
+      { name: '追踪鱼雷 iv 1.50', iv: 1.5, col: C.danger, ph: 0 },
+      { name: '回声炮 iv 1.50',   iv: 1.5, col: C.violet, ph: .5 },
+      { name: '生物光诱饵 iv 2.40', iv: 2.4, col: C.amber,  ph: 1.1 },
+    ]
+    lanes.forEach((ln, i) => {
+      const cx = 120 + i * 240, cy = 110
+      const timer = ((ln.ph + t) % ln.iv)
+      const ready = 1 - timer / ln.iv
+      const WARM = .72
+      // 枪口底座
+      ctx.fillStyle = 'rgba(22,40,60,.7)'
+      ctx.beginPath(); ctx.arc(cx, cy, 16, 0, 7); ctx.fill()
+      ctx.strokeStyle = 'rgba(79,232,255,.35)'; ctx.lineWidth = 1.4
+      ctx.beginPath(); ctx.arc(cx, cy, 16, 0, 7); ctx.stroke()
+      // 装填进度弧（常驻，让"还有多久"看得见）
+      ctx.strokeStyle = rgba(ln.col, .3); ctx.lineWidth = 2.5
+      ctx.beginPath()
+      ctx.arc(cx, cy, 24, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * ready)
+      ctx.stroke()
+
+      let p = 0
+      if (ready > WARM) {
+        p = (ready - WARM) / (1 - WARM)
+        const rr = 36 - p * 27
+        ctx.strokeStyle = rgba(ln.col, .2 + p * .62); ctx.lineWidth = 1.6 + p * 1.5
+        ctx.beginPath(); ctx.arc(cx, cy, rr, 0, 7); ctx.stroke()
+        if (p > .45) {
+          ctx.strokeStyle = rgba(0xffffff, ((p - .45) / .55) * .5); ctx.lineWidth = 1
+          ctx.beginPath(); ctx.arc(cx, cy, rr * .52, 0, 7); ctx.stroke()
+        }
+      }
+      if (ready > .995) {
+        ctx.fillStyle = rgba(ln.col, .9)
+        ctx.beginPath(); ctx.arc(cx, cy, 9, 0, 7); ctx.fill()
+      }
+      ctx.font = '11px "Segoe UI","Microsoft YaHei",sans-serif'
+      ctx.textAlign = 'center'; ctx.fillStyle = 'rgba(93,125,146,.9)'
+      ctx.fillText(ln.name, cx, cy + 62)
+      ctx.fillStyle = ready > WARM ? hex(C.cyanHi) : 'rgba(93,125,146,.6)'
+      ctx.fillText(ready > WARM ? '蓄力中 ' + Math.round(p * 100) + '%' : '装填 ' + Math.round(ready * 100) + '%', cx, cy + 80)
+    })
+
+    ctx.textAlign = 'left'; ctx.fillStyle = 'rgba(93,125,146,.75)'; ctx.font = '11px sans-serif'
+    ctx.fillText('外环向内收拢 · 内环后 55% 出现 · 两环一正一反读作「在咬合」', 24, cv2.height - 18)
+    requestAnimationFrame(frame)
+  }
+  requestAnimationFrame(frame)
+})()
+
+// tab 切换
+document.querySelectorAll('nav button').forEach(b => {
+  b.onclick = () => {
+    document.querySelectorAll('nav button').forEach(x => x.classList.remove('on'))
+    document.querySelectorAll('.panel').forEach(x => x.classList.remove('on'))
+    b.classList.add('on')
+    document.getElementById('p-' + b.dataset.t).classList.add('on')
+  }
+})
+</script>
+</body>
+</html>

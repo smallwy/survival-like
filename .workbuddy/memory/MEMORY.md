@@ -92,6 +92,16 @@
   - ⚠️ **动力感主开关 = 气泡与艇的速度差**，不是气泡数量。排气气泡 95–150px/s（艇峰值 47）⇒ 相对 48–103；旧值 38–75 ⇒ 相对 0–28 = 气泡粘在艇上。
   - ⚠️ **排气口 (dx 76–104, dy +72)** 要同时过三关：① 出壳（√(dx²+dy²)>90，`tBubble` 层在舱体**之下**，壳内的气泡被压住）② 不越柱底 ③ 上升途中不被艇挡。正下方 (0,96) 会让 ② 失败。
   - 中央区 = `Title.ts` §3.3；常量与两个 preview 脚本**必须同步**（脚本头部已标）。
+- **V6.46 机制型武器**：计划书点名 4 把中落地 3 把 + 6 进化（`mine` 气泡雷族 / `net` 网族 / `lure` 诱饵族）。
+  - ⚠️ **族靠 id 前缀归族**（`mine_ch` / `net_cv` / `lure_wl`）⇒ 新武器 id **必须**保持 `<族>_<后缀>` 形状。
+  - 三族共用一个 `enemyAim(e)`（优先级 **内讧 > 诱饵 > 玩家**）；`Enemy` 加 `slowT/slowMul`、`burnT/burnDps/burnTick`、`charmT/charmTick`。
+  - ⚠️ **`mkEnemy()` 工厂是必须的**：加字段时手写两处字面量会只改一处（TS 会报 "not assignable"）。
+  - ⚠️ `WEAPON_NAME`/`WEAPON_FAMILIES` **只有 `codex.ts` 一份**（unlocks 曾有一份副本，加族时漏改）。
+  - ⚠️ 立绘回退表已改名 `WEAPON_ART_FALLBACK`（原 `EVO_ART_FALLBACK`）；**出图后必须删回退条目**。
+  - ⚠️ 推进器**故意不加进 `WeaponId`**（加了 `WEAPON_DEF` 就必须同步补 = 提前实装），挂 P0 判定后。
+- **V6.46 特效按来源分化**：`SimEvent` 加 `hit.cause` / `kill.cause` / `muzzle.fam+power`；
+  `DamageCause` 7 值（bullet/pulse/arc/blast/burn/net/bite）。**前摇蓄力环**读 `weapon.timer/ivLast`（不加新事件）。
+  预览页 `docs/fx_preview.html`（Canvas 复刻渲染层算法，不开 Creator 也能看形状）。
   - 新增 `tools/preview_dive_cycle.py`：复刻位移公式 + 气泡出生，把循环抽 8 帧（`docs/shots/dive_cycle.png`）。**"时间上"的问题（速度/间距/位移）只有它能提前看到。**
 
 ## 图标出图锚点（2026-10-13 晚定）

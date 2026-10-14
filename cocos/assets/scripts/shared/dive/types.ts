@@ -37,6 +37,30 @@ export interface Enemy {
   tex: string
   /** 贴图朝向补偿（弧度）：AI 生成素材的实际头向不可控，绘制时减掉它。 */
   texRot: number
+
+  // ---- V6.46 机制型武器带来的三个新状态 ----
+  /** 减速剩余（s）。> 0 时速度 × `slowMul`（网 / 电网）。每帧递减，见 `world.updateEnemies` */
+  slowT: number
+  /** 减速倍率（0.5 = 打五折）。只在 `slowT > 0` 时读 */
+  slowMul: number
+  /** 灼烧剩余（s）与每秒伤害（电网）。DoT 走 0.35s tick，与酸池同频 */
+  burnT: number
+  burnDps: number
+  /** 距下一次灼烧结算的剩余时间（s） */
+  burnTick: number
+  /**
+   * **内讧**剩余时间（s）。`> 0` = 这条鱼被驯化网策反，转而攻击同类（V6.46）。
+   *
+   * ⚠️ **阵营不变**（不是友军单位）。只是把它的寻路目标改写成"最近的同类"
+   * （见 `world.enemyAim()`），咬到同类就造成伤害、并**不再攻击玩家**。
+   *
+   * 为什么不做"真友军"：真友军要加友方 AI + 独立死亡处理 + 击杀归属 +
+   * "掉落的氧泡算谁的"这一串问题，成本高一个数量级，而**玩法效果几乎一样**
+   * —— 视觉上都是"敌人内讧"。轻版只用一个字段。
+   */
+  charmT: number
+  /** 内讧攻击节流（s）。咬到同类就掉血，但不能每帧咬 */
+  charmTick: number
 }
 
 /**
@@ -81,10 +105,21 @@ export type WeaponId = 'sonar' | 'gun' | 'torpedo' | 'arc'
   | 'sonar_rs' | 'sonar_fc'    // 共振炮 / 定向聚焦
   | 'harpoon' | 'echo' | 'acid'  // V6.18 新增三种基础武器（鱼叉 / 回声 / 酸液）
   | 'harp_tr' | 'harp_cb'        // V6.29 三重鱼叉 / 回旋鱼叉
+  // V6.46 机制型武器四把（计划书 §5.2 点名但一直没做的那批）
+  //   mine 陷阱族（不索敌，靠走位铺）/ net 控场族 / lure 聚怪族 / thruster 位移族
+  | 'mine' | 'mine_ch' | 'mine_o2'
+  | 'net' | 'net_el' | 'net_cv'
+  | 'lure' | 'lure_bo' | 'lure_wl'
+  // ⚠️ 水流推进器 `thruster` / `thr_vo` / `thr_ra` **故意不在这里**。
+  //    它改的是玩家位移（核心手感），按决策挂到 P0 手感判定之后再上。
+  //    `WeaponId` 一加，`Record<WeaponId, …>` 的 `WEAPON_DEF` 就必须同时给全 3 条 ——
+  //    那样等于提前实装。所以类型是最后一步加的。
   | 'echo_mu' | 'echo_fo'        // V6.29 多重回声 / 聚焦回声
   | 'acid_fd' | 'acid_ra'        // V6.29 持久酸池 / 酸雨
 
 export type WeaponFamily = 'sonar' | 'gun' | 'torpedo' | 'arc' | 'harpoon' | 'echo' | 'acid'
+  // V6.46 三个机制族：陷阱（不索敌）／控场（减速）／聚怪（改寻路目标）
+  | 'mine' | 'net' | 'lure'
 
 export interface Weapon {
   id: WeaponId
@@ -106,9 +141,15 @@ export interface Bullet {
   x: number; y: number
   vx: number; vy: number
   life: number; dmg: number
-  kind: 'gun' | 'torpedo' | 'harpoon'
+  kind: 'gun' | 'torpedo' | 'harpoon' | 'net'
   hit: Set<number>
   alive: boolean
+  /**
+   * V6.46 网：这颗弹**飞到尽头或撞到第一个敌人时张开**，对半径 `NET_R` 内所有敌人
+   * 施加控制。值是网自己的武器 id（`'net' | 'net_el' | 'net_cv'`），
+   * 让 `world.applyNet()` 知道该上哪种效果。
+   */
+  net?: WeaponId
   /** 爆炸半径倍率：重型鱼雷 1.5、其余默认 1 */
   er?: number
   /** 命中**每个**敌人回氧（回旋鱼叉 = 1）。缺省 0 = 不回氧。V6.29 氧耦合 A */
@@ -130,6 +171,53 @@ export interface Echo {
   o2per?: number
   /** 连锁深度：共鸣腔生成的小回声 = 1；缺省 0 = 由武器直接投放。≥1 不再连锁。V6.33 */
   depth?: number
+}
+
+/**
+ * 气泡雷（V6.46 陷阱族）。
+ *
+ * ⚠️ 它是**全场唯一不索敌**的武器 —— 落点永远是**玩家当前位置**。
+ * 所以它的强度取决于"你往哪走"，而不是"它打谁"。**绝不能改成追踪雷**，
+ * 那就退化成第 8 把普通武器。
+ */
+export interface Mine {
+  x: number; y: number
+  /** 布防剩余（s）。> 0 时**不触发**，否则玩家一放下就自己踩炸 */
+  arm: number
+  /** 存活剩余（s）。归零自毁（**不爆**） */
+  life: number
+  dmg: number
+  /** 触发半径：敌人中心进入即爆 */
+  trig: number
+  /** 爆炸半径 */
+  r: number
+  /** 每炸到一个敌人回氧（氧气雷 2.5）。缺省 0 */
+  o2per: number
+  /** 单次爆炸的回氧总量上限（氧气雷 10）。`Infinity` = 不封顶 */
+  o2cap: number
+  /** 连锁：引爆邻近地雷的半径（连锁雷 90）。0 = 不连锁 */
+  chainR: number
+  alive: boolean
+}
+
+/**
+ * 生物光诱饵（V6.46 聚怪族）。
+ *
+ * 半径内的敌人把寻路目标改写成诱饵坐标（见 `world.enemyAim()`）。
+ * ⚠️ 投放位置是**敌人密度最高处**，不是最近敌人 —— 投在最近敌人身上没用，
+ *    它本来就在朝你来了。
+ */
+export interface Lure {
+  x: number; y: number
+  life: number
+  /** 吸引半径 */
+  r: number
+  /** 存活结束时是否自爆（爆炸诱饵） */
+  boom: boolean
+  dmg: number
+  /** 自爆半径 */
+  br: number
+  alive: boolean
 }
 
 /** 酸液云：在目标位置持续 3s，每 0.35s 结算一次伤害 */
@@ -237,15 +325,38 @@ export interface RelicDef {
 }
 
 /** 模拟对外抛出的**事件**（打击感/音效/HUD 由渲染层消费，不进入模拟域） */
+/**
+ * 伤害**来源**（V6.46）。模拟层本来不关心"谁打的"，但渲染层必须关心 ——
+ * 打击特效与击杀终结特效要按来源给不同形状，否则 11 把武器的命中反馈全一样。
+ *
+ * 缺省 `'bullet'`：枪弹 / 鱼叉 / 鱼雷这类"一颗东西飞过去打中"的通用情形。
+ * 只有**有明显视觉特征**的来源才单独列出 —— 列的越多，渲染层的分支越难维护。
+ */
+export type DamageCause =
+  | 'bullet'   // 枪弹 / 鱼叉 / 鱼雷直击（默认）
+  | 'pulse'    // 声呐波前（环形，无方向）
+  | 'arc'      // 链式电弧（折线）
+  | 'blast'    // 爆炸：鱼雷 / 回声 / 气泡雷 / 诱饵自爆
+  | 'burn'     // 灼烧持续伤害（电网）
+  | 'net'      // 网命中（低伤，但可能是最后一击）
+  | 'bite'     // 内讧撕咬（同类互咬）
+
 export type SimEvent =
-  | { t: 'hit'; x: number; y: number; r: number; color: number; crit: boolean; dmg: number; nx: number; ny: number }
-  | { t: 'kill'; x: number; y: number; r: number; color: number; kind: Kind }
+  | { t: 'hit'; x: number; y: number; r: number; color: number; crit: boolean; dmg: number; nx: number; ny: number; cause?: DamageCause }
+  | { t: 'kill'; x: number; y: number; r: number; color: number; kind: Kind; cause?: DamageCause }
+  /**
+   * 开火枪口（施法特效）。`fam` 决定画成什么形状 ——
+   * 同一个黄色小火花用在 11 把武器上，等于没有施法反馈。
+   */
+  | { t: 'muzzle'; x: number; y: number; ang: number; color: number; fam?: WeaponFamily; power?: number }
+  // ⚠️ **刻意没有 `charge`（前摇）事件**：蓄力进度完全可以从现成字段推出来 ——
+  //    `world.weapons[i].timer / ivLast` 就是"这一发还剩多久"。渲染层读它画收拢环即可，
+  //    模拟层不该为了表现再维护一份"我正在蓄力"的状态（两份状态必然会不一致）。
   | { t: 'pickup'; x: number; y: number; o2: number; coin: number }
   | { t: 'float'; x: number; y: number; text: string; color: number; size: number }
   | { t: 'playerHurt'; dirX: number; dirY: number; amount: number }
   | { t: 'dodge'; x: number; y: number }
   | { t: 'shake'; ms: number; intensity: number }
-  | { t: 'muzzle'; x: number; y: number; ang: number; color: number }
   | { t: 'burst'; x: number; y: number; r: number }
   /** 电弧折线（链式电弧）。点位只有模拟层知道，所以必须由事件带出来。 */
   | { t: 'arc'; pts: { x: number; y: number }[] }

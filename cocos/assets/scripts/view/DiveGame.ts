@@ -108,7 +108,7 @@ import {
 import { UI } from '../shared/theme'
 import { SUBS, getSub } from '../shared/subs'
 import type { SubId } from '../shared/subs'
-import type { SimEvent, InputState, Enemy, WeaponId } from '../shared/dive/types'
+import type { SimEvent, InputState, Enemy, WeaponId, WeaponFamily } from '../shared/dive/types'
 // 开局武器的默认值 & 候选清单（V6.41）。清单只有一份，在 shared 里 —— 见 loadout.ts 头注
 import { DEFAULT_START_WEAPON } from '../shared/dive/loadout'
 
@@ -124,7 +124,8 @@ interface Slash { x: number; y: number; ang: number; len: number; life: number; 
  * 枪口闪光要用它画朝弹道方向的锥形亮弧。缺了它这两个都退化成"圆点"，看不出方向。
  */
 interface Spark { x: number; y: number; vx: number; vy: number; life: number; maxLife: number; color: number; size: number; ang: number; kind: 'hit' | 'flash' }
-interface ArcFx { pts: Array<{ x: number; y: number }>; life: number }
+/** 折线残留。电弧（紫）与网目（玉/青）共用 —— 都是"几条折线段存活 0.2s" */
+interface ArcFx { pts: Array<{ x: number; y: number }>; life: number; color?: number; maxLife?: number }
 interface BlastFx { x: number; y: number; r: number; life: number }
 interface FloatFx { x: number; y: number; vy: number; life: number; text: string; color: number; size: number; delay: number; label: Label }
 interface Mote { x: number; y: number; r: number; vy: number }
@@ -991,24 +992,305 @@ export class DiveGame extends Component {
   }
 
   // =========================================================================
+  // 事件 → 表现（V6.46：打击 / 击杀 / 施法按**来源**分化）
+  // =========================================================================
+  /**
+   * 打击特效。
+   *
+   * **为什么必须分化**：V6.45 之前 11 把武器共用同一套
+   * `冲击环 + 斩击痕 + 4 颗火花`，只有暴击换色 —— 于是"被枪打中"和"被声呐扫到"
+   * 在屏幕上一模一样。打击感是这类游戏的主要爽点来源，一套反馈摊平用在所有武器上，
+   * 等于把"这把武器手感如何"这条信息整个删掉。
+   *
+   * ⚠️ 分化的是**形状语汇**，不是**图元数量**：每条分支都与原来**持平或更省**。
+   *    靠加粒子做区分会在满屏时糊成一团 —— 那正是"特效不够"的另一种表现。
+   * ⚠️ **暴击是覆盖式的**：不管什么来源，暴击一律换成紫罗兰 + 加大。
+   *    "这刀更重"这个信号优先于"这是什么武器打的"，两者冲突时前者赢。
+   */
+  private hitFx(ev: Extract<SimEvent, { t: 'hit' }>): void {
+    const ang = Math.atan2(-ev.ny, -ev.nx)
+    if (ev.crit) {
+      this.pushShock(ev.x, ev.y, ev.r * 1.5, 0.19, UI.violet, 2.8, ev.r, 1)
+      this.pushSlash(ev.x, ev.y, ang, 1.5, UI.violet)
+      this.pushSparks(ev.x, ev.y, ang, UI.violet, 7)
+      return
+    }
+    switch (ev.cause ?? 'bullet') {
+      case 'blast':
+        // 爆炸：**不画斩击痕** —— 爆炸没有来向，画了会读作"被刀砍了"。
+        // 换成双层同心环 + 无方向迸溅（那才是"被炸了"的形状语汇）。
+        this.pushShock(ev.x, ev.y, ev.r * 1.9, 0.22, ev.color, 2.4, ev.r * 0.85, 2)
+        this.pushRadialSparks(ev.x, ev.y, 5, 90, 120, 1.4, ev.color)
+        return
+      case 'pulse':
+        // 声呐：纯同心环。波前是从中心扫过来的，永远不可能有"来向"
+        this.pushShock(ev.x, ev.y, ev.r * 1.32, 0.2, 0x4fe8ff, 1.8, ev.r * 0.58, 1)
+        return
+      case 'arc':
+        // 电弧：沿来向拉一道**折线**残影 —— 链击的辨识度全在"电是折的"这件事上
+        this.arcs.push({
+          pts: [
+            { x: ev.x - Math.cos(ang) * ev.r * 2.4, y: ev.y - Math.sin(ang) * ev.r * 2.4 },
+            { x: ev.x - Math.cos(ang) * ev.r * 1.1 + ev.r * 0.35, y: ev.y - Math.sin(ang) * ev.r * 1.1 },
+            { x: ev.x, y: ev.y },
+          ], life: 0.14, maxLife: 0.18,
+        })
+        this.pushShock(ev.x, ev.y, ev.r * 1.1, 0.14, UI.violet, 1.6, ev.r * 0.5, 1)
+        return
+      case 'burn':
+        // 灼烧：只冒余烬，**环和斩都不画** —— DoT 每 0.35s 结算一次，
+        // 每次都画环会在敌人身上叠出一圈不散的亮圈，看着像"中了状态"而不是"在烧"
+        for (let i = 0; i < 2; i++) {
+          const a = -Math.PI / 2 + (Math.random() - 0.5) * 1.6
+          this.sparks.push({
+            x: ev.x + (Math.random() - 0.5) * ev.r, y: ev.y + (Math.random() - 0.5) * ev.r,
+            vx: Math.cos(a) * 26, vy: Math.sin(a) * 46,
+            life: 0.34, maxLife: 0.34, color: 0xff9a3c, size: 2, ang: a, kind: 'hit',
+          })
+        }
+        this.trimSparks()
+        return
+      case 'net':
+        // 网：十字**网目**（折线），加一圈小环 —— 控场武器的命中要读作"缠上了"
+        // 而不是"打疼了"。颜色也切开：玉/青，不是伤害色。
+        const rr = ev.r * 1.5
+        const ca = Math.cos(ang) * rr, sa = Math.sin(ang) * rr
+        this.arcs.push({
+          pts: [
+            { x: ev.x - ca - sa * 0.75, y: ev.y - sa + ca * 0.75 },
+            { x: ev.x, y: ev.y },
+            { x: ev.x + ca + sa * 0.75, y: ev.y + sa - ca * 0.75 },
+          ], life: 0.22, maxLife: 0.24, color: UI.jade,
+        })
+        this.arcs.push({
+          pts: [
+            { x: ev.x - ca + sa * 0.75, y: ev.y - sa - ca * 0.75 },
+            { x: ev.x, y: ev.y },
+            { x: ev.x + ca - sa * 0.75, y: ev.y + sa + ca * 0.75 },
+          ], life: 0.22, maxLife: 0.24, color: UI.jade,
+        })
+        return
+      case 'bite':
+        // 内讧撕咬：品红。**不与玩家造成的伤害共用颜色** ——
+        // 玩家要能区分"这是我打的"和"它们在自相残杀"，否则会以为自己漏了输出。
+        this.pushShock(ev.x, ev.y, ev.r * 1.15, 0.14, 0xff4fd8, 1.8, ev.r * 0.48, 1)
+        this.pushSparks(ev.x, ev.y, ang, 0xff4fd8, 3)
+        return
+      default:
+        // 弹丸（枪弹 / 鱼叉 / 鱼雷直击）：方向感最完整的一套，保持不变
+        this.pushShock(ev.x, ev.y, ev.r * 1.35, 0.17, 0xdff4ff, 1.8, ev.r * 0.62, 1)
+        this.pushSlash(ev.x, ev.y, ang, 1, ev.color)
+        this.pushSparks(ev.x, ev.y, ang, ev.color, 4)
+        return
+    }
+  }
+
+  /**
+   * 击杀特效。基础层（双层冲击环 + 径向迸溅 + 位图碎块）保留，
+   * 在其上按**死因**补一条"终结语汇"（V6.46）。
+   *
+   * 为什么不只按 `kind` 分：原来只有"boss 大一点"，于是"被炸死"和"被电死"
+   * 结束得一模一样。击杀是玩家获得反馈最密集的时刻，死因不同却终结相同，
+   * 会让"我换了一把武器"这件事在视觉上失去重量。
+   */
+  private killFx(ev: Extract<SimEvent, { t: 'kill' }>): void {
+    const boss = ev.kind === 'boss'
+    this.pushShock(ev.x, ev.y, ev.r * (boss ? 4.2 : 2.6), boss ? 0.5 : 0.32,
+      ev.color, boss ? 4 : 2.6, ev.r * (boss ? 1.5 : 1), 2)
+    this.pushShock(ev.x, ev.y, ev.r * (boss ? 2.6 : 1.7), boss ? 0.32 : 0.2,
+      0xffffff, boss ? 3 : 2, ev.r * (boss ? 0.9 : 0.62), 1)
+    this.pushRadialSparks(ev.x, ev.y, boss ? 26 : 8 + Math.round(ev.r * 0.25),
+      boss ? 200 : 120, boss ? 280 : 160, boss ? 2.4 : 1.6, ev.color)
+    this.pushFxBit(ev.x, ev.y, ev.kind, ev.r)
+
+    // 终结语汇：按死因补一条。每一条都只加 1–2 个图元
+    switch (ev.cause ?? 'bullet') {
+      case 'blast':
+        // 炸死：补一圈**外扩**的冲击（爆炸应有余波），无方向
+        this.pushShock(ev.x, ev.y, ev.r * (boss ? 3.4 : 2.0) * 1.5, boss ? 0.34 : 0.24,
+          0xffd166, boss ? 2.4 : 1.8, 0, 1)
+        break
+      case 'arc':
+        // 电死：四条短折线向外炸开（"被电散了"）
+        for (let k = 0; k < 4; k++) {
+          const a = (k / 4) * Math.PI * 2 + Math.random() * 0.6
+          const r0 = ev.r * 0.5, r1 = ev.r * (1.6 + Math.random() * 1.2)
+          this.arcs.push({
+            pts: [
+              { x: ev.x + Math.cos(a) * r0, y: ev.y + Math.sin(a) * r0 },
+              { x: ev.x + Math.cos(a) * (r0 + r1) * 0.55 + Math.cos(a + 1.2) * ev.r * 0.4,
+                y: ev.y + Math.sin(a) * (r0 + r1) * 0.55 + Math.sin(a + 1.2) * ev.r * 0.4 },
+              { x: ev.x + Math.cos(a) * r1, y: ev.y + Math.sin(a) * r1 },
+            ], life: 0.16, maxLife: 0.18,
+          })
+        }
+        break
+      case 'burn':
+        // 烧死：余烬**上飘**（唯一一条带方向的死法语汇 —— "烧完会升起来"）
+        for (let i = 0; i < 6; i++) {
+          const a = -Math.PI / 2 + (Math.random() - 0.5) * 2.4
+          const sp = 40 + Math.random() * 60
+          this.sparks.push({
+            x: ev.x + (Math.random() - 0.5) * ev.r, y: ev.y + (Math.random() - 0.5) * ev.r,
+            vx: Math.cos(a) * sp * 0.4, vy: Math.sin(a) * sp,
+            life: 0.5, maxLife: 0.5, color: 0xff9a3c, size: 1.8 + Math.random() * 1.4,
+            ang: a, kind: 'hit',
+          })
+        }
+        this.trimSparks()
+        break
+      case 'bite':
+        // 被同类咬死：品红双环（"这不是你干的"）
+        this.pushShock(ev.x, ev.y, ev.r * 1.5, 0.22, 0xff4fd8, 2, 0, 2)
+        break
+      case 'net':
+        // 网死：一圈收拢的网目（线**向内**收，与爆炸相反）
+        for (let k = 0; k < 3; k++) {
+          const a = (k / 3) * Math.PI * 2 + 0.4
+          const r1 = ev.r * 1.8
+          this.arcs.push({
+            pts: [
+              { x: ev.x + Math.cos(a) * r1, y: ev.y + Math.sin(a) * r1 },
+              { x: ev.x + Math.cos(a + 0.5) * ev.r * 0.6, y: ev.y + Math.sin(a + 0.5) * ev.r * 0.6 },
+              { x: ev.x + Math.cos(a + 1.0) * r1, y: ev.y + Math.sin(a + 1.0) * r1 },
+            ], life: 0.24, maxLife: 0.26, color: UI.jade,
+          })
+        }
+        break
+      case 'pulse':
+        // 声呐击杀：一圈干净的同心环（被"震散"的感觉，不带火）
+        this.pushShock(ev.x, ev.y, ev.r * 2.2, 0.26, 0x4fe8ff, 2, 0, 1)
+        break
+      default:
+        break   // 弹丸击杀：基础三层已经够了，不再叠（叠了会糊）
+    }
+  }
+
+  /**
+   * 施法特效（枪口）。按武器族给不同形状 —— V6.45 之前所有武器共用
+   * "一个黄色小闪光 + 3 颗火花"，于是加特林和满蓄重炮看起来一样大。
+   *
+   * `power` 由模拟层给（1 = 常规，2 = 重型，3 = 大招），只改尺寸不改形状：
+   * 形状认族、尺寸认威力，两条信息正交，不会互相干扰。
+   */
+  private muzzleFx(x: number, y: number, ang: number, color: number, fam?: WeaponFamily, power = 1): void {
+    const S = power >= 3 ? 1.9 : power >= 2 ? 1.4 : 1
+    switch (fam) {
+      case 'sonar':
+        // 声呐：**无方向**的爆闪环（波前从机体往外扩，没有"枪口方向"）
+        this.pushShock(x, y, 26 * S, 0.14, 0x4fe8ff, 2, 7 * S, 1)
+        this.pushRadialSparks(x, y, 3, 50, 60, 1.2, 0x4fe8ff)
+        return
+      case 'gun':
+        // 枪：尖头短闪 + 少量火花（原样，只把尺寸交给 S）
+        this.sparks.push({
+          x, y, vx: 0, vy: 0, life: 0.11, maxLife: 0.11,
+          color, size: 7 * S, ang, kind: 'flash',
+        })
+        for (let i = 0; i < (power >= 2 ? 6 : 3); i++) {
+          const a = ang + (Math.random() - 0.5) * 0.7
+          const sp = (70 + Math.random() * 90) * S
+          this.sparks.push({
+            x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+            life: 0.16, maxLife: 0.16, color, size: 1.4 + Math.random() * 1.2, ang: a, kind: 'hit',
+          })
+        }
+        this.trimSparks()
+        return
+      case 'torpedo':
+        // 鱼雷：**双层**——内冷焰 + 外压力环。发射管要有"喷出去"的推背感
+        this.sparks.push({
+          x, y, vx: 0, vy: 0, life: 0.16, maxLife: 0.16,
+          color: 0xfff0d0, size: 11 * S, ang, kind: 'flash',
+        })
+        this.pushShock(x, y, 22 * S, 0.18, color, 2.4, 0, 1)
+        for (let i = 0; i < 5; i++) {
+          const a = ang + (Math.random() - 0.5) * 0.42
+          const sp = 90 + Math.random() * 110
+          this.sparks.push({
+            x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+            life: 0.2, maxLife: 0.2, color, size: 1.8 + Math.random() * 1.4, ang: a, kind: 'hit',
+          })
+        }
+        this.trimSparks()
+        return
+      case 'harpoon':
+        // 鱼叉：**细长**的直线喷流（"一根东西穿出去"，不是一团火）。
+        // ⚠️ 用 4 颗沿弹道排列的高速火花拼出来，**不能**直接画到 `gFront` ——
+        //    那一层每帧 `clear()` 重画，直接画只会活一帧（16ms，看不见）。
+        for (let i = 0; i < 4; i++) {
+          const d = (4 + i * 8) * S
+          this.sparks.push({
+            x: x + Math.cos(ang) * d, y: y + Math.sin(ang) * d,
+            vx: Math.cos(ang) * 130, vy: Math.sin(ang) * 130,
+            life: 0.14, maxLife: 0.14,
+            color: i === 0 ? 0xffffff : color,
+            size: 2.6 - i * 0.4, ang, kind: 'hit',
+          })
+        }
+        this.trimSparks()
+        return
+      case 'echo':
+        // 回声：紫环**反向收拢**（它打的是"延迟爆发"，枪口该是"聚"不是"放"）
+        for (let k = 0; k < 3; k++) {
+          const rr = (30 - k * 8) * S
+          this.sparks.push({
+            x: x + Math.cos(ang) * rr, y: y + Math.sin(ang) * rr,
+            vx: 0, vy: 0, life: 0.14 + k * 0.03, maxLife: 0.2,
+            color: k === 1 ? 0xffffff : color, size: 5 * S, ang, kind: 'flash',
+          })
+        }
+        this.trimSparks()
+        return
+      case 'acid':
+        // 酸液：**锥形雾团**（喷嘴雾化，不是火光）
+        for (let i = 0; i < 4; i++) {
+          const a = ang + (Math.random() - 0.5) * 0.9
+          const d = 12 + Math.random() * 26
+          this.sparks.push({
+            x: x + Math.cos(a) * d, y: y + Math.sin(a) * d,
+            vx: Math.cos(a) * 40, vy: Math.sin(a) * 40,
+            life: 0.3, maxLife: 0.3, color, size: 3 + Math.random() * 2.4, ang: a, kind: 'hit',
+          })
+        }
+        this.trimSparks()
+        return
+      case 'net':
+        // 网：三根**散开的细索**（枪口把网"射"出去，落点才张开）
+        for (let i = 0; i < 3; i++) {
+          const a = ang + (i - 1) * 0.24
+          this.sparks.push({
+            x, y, vx: Math.cos(a) * 150, vy: Math.sin(a) * 150,
+            life: 0.18, maxLife: 0.18, color, size: 1.6, ang: a, kind: 'hit',
+          })
+        }
+        this.trimSparks()
+        return
+      default:
+        // arc 与未知族：紫电火花
+        for (let i = 0; i < 5; i++) {
+          const a = ang + (Math.random() - 0.5) * 1.4
+          const sp = 90 + Math.random() * 120
+          this.sparks.push({
+            x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+            life: 0.15, maxLife: 0.15, color: 0xd8c4ff, size: 1.4, ang: a, kind: 'hit',
+          })
+        }
+        this.trimSparks()
+        return
+    }
+  }
+
+  // =========================================================================
   // 事件 → 表现
   // =========================================================================
   private handleEvent(ev: SimEvent): void {
     switch (ev.t) {
       case 'hit':
-        this.pushShock(ev.x, ev.y, ev.r * 1.35, 0.17, ev.crit ? UI.violet : 0xdff4ff,
-          ev.crit ? 2.6 : 1.8, ev.crit ? ev.r * 0.9 : ev.r * 0.62, 1)
-        this.pushSlash(ev.x, ev.y, Math.atan2(-ev.ny, -ev.nx), ev.crit ? 1.35 : 1, ev.crit ? UI.violet : ev.color)
-        this.pushSparks(ev.x, ev.y, Math.atan2(-ev.ny, -ev.nx), ev.color, ev.crit ? 6 : 4)
+        this.hitFx(ev)
         break
       case 'kill':
-        this.pushShock(ev.x, ev.y, ev.r * (ev.kind === 'boss' ? 4.2 : 2.6), ev.kind === 'boss' ? 0.5 : 0.32,
-          ev.color, ev.kind === 'boss' ? 4 : 2.6, ev.r * (ev.kind === 'boss' ? 1.5 : 1), 2)
-        this.pushShock(ev.x, ev.y, ev.r * (ev.kind === 'boss' ? 2.6 : 1.7), ev.kind === 'boss' ? 0.32 : 0.2,
-          0xffffff, ev.kind === 'boss' ? 3 : 2, ev.r * (ev.kind === 'boss' ? 0.9 : 0.62), 1)
-        this.pushRadialSparks(ev.x, ev.y, ev.kind === 'boss' ? 26 : 8 + Math.round(ev.r * 0.25),
-          ev.kind === 'boss' ? 200 : 120, ev.kind === 'boss' ? 280 : 160, ev.kind === 'boss' ? 2.4 : 1.6, ev.color)
-        this.pushFxBit(ev.x, ev.y, ev.kind, ev.r)
+        this.killFx(ev)
         break
       case 'pickup':
         // 拾取反馈原来只有 3 颗火花 —— 磁吸**收割一串**鱼骨时几乎看不见。
@@ -1020,7 +1302,7 @@ export class DiveGame extends Component {
         this.pushFloat(ev.x, ev.y, ev.text, ev.color, ev.size)
         break
       case 'muzzle':
-        this.pushMuzzle(ev.x, ev.y, ev.ang, ev.color)
+        this.muzzleFx(ev.x, ev.y, ev.ang, ev.color, ev.fam, ev.power ?? 1)
         break
       case 'burst':
         this.pushShock(ev.x, ev.y, ev.r, 0.4, UI.cyanHi, 3, ev.r * 0.12, 1)
@@ -1417,6 +1699,70 @@ export class DiveGame extends Component {
       this.gBack.line(0xc4fff0, 0.35, 1); this.gBack.strokeCircle(a.x, a.y, a.r)
     }
 
+    // ---- 气泡雷（V6.46 陷阱族）----
+    // ⚠️ **布防态与已激活态必须一眼可分** —— 玩家要靠它判断"现在踩上去会不会炸"
+    //    （布防中 0.4s 不炸，是"不炸自己脚"的机制保证）。所以未激活画暗壳 + 虚线圈，
+    //    激活后画亮球 + 呼吸光环。只用一个状态画，玩家永远在猜。
+    for (const m of w.mines) {
+      if (!m.alive) continue
+      const armed = m.arm <= 0
+      const breathe = 0.5 + 0.5 * Math.sin(w.t * 3.1 + m.x * 0.02)
+      if (!armed) {
+        // 布防中：暗壳 + 8 段虚线圈
+        this.gBack.fill(0x14232f, 0.8); this.gBack.fillCircle(m.x, m.y, 8)
+        this.gBack.line(0x4a7c91, 0.55, 1)
+        for (let k = 0; k < 8; k++) {
+          const a0 = (k / 8) * Math.PI * 2
+          this.gBack.arc(m.x, m.y, m.trig, a0, a0 + 0.34).stroke()
+        }
+      } else {
+        // 已激活：氧青球（三层）+ 呼吸光环 + 高光点（高光让它读作"球"不是"圈"）
+        this.gBack.fill(UI.cyanHi, 0.14 + 0.10 * breathe)
+        this.gBack.fillCircle(m.x, m.y, 14 + breathe * 2)
+        this.gBack.fill(UI.cyanHi, 0.52); this.gBack.fillCircle(m.x, m.y, 8.5)
+        this.gBack.line(UI.cyanHi, 0.24 + 0.16 * breathe, 1.5)
+        this.gBack.strokeCircle(m.x, m.y, 15 + breathe * 4)
+        this.gBack.fill(0xffffff, 0.85); this.gBack.fillCircle(m.x - 3, m.y - 3, 2.4)
+        // 连锁雷：把射程内的伙伴连起来 —— "它们是一串"必须画出来，
+        // 否则玩家只看到一排独立的雷，连锁炸开时会莫名其妙。
+        if (m.chainR > 0) {
+          this.gBack.line(UI.cyanHi, 0.3, 1.2)
+          for (const o of w.mines) {
+            if (o === m || !o.alive || o.arm > 0) continue
+            if (Math.hypot(o.x - m.x, o.y - m.y) <= m.chainR) this.gBack.strokeSeg(m.x, m.y, o.x, o.y)
+          }
+        }
+      }
+    }
+
+    // ---- 生物光诱饵（V6.46 聚怪族）----
+    for (const l of w.lures) {
+      if (!l.alive) continue
+      // 最后 0.6s 淡出：诱饵是"会消失的东西"，不能等它啪一下不见（那读作 bug）
+      const fade = Math.min(1, l.life / 0.6)
+      const breathe = 0.5 + 0.5 * Math.sin(w.t * 2.2 + l.x * 0.01)
+      // ① 吸引范围：16 段虚线圈。**必须画** —— 玩家要知道"怪会往哪跑"，
+      //    不画的话这把武器就变成"扔个球，看不出效果"
+      this.gBack.line(UI.amber, 0.17 * fade, 1)
+      for (let k = 0; k < 16; k++) {
+        const a0 = (k / 16) * Math.PI * 2
+        this.gBack.arc(l.x, l.y, l.r, a0, a0 + 0.2).stroke()
+      }
+      // ② 光球：三层同心 + 呼吸
+      this.gBack.fill(UI.amber, (0.09 + 0.07 * breathe) * fade); this.gBack.fillCircle(l.x, l.y, 32)
+      this.gBack.fill(UI.amber, (0.28 + 0.12 * breathe) * fade); this.gBack.fillCircle(l.x, l.y, 15)
+      this.gBack.fill(0xfff4d0, 0.88 * fade); this.gBack.fillCircle(l.x, l.y, 5.5)
+      // ③ 触须 ×6：长度与角度都带摆动 —— 「生物光」必须有生物感，
+      //    纯光球会读作"一个灯泡"，加触须才有"活的东西在发光"
+      this.gBack.line(UI.amber, 0.42 * fade, 1.4)
+      for (let k = 0; k < 6; k++) {
+        const a0 = (k / 6) * Math.PI * 2 + Math.sin(w.t * 1.4 + k * 1.1) * 0.13
+        const r1 = 15 + 22 + 11 * Math.sin(w.t * 2.4 + k * 1.7)
+        this.gBack.strokeSeg(l.x + Math.cos(a0) * 15, l.y + Math.sin(a0) * 15,
+          l.x + Math.cos(a0) * r1, l.y + Math.sin(a0) * r1)
+      }
+    }
+
     // ---- 鱼骨（击杀掉落 · 氧气 + 骨币）----
     // 旧版是「一个白点 + 一根斜线」：在暗海里既读不出"这是个能捡的东西"，更读不出是"鱼骨"。
     // 重画成**真鱼骨**（脊柱 + 4 对肋骨），整体吃 `b.rot` ——
@@ -1498,6 +1844,28 @@ export class DiveGame extends Component {
         // ③ 亮核 + 本色环
         neonCircle(this.gEnt, b.x, b.y, 2.6, c, { width: 1.6, alpha: 0.9, bloom: false })
         this.gEnt.fill(0xffffff, 1); this.gEnt.fillCircle(b.x, b.y, 1.7)
+      } else if (b.kind === 'net') {
+        // 网（V6.46）：飞行中是**收拢的网束**（3 道横索 + 收口目），
+        // 张开那一瞬由 `openNet` 抛的 `burst` 事件接管（渲染层画扩张环）。
+        // ⚠️ 收拢态不能画成"一个大网" —— 那会让玩家以为它在飞行途中就有判定范围。
+        const c = b.net === 'net_el' ? UI.violet : b.net === 'net_cv' ? UI.cyanHi : UI.jade
+        // ① 三道横索（越前越亮 = 有方向感）
+        for (let i = 0; i < 3; i++) {
+          const d = i * 5 - 5
+          this.gEnt.line(c, 0.72 - i * 0.18, 1.5)
+          this.gEnt.strokeSeg(b.x + ux * d + px2 * 5.5, b.y + uy * d + py2 * 5.5,
+            b.x + ux * d - px2 * 5.5, b.y + uy * d - py2 * 5.5)
+        }
+        // ② 收口网目（两条斜索收向头部）
+        this.gEnt.line(c, 0.45, 1)
+        for (const sgn of [-1, 1]) {
+          this.gEnt.strokeSeg(b.x + ux * 4 + px2 * sgn * 5.5, b.y + uy * 4 + py2 * sgn * 5.5,
+            b.x - ux * 10, b.y - uy * 10)
+        }
+        // ③ 拖尾绳
+        this.gEnt.line(c, 0.26, 1.2)
+        this.gEnt.strokeSeg(b.x - ux * 8, b.y - uy * 8, b.x - ux * 22, b.y - uy * 22)
+        this.gEnt.fill(0xffffff, 0.9); this.gEnt.fillCircle(b.x + ux * 4, b.y + uy * 4, 2)
       } else {
         // 鱼叉走同一套弹体轮廓，只是配色偏玉（jade）；鱼叉更快更细，观感对得上
         const c = b.kind === 'harpoon' ? UI.jade : UI.danger
@@ -1589,6 +1957,47 @@ export class DiveGame extends Component {
       // 发光核心：铁律，必须画在贴图之上
       this.gEnt.fill(body, 1)
       this.gEnt.fillCircle(e.x, e.y, 2)
+
+      // ---- V6.46 控制状态标记 ----
+      // 为什么要单独做这三个标记：控场型武器的**全部手感都在"我怎么知道它生效了"**。
+      // 打伤害的武器不需要状态标记（掉血条自己在说），但网 / 诱饵 / 策反不改血量，
+      // 没有标记时玩家的判断只能是"这条鱼好像慢了？" —— 那等于没做。
+      // 三种状态用**三种不同的形状语汇**（弧环 / 闪烁圈 / 双箭环），不靠颜色区分：
+      // 深海里颜色会被亮度压暗，形状不会。
+      if (e.slowT > 0) {
+        // 网住：断续弧环（6 段）+ 三条缠索。断续是"被缠住"而不是"套了个圈"的关键
+        const rr = e.r * 1.52
+        this.gEnt.line(UI.cyanHi, 0.62, 1.5)
+        for (let k = 0; k < 6; k++) {
+          const a0 = (k / 6) * Math.PI * 2 + w.t * 0.7
+          this.gEnt.arc(e.x, e.y, rr, a0, a0 + 0.52).stroke()
+        }
+        this.gEnt.line(UI.cyanHi, 0.34, 1)
+        for (let k = 0; k < 3; k++) {
+          const a0 = (k / 3) * Math.PI * 2 - w.t * 0.7
+          this.gEnt.strokeSeg(e.x + Math.cos(a0) * rr, e.y + Math.sin(a0) * rr,
+            e.x + Math.cos(a0) * e.r * 0.55, e.y + Math.sin(a0) * e.r * 0.55)
+        }
+      }
+      if (e.burnT > 0) {
+        // 灼烧：外圈橙弧按 18Hz 闪（**不填充** —— 实心圈会把鱼盖成一坨亮斑）
+        const fl = 0.34 + 0.32 * Math.sin(w.t * 18 + e.x * 0.05)
+        this.gEnt.line(UI.amber, fl, 2)
+        this.gEnt.strokeCircle(e.x, e.y, e.r * 1.3)
+        this.gEnt.line(0xff9a3c, fl * 0.7, 3)
+        this.gEnt.strokeCircle(e.x, e.y, e.r * 1.46)
+      }
+      if (e.charmT > 0) {
+        // 内讧：青色实环 + 两段**反向**品红弧（双箭头语汇 ⇒ "它在朝同伴去"）
+        const rr = e.r * 1.66
+        this.gEnt.line(UI.cyanHi, 0.78, 1.8)
+        this.gEnt.strokeCircle(e.x, e.y, rr)
+        this.gEnt.line(0xff4fd8, 0.92, 2.4)
+        for (let k = 0; k < 2; k++) {
+          const a0 = (k / 2) * Math.PI * 2 + w.t * 2.4
+          this.gEnt.arc(e.x, e.y, rr, a0, a0 + Math.PI * 0.62).stroke()
+        }
+      }
 
       // 受击白闪：只登记，绘制在 drawFx 开头（那才在鱼身之上）。
       // 透明度公式与 web 逐字一致：Clamp(flash / 0.09, 0, 1) * 0.62
@@ -1908,6 +2317,35 @@ export class DiveGame extends Component {
 
     // 发射器：嵌在挂点上，随索敌角旋转（子弹与枪口闪光也以它为准）
     this.drawEmitter(wp.id, cx, cy, ang, hot, fore)
+
+    // ---- V6.46 前摇蓄力环 ----
+    // 「施法特效不够」的真正解药**不是**开火时多画点东西，而是**让开火有预告**：
+    // 一个没有任何前摇的攻击，无论命中时多大特效，读起来都只是"突然发生了"。
+    //
+    // 只给长 CD 武器（`ivLast ≥ 1.4`：鱼雷 / 回声 / 诱饵）：它们每 1.5–2.4s 才打一发，
+    // 有足够时间铺这条预告；短 CD 武器（枪 0.11s、电弧 0.9s）加进去只会变成常亮噪声。
+    //
+    // ⚠️ 数据直接读 `wp.timer / wp.ivLast`，**模拟层不需要多维护一份"正在蓄力"状态** ——
+    //    两份状态迟早会不一致，而那种不一致不会有任何报错。
+    // ⚠️ 事件不能走 `pushShock`：那是"一次性扩散"的池，收拢环要**每帧**重画，
+    //    走池会每帧 push 一个、把 SHOCK_CAP 挤爆（症状是打击特效整体消失）。
+    if (wp.ivLast >= 1.4 && wp.fireFlash <= 0) {
+      const ready = 1 - Math.max(0, Math.min(1, wp.timer / wp.ivLast))
+      const WARM = 0.72                      // 最后 28% 的装填时间才进入预警窗口
+      if (ready > WARM) {
+        const p = (ready - WARM) / (1 - WARM)
+        const rr = 36 - p * 27               // 36 → 9：**向内收拢**才是"蓄力"的语汇
+        const mx = cx + Math.cos(ang) * pad
+        const my = cy + Math.sin(ang) * pad
+        this.gFront.line(WEAPON_DEF[wp.id].color, 0.20 + p * 0.62, 1.6 + p * 1.5)
+        this.gFront.strokeCircle(mx, my, rr)
+        if (p > 0.45) {
+          // 内环反向收（两环一正一反读作"在咬合"，单个环只读作"在缩"）
+          this.gFront.line(0xffffff, ((p - 0.45) / 0.55) * 0.5, 1)
+          this.gFront.strokeCircle(mx, my, rr * 0.52)
+        }
+      }
+    }
   }
 
   /**
@@ -2120,8 +2558,9 @@ export class DiveGame extends Component {
     }
 
     for (const a of this.arcs) {
-      const k = Math.max(0, a.life / 0.18)
-      this.gFront.line(0xa06bff, 0.9 * k, 3); this.gFront.strokePolyline(a.pts)
+      const k = Math.max(0, a.life / (a.maxLife ?? 0.18))
+      const c = a.color ?? 0xa06bff          // 缺省紫 = 电弧；网目自己带玉/青色
+      this.gFront.line(c, 0.9 * k, 3); this.gFront.strokePolyline(a.pts)
       this.gFront.line(0xffffff, 0.7 * k, 1.2); this.gFront.strokePolyline(a.pts)
     }
 

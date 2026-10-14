@@ -100,6 +100,38 @@ export const CARD_POOL: UpgradeDef[] = [
     cost: 70, apply: s => s.evolveWeapon('acid', 'acid_ra'),
     dead: s => !s.weapons.some(w => w.id === 'acid' && w.lvl >= 5) },
 
+  // —— V6.46 机制型武器：三把基础 + 六条进化（计划书 §5.2 点名、一直没做的那批）——
+  // ⚠️ 这九张卡的 `cost` 口径与既有的一致：基础 30~40，进化 66~74。
+  //    气泡雷的进化价给到 **74**（与 `echo_mu` 同级）—— 氧气雷是全场唯一
+  //    "不靠击杀也能回氧"的东西，它的价值高于面板 DPS。
+  { id: 'w_mine', name: '气泡雷', desc: '原地布雷 · 需预判走位', kind: 'weapon', family: 'mine',
+    cost: 34, apply: s => s.addWeapon('mine') },
+  { id: 'w_net', name: '网发射器', desc: '减速 50% · 伤害极低', kind: 'weapon', family: 'net',
+    cost: 32, apply: s => s.addWeapon('net') },
+  { id: 'w_lure', name: '生物光诱饵', desc: '聚怪 5s · 完全无伤', kind: 'weapon', family: 'lure',
+    cost: 30, apply: s => s.addWeapon('lure') },
+
+  { id: 'e_mine_ch', name: '进化 · 连锁雷', desc: '引爆邻近地雷 · 连环', kind: 'weapon', family: 'mine',
+    cost: 68, apply: s => s.evolveWeapon('mine', 'mine_ch'),
+    dead: s => !s.weapons.some(w => w.id === 'mine' && w.lvl >= 5) },
+  { id: 'e_mine_o2', name: '进化 · 氧气雷', desc: '爆炸回氧 · 伤害腰斩', kind: 'weapon', family: 'mine',
+    cost: 74, apply: s => s.evolveWeapon('mine', 'mine_o2'),
+    dead: s => !s.weapons.some(w => w.id === 'mine' && w.lvl >= 5) },
+
+  { id: 'e_net_el', name: '进化 · 电网', desc: '减速加深 · 附带灼烧', kind: 'weapon', family: 'net',
+    cost: 70, apply: s => s.evolveWeapon('net', 'net_el'),
+    dead: s => !s.weapons.some(w => w.id === 'net' && w.lvl >= 5) },
+  { id: 'e_net_cv', name: '进化 · 驯化网', desc: '策反敌人互斗 4s', kind: 'weapon', family: 'net',
+    cost: 74, apply: s => s.evolveWeapon('net', 'net_cv'),
+    dead: s => !s.weapons.some(w => w.id === 'net' && w.lvl >= 5) },
+
+  { id: 'e_lure_bo', name: '进化 · 爆炸诱饵', desc: '聚怪后自爆', kind: 'weapon', family: 'lure',
+    cost: 72, apply: s => s.evolveWeapon('lure', 'lure_bo'),
+    dead: s => !s.weapons.some(w => w.id === 'lure' && w.lvl >= 5) },
+  { id: 'e_lure_wl', name: '进化 · 光墙', desc: '三诱饵成排 · 吸引带', kind: 'weapon', family: 'lure',
+    cost: 70, apply: s => s.evolveWeapon('lure', 'lure_wl'),
+    dead: s => !s.weapons.some(w => w.id === 'lure' && w.lvl >= 5) },
+
   // —— 挂载位扩容卡（V6.6 / V6.10）：顺序很重要，必须先 5 再 6 ——
   { id: 't_slot5', name: '挂载扩容 I', desc: '座圈解锁第 5 座 · 尾侧新增炮位', kind: 'mount',
     cost: 55,

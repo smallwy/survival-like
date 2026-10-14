@@ -175,6 +175,19 @@ export const WEAPON_DEF: Record<WeaponId, {
   echo_fo: { name: '聚焦回声', desc: '大半径延时爆发 · 高伤',   iv: 2.20, dmg: 90, range: 520, color: UI.magenta },
   acid_fd: { name: '持久酸池', desc: '更大更久 · 池内省氧',     iv: 1.40, dmg: 6,  range: 380, color: UI.jadeHi },
   acid_ra: { name: '酸雨',     desc: '三池成排 · 封锁一线',     iv: 1.70, dmg: 5,  range: 460, color: UI.jadeHi },
+
+  // ---- V6.46 机制型武器（计划书 §5.2 点名、一直没做的那批）----
+  // ⚠️ `range` 对陷阱族**没有意义**：气泡雷落在自己脚下，不索敌。写 0 是给
+  //    UI 一个诚实的信号（索敌距离显示为"自机"），不是偷懒。
+  mine:    { name: '气泡雷',   desc: '原地布雷 · 需预判走位', iv: 0.55, dmg: 18, range: 0, color: UI.cyanHi },
+  mine_ch: { name: '连锁雷',   desc: '引爆邻近地雷 · 连环',   iv: 0.55, dmg: 15, range: 0, color: UI.cyanHi },
+  mine_o2: { name: '氧气雷',   desc: '爆炸回氧 · 伤害腰斩',   iv: 0.55, dmg: 11, range: 0, color: UI.jadeHi },
+  net:     { name: '网发射器', desc: '减速 50% · 伤害极低',   iv: 1.10, dmg: 8,  range: 400, color: UI.jade },
+  net_el:  { name: '电网',     desc: '减速加深 · 附带灼烧',   iv: 1.10, dmg: 6,  range: 400, color: UI.violet },
+  net_cv:  { name: '驯化网',   desc: '策反敌人互斗 4s',       iv: 1.10, dmg: 4,  range: 400, color: UI.cyanHi },
+  lure:    { name: '生物光诱饵', desc: '聚怪 5s · 完全无伤',  iv: 2.40, dmg: 0,  range: 300, color: UI.amber },
+  lure_bo: { name: '爆炸诱饵', desc: '聚怪后自爆',           iv: 2.40, dmg: 55, range: 300, color: UI.amber },
+  lure_wl: { name: '光墙',     desc: '三诱饵成排 · 吸引带',   iv: 2.40, dmg: 0,  range: 300, color: UI.amber },
 }
 
 /**
@@ -182,10 +195,16 @@ export const WEAPON_DEF: Record<WeaponId, {
  * DiveScene.ts:720-729
  */
 export function weaponFamily(id: WeaponId):
-  'sonar' | 'gun' | 'torpedo' | 'arc' | 'harpoon' | 'echo' | 'acid' {
+  'sonar' | 'gun' | 'torpedo' | 'arc' | 'harpoon' | 'echo' | 'acid'
+  | 'mine' | 'net' | 'lure' {
   if (id.startsWith('gun')) return 'gun'
   if (id.startsWith('torp')) return 'torpedo'
   if (id.startsWith('arc')) return 'arc'
+  // V6.46 三个新族。`mine_ch` / `net_cv` / `lure_wl` 都靠前缀归族 ——
+  // 所以它们的 id **必须**保持 `<族>_<后缀>` 形状（不能用别的命名习惯）。
+  if (id.startsWith('mine')) return 'mine'
+  if (id.startsWith('net')) return 'net'
+  if (id.startsWith('lure')) return 'lure'
   if (id === 'harpoon') return 'harpoon'
   if (id === 'echo') return 'echo'
   if (id === 'acid') return 'acid'
@@ -208,6 +227,10 @@ export const EVOLUTIONS: Record<string, [WeaponId, WeaponId]> = {
   harpoon: ['harp_tr', 'harp_cb'],
   echo: ['echo_mu', 'echo_fo'],
   acid: ['acid_fd', 'acid_ra'],
+  // V6.46：三把机制武器的分支。A 条深化机制本身，B 条换方向。
+  mine: ['mine_ch', 'mine_o2'],
+  net: ['net_el', 'net_cv'],
+  lure: ['lure_bo', 'lure_wl'],
 }
 
 /** 反查：某个进化形态是从哪把基础武器变来的。DiveScene.ts:754-760 */
