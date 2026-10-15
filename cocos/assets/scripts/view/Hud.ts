@@ -40,7 +40,7 @@ import { SpriteBank } from './art'
 import { UI, TXT, MENU, BRIGHT, TXT_LIGHT } from '../shared/theme'
 import {
   LAYERS, RELIC_SLOTS, STAT_META, STAT_CARD, STAT_CAP, WEAPON_DEF, CARD_WEAPON_ID,
-  O2, MAX_SEATS, BONE, weaponFamily, evolutionBase, RELIC_DEF, layerO2,
+  O2, MAX_SEATS, BONE, weaponFamily, evolutionBase, RELIC_DEF, layerO2, EVOLUTIONS,
   SEAT_MOUNTS, MOUNT_BASE_R, HULL_H, SUB_D, BASE_SEATS,
 } from '../shared/dive/tables'
 import type { DiveWorld } from '../shared/dive/world'
@@ -88,20 +88,26 @@ export const FS = {
 } as const
 
 /**
- * **换带压条的几何**（V6.81，实机 px）。
+ * **换带提示条的几何**（V6.82 从"通栏压条"改成"居中浮条"）。
  *
- * 为什么是"上 1/5"：HUD 布局里
- *   · 氧气条      y  28~42（顶部居中 x 360~690）
- *   · 波次/倒计时  y  22~125（x 760~900）
- *   · 鱼情雷达    圆 x 1106~1282 / y 110~286
- *   · **战场**    y 150~380 / x 60~1050（自机 + 鱼群）
- * ⇒ `y 150~242 / x 24~1080` 与上面三块**零重叠**，且只吃掉战场最上面的一条。
- * ⛔ 旧版入场卡在**屏幕正中**（`H/2`），正好糊在自机上 —— 这是本次改动的直接动因。
+ * 用户 2026-10-15 两条：
+ *   · 「这个需要高一点」 ⇒ `BAND_Y` 150 → 96；
+ *   · 「这个太长了吧 一个提示不应该**适中**提示然后**渐变消失**吗」
+ *     ⇒ 通栏（`x24~1080`，1056px）收成 **620×78 居中浮条**，
+ *       并且从"整条硬边到点消失"改成**最后 1.0s 渐隐**（原来只有 0.40s）。
+ *
+ * 为什么原来会是通栏：V6.81 我把"屏幕正中的入场大卡"降级成"上 1/5 压条"，
+ * 只解决了"挡住战场"，没解决"提示的**体量**应当是提示级的" —— 一条横跨全屏的
+ * 实心条读作"血条 / 加载条"，不读作"提示"。**信息量只有两行，却占了 1056px 宽。**
+ *
+ * 让位核算（实机 px，与原通栏同源）：
+ *   · 氧气条 y 28~42（居中 x 360~690）⇒ 条顶 96 起，不压；
+ *   · 波次块 x 760~900 / y 22~70     ⇒ 条右缘 962 与它同高时只到 y 174，无交叠；
+ *   · 鱼情雷达 x 1106 起            ⇒ 条右缘 962 < 1106，永久不相交。
  */
-const BAND_X0 = 24
-const BAND_X1 = 1080
-const BAND_Y = 150
-const BAND_H = 92
+const CARD_W = 620
+const CARD_Y = 96
+const CARD_H = 78
 
 /**
  * 估算一段文字的像素宽（CJK ≈ 字号，ASCII ≈ 0.6×字号）。
@@ -478,7 +484,13 @@ export class Hud {
   // -------------------------------------------------------------------------
   // 战斗 HUD
   // -------------------------------------------------------------------------
-  drawCombat(w: DiveWorld, cbs: { onPause?: () => void } = {}): void {
+  drawCombat(w: DiveWorld, cbs: {
+    onPause?: () => void
+    /** 当前展开的槽位说明卡（V6.82）；`null` / 缺省 = 收起 */
+    inspect?: { kind: 'seat' | 'relic'; i: number } | null
+    /** 点了某个座圈 / 遗物槽（再次点同一个 = 收起 —— 翻转由调用方做） */
+    onInspect?: (kind: 'seat' | 'relic', i: number) => void
+  } = {}): void {
     const W = this.W, H = this.H
     const L = LAYERS[w.layerIdx]
     const t = w.t
@@ -877,6 +889,12 @@ export class Hud {
         g.fillRect(ax + aw - 14, ay + 4, 7, 4)
         g.fillRect(ax + aw - 14, ay + 10, 7, 4)
       }
+      // ---- V6.82 说明卡热区（隐形，见 `BTN_HIT`）----
+      // 用户 2026-10-15 两次：「点击座圈那几个发射物没有出来说明这个发射物的信息 …遗物也是」。
+      // ⚠️ 与商店热区同一条铁律：**先申请热区、后申请真按钮**（按钮池的创建顺序
+      //    = 命中优先级）—— 本热区与后面那颗暂停键不相交，顺序无碍，但别倒置。
+      this.button(sx + sw / 2, seatY + sh / 2, sw, sh, '',
+        () => cbs.onInspect?.('seat', i), true, BTN_HIT)
     }
     this.text(24, seatY - 16, `座圈 ${w.weapons.length}/${slots}`,
       FS.body, w.weapons.length < w.maxWeapons ? TXT.dim : TXT.cyan)
@@ -919,6 +937,9 @@ export class Hud {
           // 顶部一条"生效"小条：条件触发的遗物必须常驻告知，不能只靠描边呼吸
           g.fill(UI.cyanHi, 0.9); g.fillRoundRect(rx + 5, sy + 1, rs - 10, 2.4, 1.2)
         }
+        // ---- V6.82 说明卡热区（与座圈同一套，见 ⑤）----
+        this.button(rx + rs / 2, sy + 5 + rs / 2, rs, rs, '',
+          () => cbs.onInspect?.('relic', i), true, BTN_HIT)
       }
       this.text(W - 92, sy - 16, `遗物 ${w.relics.length}/${RELIC_SLOTS}`, FS.body, TXT.dim, true)
     }
@@ -948,73 +969,157 @@ export class Hud {
       this.center(W / 2, 62, 'O₂ 告急', Math.round(16 + beat * 4), TXT.amber)
     }
 
-    // ===== ⑩ 换带压条（V6.81）=====
+    // ===== ⑩ 换带提示条（V6.81 立 · V6.82 收成居中浮条 + 渐隐）=====
     // 用户：「不同层之间的衔接没有做好 文字描述需要有UI概念图 给人一种兴奋感的提示吧」
-    //
-    // 旧版是 `520×140` 的实心板放在**屏幕正中**，两个问题：
-    //   ① 中央 y150~380 整块是战场（自机 + 鱼群）⇒ 卡片正糊在自机上；
-    //   ② 门控是 `w.layerCardT > 0 && L.mech` ⇒ **L1（没有机制）完全不显示**，
-    //      开局第一带没有任何"进入"的仪式感。
-    // 现在搬到上 1/5 的**压条**：不碰战场，且 L1 也出。
+    //      →「这个太长了…一个提示不应该适中提示然后渐变消失吗」。
     //
     // ★ 兴奋感来自四处（都是"能读到的量"，不是形容词）：
-    //   ① **深度区间**（`1,000 – 4,000 m`）—— 数字，不是名字；
+    //   ① **深度区间**（`0 – 200 m`）—— 数字，不是名字；
     //   ② **氧耗倍率**（`×1.80`）—— "这一层更难"的唯一显式信号（与左上面板**同一个
     //      `layerO2()`**，⛔ 不另算一份，否则两处会漂）；
-    //   ③ **端头竖条取该带 tint 提亮 38%** —— 与左侧深度计**同一套色**（不用学两套配色）；
+    //   ③ **端头竖条取该带 tint** —— 与左侧深度计**同一套色**（不用学两套配色）；
     //   ④ **入场高光**从左扫到右 —— 读作"扫描完成，新一层已确认"。
     //
-    // ⚠️ `layerCardT` 从 2.6 倒数（`world.ts:521/2460`）。这里**不复制那个 2.6**，
-    //   而是用 `cardPeak` 记住本轮见到过的最大值 ⇒ 只依赖 `layerCardT` 本身，
-    //   将来它改成 3.0 这条压条的滑入时长**自动跟着变**（写死 2.6 的话会静默错位）。
+    // ⚠️ `layerCardT` 从 2.6 倒数（`world.ts`）。这里**不复制那个 2.6**，
+    //   而是用 `cardPeak` 记住本轮见到过的最大值 ⇒ 只依赖 `layerCardT` 本身。
     if (w.layerCardT > 0) {
       if (w.layerCardT > this.cardPeak) this.cardPeak = w.layerCardT
       const el = this.cardPeak - w.layerCardT             // 已过时间
       const kIn = clamp01(el / 0.25)
       const tf = 1 - (1 - kIn) * (1 - kIn) * (1 - kIn)    // 滑入·缓出
-      const a = clamp01(Math.min(kIn, w.layerCardT / 0.40))
-      const by0 = BAND_Y - (1 - tf) * BAND_H
-      const by1 = by0 + BAND_H
+      // ★ 渐隐：**最后 1.0s** 才淡出（原来 0.40s —— 那是一记"啪"的消失，
+      //   不是"提示说完自己退场"）。2.6s 里前 1.6s 全亮、后 1.0s 线性淡出。
+      const a = clamp01(Math.min(kIn, w.layerCardT / 1.0))
+      const cx0 = (W - CARD_W) / 2
+      const by0 = CARD_Y - (1 - tf) * 24                  // 只上滑 24px（浮条不该整块冲进来）
       const edge = lerpColor(L.tint, 0xffffff, 0.38)
       // `Graphics` 收 0xRRGGBB（number），`Label` 收 '#rrggbb'（string）——
       // 同一个色要两份表示。⛔ 别在两处各写一个字面量，那样改一处必然漏一处。
       const edgeCss = `#${edge.toString(16).padStart(6, '0')}`
 
-      g.fill(MENU.page, 0.78 * a)
-      g.fillRect(BAND_X0, by0, BAND_X1 - BAND_X0, BAND_H)
-      g.line(UI.line, 0.85 * a, 1)
-      g.strokeSeg(BAND_X0, by0, BAND_X1, by0)
-      g.strokeSeg(BAND_X0, by1, BAND_X1, by1)
+      g.fill(MENU.page, 0.84 * a)
+      g.fillRoundRect(cx0, by0, CARD_W, CARD_H, 12)
+      g.line(UI.line, 0.9 * a, 1.2); g.strokeRoundRect(cx0, by0, CARD_W, CARD_H, 12)
       g.fill(edge, a)
-      g.fillRect(BAND_X0, by0, 3, BAND_H)
-      g.fillRect(BAND_X1 - 3, by0, 3, BAND_H)
+      g.fillRoundRect(cx0, by0, 3, CARD_H, 1.5)
+      g.fillRoundRect(cx0 + CARD_W - 3, by0, 3, CARD_H, 1.5)
 
       // 入场高光：一条 2px 竖线从左扫到右（0.30s，压在滑入之后）
       const hk = clamp01((el - 0.25) / 0.30)
       if (hk > 0 && hk < 1) {
         g.fill(UI.cyanHi, (1 - hk) * 0.85 * a)
-        g.fillRect(BAND_X1 - (BAND_X1 - BAND_X0) * hk, by0, 2, BAND_H)
+        g.fillRect(cx0 + CARD_W * hk, by0, 2, CARD_H)
       }
 
       // ---- 主行：层号 + 带名 + 副名 / 深度区间（右）----
-      const tx = BAND_X0 + 22
-      const ty = by0 + 14
+      const tx = cx0 + 20
+      const ty = by0 + 12
       this.text(tx, ty, `L${w.layerIdx + 1}`, FS.huge, edgeCss)
       this.text(tx + 42, ty, L.name, FS.huge, TXT.cyber)
       this.text(tx + 42 + L.name.length * FS.huge + 12, ty + 12, L.sub, FS.micro, TXT.mute)
-      this.text(BAND_X1 - 22, ty + 4,
+      this.text(cx0 + CARD_W - 20, ty + 4,
         `${L.depthTop.toLocaleString()} – ${L.depthBot.toLocaleString()} m`, FS.big,
         TXT.amber, true)
 
-      // ---- 次行：机制 + tip（截断防溢出）/ 氧耗（右）----
-      const sy = by0 + 54
+      // ---- 次行：机制 + tip（按可用宽截断）/ 氧耗（右）----
+      const sy = by0 + 48
+      const rightW = 184                                    // 「氧耗 ×1.80 · 静止 78s」这串
       if (L.mech) this.text(tx, sy, `◆ ${L.mech}`, FS.lead, TXT.amber)
-      this.text(tx + (L.mech ? 76 : 0), sy + 2, fitText(L.tip, FS.body, 690), FS.body, TXT.dim)
+      const tipX = tx + (L.mech ? 76 : 0)
+      this.text(tipX, sy + 2,
+        fitText(L.tip, FS.body, CARD_W - 40 - rightW - (L.mech ? 76 : 0)), FS.body, TXT.dim)
       const o2f = layerO2(w.layerIdx, w.st.o2Bonus, w.st.regen)
-      this.text(BAND_X1 - 22, sy + 1,
+      this.text(cx0 + CARD_W - 20, sy + 1,
         `氧耗 ×${o2f.drain.toFixed(2)} · 静止 ${Math.round(o2f.sec)}s`, FS.body, TXT.amber, true)
     } else {
       this.cardPeak = 0
+    }
+
+    // ===== ⑪ 槽位说明卡（V6.82）—— 最后画，压在一切 HUD 之上 =====
+    if (cbs.inspect) this.drawInspect(w, cbs.inspect)
+  }
+
+  /**
+   * **槽位说明卡**（V6.82）。点座圈 / 遗物槽 → 弹出这一件东西的说明。
+   *
+   * 用户 2026-10-15 两次：「点击座圈那几个发射物没有出来说明这个发射物的信息 …遗物也是」。
+   * 通用规则（三件套，每种槽位都照这个读法）：
+   *   ① **是什么** —— 名称 + 立绘/图标（与槽位/商店卡**同一张图**，见 V6.78 判据）；
+   *   ② **多强** —— 器械：单发伤害 / 间隔（含全部射速乘区后的 `ivLast`）/ 射程 / 等级点；
+   *      遗物：效果描述 + 代价 + 此刻是否生效；
+   *   ③ **往哪走** —— 基础形态标注"可进化为 X"，进化形态标注"由 X 进化"。
+   *
+   * 几何：卡 **344×138**，出现在槽位**正上方 12px**，x 向钳回屏内；槽位顶边到卡底
+   * 之间一枚小三角指针指回槽位（"这张卡说的是哪一个"）。收起：再点一次 / 点别的槽 / 8s。
+   */
+  private drawInspect(w: DiveWorld, ins: { kind: 'seat' | 'relic'; i: number }): void {
+    const W = this.W, H = this.H
+    const g = this.g
+    const CW = 344, CH = 138
+    // ---- 锚点（槽位矩形）----
+    let ax: number, ay: number, aw: number, ah: number
+    if (ins.kind === 'seat') { ax = 24 + ins.i * 100; ay = H - 56; aw = 88; ah = 52 }
+    else {
+      const rs = 34, rgap = 40
+      ax = W - 92 - RELIC_SLOTS * rgap + (rgap - rs) + ins.i * rgap
+      ay = H - 50 + 5; aw = rs; ah = rs
+    }
+    const x = Math.max(12, Math.min(W - CW - 12, ax + aw / 2 - CW / 2))
+    const y = ay - 12 - CH
+
+    g.fill(UI.panel, 0.96); g.fillRoundRect(x, y, CW, CH, 10)
+    g.line(UI.cyanDim, 0.9, 1.4); g.strokeRoundRect(x, y, CW, CH, 10)
+    // 指针：从卡底指回槽位（钳在槽口范围内）
+    const px0 = Math.max(x + 14, Math.min(x + CW - 14, ax + aw / 2))
+    g.fill(UI.panel, 0.96)
+    g.moveTo(px0 - 7, y + CH - 0.5); g.lineTo(px0 + 7, y + CH - 0.5); g.lineTo(px0, y + CH + 9)
+    g.close(); g.fillPath()
+
+    if (ins.kind === 'seat') {
+      const wp = w.weapons[ins.i]
+      if (!wp) return
+      const def = WEAPON_DEF[wp.id]
+      const st = w.weaponStats(wp.id, wp.lvl)
+      const iv = wp.ivLast || st.iv || def.iv
+      // ① 立绘窗（与座圈/商店卡同一张图 —— V6.78 判据）
+      g.fill(UI.abyss, 0.55); g.fillRoundRect(x + 12, y + 12, 100, 50, 7)
+      const sf = this.art.get('item_' + wp.id)
+      if (sf) this.putArt(x + 62, y + 37, 96, 46, sf)
+      else this.weaponIcon(wp.id, x + 62, y + 37, 26)
+      // ② 名称 + 等级
+      this.text(x + 124, y + 14, def.name, FS.title, TXT.cyber)
+      this.levelPips(x + 124, y + 40, wp.lvl, def.color)
+      // ③ 数值行：伤害 / 间隔（**ivLast** —— 含等级·座·遗物的全部乘区）/ 射程
+      this.text(x + 124, y + 58,
+        `单发 ${st.dmg.toFixed(1)} · 每 ${iv.toFixed(2)}s · 射程 ${Math.round(st.range)}`,
+        FS.body, TXT.dim)
+      this.text(x + 124, y + 78,
+        `秒伤 ≈ ${(st.dmg / Math.max(0.01, iv)).toFixed(1)}`, FS.body, TXT.amber)
+      // ④ 描述 + 进化去向
+      this.text(x + 12, y + 100, fitText(def.desc, FS.body, CW - 24), FS.body, TXT.dim)
+      const base = evolutionBase(wp.id)
+      if (base) this.text(x + 12, y + 120, `由 ${WEAPON_DEF[base].name} 进化而来`, FS.body, TXT.mute)
+      else if (EVOLUTIONS[wp.id]) {
+        const evos = (EVOLUTIONS[wp.id] as WeaponId[]).map(e => WEAPON_DEF[e].name).join(' / ')
+        this.text(x + 12, y + 120, fitText(`可进化为 ${evos}`, FS.body, CW - 24), FS.body, TXT.mute)
+      }
+    } else {
+      const id = w.relics[ins.i]
+      if (!id) return
+      const def = RELIC_DEF[id]
+      const live = w.relicActive(id)
+      // ① 图标（与槽位同一枚）
+      g.fill(UI.abyss, 0.5); g.fillRoundRect(x + 12, y + 12, 56, 56, 8)
+      this.relicIcon(id, x + 40, y + 40, 20)
+      // ② 名称 + 生效态
+      this.text(x + 82, y + 14, def.name, FS.title, live ? TXT.cyan : TXT.cyber)
+      if (live) this.text(x + CW - 14, y + 16, '生效中', FS.body, TXT.cyan, true)
+      // ③ 效果 + 代价
+      this.text(x + 82, y + 40, fitText(def.desc, FS.body, CW - 94), FS.body, TXT.dim)
+      if (def.cost2) this.text(x + 82, y + 60, fitText(`代价：${def.cost2}`, FS.body, CW - 94),
+        FS.body, TXT.amber)
+      this.text(x + 12, y + 100, fitText('条件触发的遗物满足条件时自动生效（槽框呼吸提示）',
+        FS.micro, CW - 24), FS.micro, TXT.mute)
     }
   }
 

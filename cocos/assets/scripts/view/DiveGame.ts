@@ -106,7 +106,7 @@ import { codexGains } from '../shared/dive/codex'
 import type { Profile } from '../shared/dive/profile'
 import {
   CAM_ZOOM, MOUNT_RING_R, SEAT_PORT_R, SEAT_MOUNTS, MAX_SEATS,
-  SLOT_HW, SLOT_HD,
+  SLOT_HW, SLOT_HD, TURRET_OUT,
   EMITTER_SIZE, SUB_D, HULL_H, BASE_SEATS, WEAPON_DEF,
   BONE, weaponFamily, LAYER_ECO, LAYERS,
 } from '../shared/dive/tables'
@@ -1058,6 +1058,12 @@ export class DiveGame extends Component {
   private paused = false
   /** 暂停菜单的二次确认态（点了「返回主界面」之后）—— 防误点丢一局 */
   private pauseConfirm = false
+  /**
+   * 当前查看中的槽位说明卡（V6.82）。`null` = 没有弹出。
+   * `inspectT` 是它已展开的秒数（8s 自动收起，见 `update`）。
+   */
+  private inspect: { kind: 'seat' | 'relic'; i: number } | null = null
+  private inspectT = 0
 
   // =========================================================================
   // 生命周期
@@ -1504,8 +1510,24 @@ export class DiveGame extends Component {
     this.drawFxBits()
 
     this.hud.begin()
+    // ---- 槽位说明卡（V6.82）：点座圈 / 遗物槽 → 弹出该件东西的信息 ----
+    // 用户 2026-10-15 两次：「点击座圈那几个发射物没有出来说明这个发射物的信息 …遗物也是」。
+    // 状态放这里而不是 Hud：超时归零需要 dt，而 Hud 是纯绘制器（只有 `cardPeak` 一个
+    // 例外）。8s 自动收起；再点同一槽 = 收起；点别的槽 = 换内容。
+    if (this.inspect) {
+      this.inspectT += dt
+      if (this.inspectT > 8 || !combat) this.inspect = null
+    }
     if (combat) {
-      this.hud.drawCombat(w, { onPause: () => this.togglePause(true) })
+      this.hud.drawCombat(w, {
+        onPause: () => this.togglePause(true),
+        inspect: this.inspect,
+        onInspect: (kind, i) => {
+          const cur = this.inspect
+          this.inspect = cur && cur.kind === kind && cur.i === i ? null : { kind, i }
+          this.inspectT = 0
+        },
+      })
     } else if (w.phase === 'shop') {
       this.hud.drawShop(w, {
         onBuy: i => w.buyCard(i),
@@ -3578,49 +3600,37 @@ export class DiveGame extends Component {
         // ④ 头部亮点（弹头必须是全屏最亮的东西之一 —— 那是"往哪打"的唯一指示）
         this.gEnt.fill(0xffffff, 0.95); this.gEnt.fillCircle(b.x + ux * 3.4, b.y + uy * 3.4, 2)
       } else if (b.kind === 'net') {
-        // 网（V6.46 / **V6.80 重做"抛出感"**）
-        // 用户 2026-10-15：「之前说的 丢渔网 应该是**抛出去** 捆住有一个受击特效」。
-        //   旧版飞行态 = 三道**垂直于弹道的固定横索** + 两条斜索 ⇒ 读作"一个标签牌在平移"，
-        //   有"位移"没有"抛"——因为没有**体积**、没有**角动量**、也没有**牵引**。
-        // ★ "抛出"的三条：
-        //   ① **团**：收拢的网兜本身要有体积（一个沿弹道略长的闭合兜），不是几条横线；
-        //   ② **翻卷**：网兜沿飞行方向**自转**（`b.life` 驱动）⇒ 有角动量才像被甩出去的；
-        //   ③ **牵引绳**：连着机体的那根绳**绷在后方** ⇒ 明确"这是我扔出去的"，
-        //      也顺带把"投掷者"和"投掷物"绑在一条线上。
-        //   ⚠️ 收拢态**不能画成"一张摊开的网"** —— 那会让玩家以为飞行途中就有判定范围
-        //      （判定在 `openNet` 张开那一瞬才成立，见 `world.openNet`）。
+        // 网（**V6.82 重做"飞行态"**）
+        // 用户 2026-10-15：「撒网**不要把那个不规则的网显示出来** 只显示击中时候的特效」。
+        //   V6.80 的"自转网兜 + 收口索 + 铅坠 + 牵引绳"在实机尺寸下就是一团
+        //   不规则的线 —— 玩家读不出"网"，只读出"一坨乱线在飞"。
+        //   而且**判定在 `openNet` 张开那一瞬才成立**（`world.openNet`），飞行途中
+        //   画成网反而让玩家以为路上就有判定范围。
+        // ⇒ 飞行态收敛成**一颗收拢的投掷物**（与商店卡 `fam === 'net'` 的"收拢网束"
+        //   同一读法）：小梭形 + 短拖尾；"网"的全部信息留给**命中那一瞬**的
+        //   张网特效（`case 'net'` 的网目弧）与捆住态的缠绕绳圈。
         const c = b.net === 'net_el' ? UI.violet : b.net === 'net_cv' ? UI.cyanHi : UI.jade
-        const spin = b.life * 7
-        const RW2 = 6.4, RL2 = 8.6                       // 兜的半宽 / 半长
-        const q8x: number[] = [], q8y: number[] = []
-        for (let i = 0; i < 8; i++) {
-          const th = (i / 8) * Math.PI * 2 + spin
-          const lx = Math.cos(th) * RL2, ly = Math.sin(th) * RW2
-          q8x.push(b.x + ux * lx - uy * ly)
-          q8y.push(b.y + uy * lx + ux * ly)
+        // ① 短拖尾（两层递减）
+        for (let i = 0; i < 2; i++) {
+          const L0 = 7 + i * 6, L1 = L0 + 7
+          neonLine(this.gEnt,
+            b.x - ux * L0, b.y - uy * L0, b.x - ux * L1, b.y - uy * L1,
+            c, { width: 2.6 - i * 0.8, alpha: 0.7 / (i + 1.3), bloom: false })
         }
+        // ② 收拢的网束：沿弹道略长的实心梭形（有体积，不是一条线）
+        const NL = 7.5, NW = 3.4
         const pouch = () => {
-          this.gEnt.moveTo(q8x[0], q8y[0])
-          for (let i = 1; i < 8; i++) this.gEnt.lineTo(q8x[i], q8y[i])
+          this.gEnt.moveTo(b.x + ux * NL, b.y + uy * NL)
+          this.gEnt.lineTo(b.x - uy * NW, b.y + ux * NW)
+          this.gEnt.lineTo(b.x - ux * NL * 0.7, b.y - uy * NL * 0.7)
+          this.gEnt.lineTo(b.x + uy * NW, b.y - ux * NW)
           this.gEnt.close()
         }
-        // ③ 牵引绳（先画，压在兜下面）
-        this.gEnt.line(c, 0.28, 1.2)
-        this.gEnt.strokeSeg(b.x - ux * 8, b.y - uy * 8, b.x - ux * 30, b.y - uy * 30)
-        // ① 网兜（半透填充 = 有体积）
-        this.gEnt.fill(c, 0.22); pouch(); this.gEnt.fillPath()
-        this.gEnt.line(c, 0.85, 1.5); pouch(); this.gEnt.stroke()
-        // 收口索：八条从兜缘收向中心 ⇒ 读作"被绳子收着的兜"，不是"一个圈"
-        this.gEnt.line(c, 0.42, 0.9)
-        for (let i = 0; i < 8; i++) {
-          this.gEnt.strokeSeg(b.x + (q8x[i] - b.x) * 0.85, b.y + (q8y[i] - b.y) * 0.85,
-            q8x[i], q8y[i])
-        }
-        // ② 兜口的铅坠（配重块 —— 抛出物的"头"，也是它最先下沉的地方）
-        this.gEnt.fill(shade(c, 1.25), 0.95)
-        this.gEnt.fillCircle(b.x + ux * 6, b.y + uy * 6, 2.4)
-        this.gEnt.fill(0xffffff, 0.9)
-        this.gEnt.fillCircle(b.x + ux * 6.5, b.y + uy * 6.5, 1.1)
+        this.gEnt.fill(c, 0.30); pouch(); this.gEnt.fillPath()
+        neon(this.gEnt, c, () => { pouch(); this.gEnt.stroke() },
+          { width: 1.4, alpha: 0.95, bloom: false })
+        // ③ 头部亮点（"往哪扔"的唯一指示）
+        this.gEnt.fill(0xffffff, 0.9); this.gEnt.fillCircle(b.x + ux * 4, b.y + uy * 4, 1.6)
       } else if (b.kind === 'torpedo') {
         // ---- 追踪鱼雷（V6.80 重做）----
         // 用户 2026-10-15：「追踪鱼雷 红色有点突兀 而且这个三角形也不合适吧 不应该是个鱼雷状么」
@@ -4630,7 +4640,13 @@ export class DiveGame extends Component {
         g.stroke()
         // ⛔ V6.76 **不给"可装"加呼吸光**（试过 `fCircle(PR*2.1)` + 呼吸 α）：
         //    那是**又一层画上去的东西**，在 3.2× 验收图里读作"艇身上糊了一块灰斑"，
-        //    正是用户这轮要消灭的观感。空座的信息量已经够：**槽（图上）+ 槽底内孔**。      } else {
+        //    正是用户这轮要消灭的观感。空座的信息量已经够：**槽（图上）+ 槽底内孔**。
+        //
+        // ⛔ V6.82 修一个**被注释吞掉的分支**：这一行行尾原来写着 `      } else {`，
+        //    它落在 `//` 之后 ⇒ `else` 整个失效 —— 后果是「已解锁空座把封板也画一遍」
+        //    （内孔被板盖住，读作这个座封死了）、而「真正未解锁的座什么都不画」
+        //    （养成线还差两个孔的广告位消失）。tsc 不报错（括号仍配平）。
+      } else {
         // ---- ③ 未解锁：**齐平封板**（正好填掉位图上的那个槽）----
         // ⚠️ 外缘只溢 0.4px：位图上的槽是像素级的，不留余量会在板边露出一圈暗缝
         //    （读作"没盖严"）；溢多了又变成凸起（试过 0.6 就已经浮在艇缘之上）。
@@ -4696,7 +4712,9 @@ export class DiveGame extends Component {
     //    尾端 = `rOut − 0.58×EMITTER_SIZE = 6.3 − 10.4 = −4.1`，而槽底在 `−SLOT_HD = −6`
     //    ⇒ **尾巴落在槽里**（这正是"插进去"的机械依据）。再来一次：改 `SLOT_HD` 或
     //    `EMITTER_SIZE` 都要重核这个不等式。
-    const rOut = RR * 0.90
+    // ⚠️ V6.82：`rOut` 改用共享常量 `TURRET_OUT` —— sim 的出弹点（`world` 的
+    //    `OUT_Y`）与这里的转座心**必须同源**，否则子弹从炮管旁边飞出来。
+    const rOut = TURRET_OUT * (ext ? 1.10 : 1)
 
     // ---- ① 柱脚：从**槽底**长到转座的一段低矮基座 ----
     //  V6.76 **删掉了 V6.74 的"安装底板"**（`MOUNT_BASE_R = 15` 的梯形悬臂台）：
@@ -4740,8 +4758,13 @@ export class DiveGame extends Component {
     //  耳轴 = 转座两侧那对横向短轴，最直接地说明"这是能转的"。
     //  ⚠️ 转座不能直接落在座心：那样柱脚只剩 0 高、槽被盖死，"装在槽里"读不出来。
     //     外移量见上面 `rOut` 的推导。
-    const rx = cx + Math.cos(ang) * fore
-    const ry = cy + sgn * rOut + Math.sin(ang) * fore
+    // ⚠️ V6.82 **转座心不再吃 `fore`**：`drawEmitter` 内部已经统一加了 `fore`
+    //    （`P` / `ox` / `bs` 都以传入的 cx,cy 为基准再偏移），而这里 `rx,ry` 又加一次
+    //    ⇒ 后坐位移被算了**两遍**（开火瞬间炮口后退 ~11px，子弹却出现在未后退的
+    //    位置 —— 用户说的"出弹口没对准炮口"有一半是这条）。现在转座静止、
+    //    只有炮管/机匣以 1× 后坐。
+    const rx = cx
+    const ry = cy + sgn * rOut
     // ⛔ V6.77 **删掉那圈近白整圆**（用户原话：「还是有一层白圈呢」）。
     //    旧写法 `g.line(metal, …); g.strokeCircle(rx, ry, RR)` 给转座描了一圈亮边 ——
     //    闭合 + 极亮 ⇒ 读作"UI 框"；而且发射器画在它上面只会露出一牙白月牙。
@@ -4794,19 +4817,22 @@ export class DiveGame extends Component {
       const WARM = 0.72                      // 最后 28% 的装填时间才进入预警窗口
       if (ready > WARM) {
         const p = (ready - WARM) / (1 - WARM)
-        const rr = 36 - p * 27               // 36 → 9：**向内收拢**才是"蓄力"的语汇
-        // ⚠️ V6.76：基准从"座心 + 固定 15px"改成"**转座心 + 一个转座半径的量**" ——
-        //    炮座整体下沉进槽之后，蓄力环若还挂在旧半径上就会**离开炮口**飘在半空。
-        const chR = RR * 1.15
+        // ⛔ V6.82 **删掉两道收拢圆环**（用户 2026-10-15 实机截图圈出「莫名的绘制体」）：
+        //    闭合亮环 = "UI 框"的语汇（铁规 14），而且颜色取 `WEAPON_DEF.color`
+        //    —— 回声炮是 `UI.magenta`，那是**敌人**的语汇（见 `theme.ts` ①），
+        //    挂在自己炮口上读不出任何含义。与精英黄圈 / 定身青环**同一根因**。
+        // ⇒ 改成**画在炮口自己身上**的充能柔光（与 `drawLamp` 同一手法：
+        //    同心圆由外向内叠、**没有任何轮廓线**），越接近发射越亮越大。
+        //    位置 = 炮口（`rx` 现在就是转座心 ⇒ 炮口 = 沿 aim 再伸 `MUZ`≈管长 12.24）。
+        const chR = EMITTER_SIZE * 0.71
         const mx = rx + Math.cos(ang) * chR
         const my = ry + Math.sin(ang) * chR
-        this.gFront.line(WEAPON_DEF[wp.id].color, 0.20 + p * 0.62, 1.6 + p * 1.5)
-        this.gFront.strokeCircle(mx, my, rr)
-        if (p > 0.45) {
-          // 内环反向收（两环一正一反读作"在咬合"，单个环只读作"在缩"）
-          this.gFront.line(0xffffff, ((p - 0.45) / 0.55) * 0.5, 1)
-          this.gFront.strokeCircle(mx, my, rr * 0.52)
-        }
+        const cc = WEAPON_DEF[wp.id].color
+        const gr = 2.6 + p * 4.4
+        this.gFront.fill(cc, 0.10 * p); this.gFront.fillCircle(mx, my, gr * 2.3)
+        this.gFront.fill(cc, 0.22 * p); this.gFront.fillCircle(mx, my, gr * 1.4)
+        this.gFront.fill(cc, 0.42 * p); this.gFront.fillCircle(mx, my, gr)
+        this.gFront.fill(0xffffff, 0.30 * p); this.gFront.fillCircle(mx, my, gr * 0.42)
       }
     }
   }

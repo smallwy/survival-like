@@ -40,7 +40,7 @@ import type {
 } from './types'
 import {
   O2, BONE_O2, PLAYER, WEAPON_DEF, STAT_CAP, NEW_STATS, RELIC_DEF, RELIC_SLOTS,
-  LAYERS, LAYER_WAVES, SEAT_MOUNTS, HULL_H, SUB_D, MOUNT_BASE_R,
+  LAYERS, LAYER_WAVES, SEAT_MOUNTS, HULL_H, SUB_D, MOUNT_BASE_R, TURRET_OUT,
   TURRET_SPIN, TURRET_OMEGA_IDLE, TURRET_OMEGA_TRACK, STREAK_MAX_LV,
   SEAT_SWAY_MAX, SEAT_SWAY_FOLLOW, SEAT_SWAY_DECAY,
   MAX_SEATS, BASE_SEATS, REROLL_BASE, REROLL_STEP, BONE, ENEMY_TEX, TEX_BASE_ROT, weaponFamily,
@@ -1908,6 +1908,10 @@ export class DiveWorld implements ShopTarget {
       //    即"出弹点落在炮管里、且不会落在安装件后面"这条不变式**仍然成立**，
       //    而弹道属于战斗手感 ⇒ 没有理由跟着视觉一起动（动了是行为变更，不是修正）。
       const MUZ = MOUNT_BASE_R * 0.85
+      // ★ V6.82 **法向偏移**：视图的炮管从**转座心**（座心 + `TURRET_OUT` 法向外移）
+      //   沿 aim 伸出 ⇒ 出弹点必须同源，否则子弹从炮管**旁边**飞出来
+      //   （用户 2026-10-15「子弹出口 没对准炮口」）。取值见 `tables.TURRET_OUT`。
+      const OUT_Y = pose ? (SEAT_MOUNTS[wi][1] < 0 ? -1 : 1) * TURRET_OUT : 0
 
       const fam = weaponFamily(w.id)
       const wcol = WEAPON_DEF[w.id].color
@@ -1929,7 +1933,7 @@ export class DiveWorld implements ShopTarget {
         const e = this.nearestEnemy(rng); if (!e) continue
         const base = pose ? pose.ang : Math.atan2(e.y - this.py, e.x - this.px)
         const ox = pose ? pose.x + Math.cos(base) * MUZ : this.px
-        const oy = pose ? pose.y + Math.sin(base) * MUZ : this.py
+        const oy = pose ? pose.y + OUT_Y + Math.sin(base) * MUZ : this.py
         const pellets = w.id === 'gun_sg' ? 5 : 1
         const spread = 0.36
         // V6.77d 弹道增压：**速度与寿命同乘 / 同除** ⇒ 射程 `rng` 不变，
@@ -1952,7 +1956,7 @@ export class DiveWorld implements ShopTarget {
         const e = this.nearestEnemy(rng); if (!e) continue
         const base = pose ? pose.ang : Math.atan2(e.y - this.py, e.x - this.px)
         const ox = pose ? pose.x + Math.cos(base) * MUZ : this.px
-        const oy = pose ? pose.y + Math.sin(base) * MUZ : this.py
+        const oy = pose ? pose.y + OUT_Y + Math.sin(base) * MUZ : this.py
         const pellets = w.id === 'torp_cl' ? 3 : 1
         const spread = 0.26
         // V6.77d 弹道增压。⚠️ 鱼雷的射程是**写死的 `life: 3.0` × 速度**（不是
@@ -1975,7 +1979,7 @@ export class DiveWorld implements ShopTarget {
         const e = this.nearestEnemy(rng); if (!e) continue
         const base = pose ? pose.ang : Math.atan2(e.y - this.py, e.x - this.px)
         const ox = pose ? pose.x + Math.cos(base) * MUZ : this.px
-        const oy = pose ? pose.y + Math.sin(base) * MUZ : this.py
+        const oy = pose ? pose.y + OUT_Y + Math.sin(base) * MUZ : this.py
         // V6.29 三重鱼叉：3 叉扇形；回旋鱼叉：单叉 + 到程掉头 + 命中回氧
         const pikes = w.id === 'harp_tr' ? 3 : 1
         const spread = 0.30
@@ -2016,7 +2020,7 @@ export class DiveWorld implements ShopTarget {
         }
         const base = pose ? pose.ang : Math.atan2(e.y - this.py, e.x - this.px)
         const ox = pose ? pose.x + Math.cos(base) * MUZ : this.px
-        const oy = pose ? pose.y + Math.sin(base) * MUZ : this.py
+        const oy = pose ? pose.y + OUT_Y + Math.sin(base) * MUZ : this.py
         this.emit({ t: 'muzzle', x: ox, y: oy, ang: base, color: wcol, fam: 'echo', power: big ? 3 : 2 })
       } else if (fam === 'acid') {
         const e = this.nearestEnemy(rng); if (!e) continue
@@ -2030,7 +2034,7 @@ export class DiveWorld implements ShopTarget {
         }
         const base = pose ? pose.ang : Math.atan2(e.y - this.py, e.x - this.px)
         const ox = pose ? pose.x + Math.cos(base) * MUZ : this.px
-        const oy = pose ? pose.y + Math.sin(base) * MUZ : this.py
+        const oy = pose ? pose.y + OUT_Y + Math.sin(base) * MUZ : this.py
         this.emit({ t: 'muzzle', x: ox, y: oy, ang: base, color: wcol, fam: 'acid' })
       } else if (fam === 'mine') {
         // 气泡雷：**落在自己脚下**，不索敌 —— 这是它与其他 10 把武器的根本区别。
@@ -2055,7 +2059,7 @@ export class DiveWorld implements ShopTarget {
         const e = this.nearestEnemy(rng); if (!e) continue
         const base = pose ? pose.ang : Math.atan2(e.y - this.py, e.x - this.px)
         const ox = pose ? pose.x + Math.cos(base) * MUZ : this.px
-        const oy = pose ? pose.y + Math.sin(base) * MUZ : this.py
+        const oy = pose ? pose.y + OUT_Y + Math.sin(base) * MUZ : this.py
         // 网是**慢速弹**（420，比枪弹 780 慢一半）⇒ 看得见飞出去的过程，
         // 才能预判"网要在哪张开"。这是控场武器该有的可读性。
         this.bullets.push({

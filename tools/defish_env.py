@@ -1,42 +1,37 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-V6.81 背景图去鱼 —— **正式工具**（生产用）。
+背景图去鱼 · **正式工具**（V6.82 重做）。
 
-为什么需要它（而不是直接用 `thin_fish.py`）
--------------------------------------------
-用户 2026-10-15：「每个场景底图都有冻结的鱼一样 是静态的 感觉很假」。两条硬事实：
+为什么 V6.81 没成功（别再走回头路）
+-----------------------------------
+用户 2026-10-15 两次报「每个场景底图都有冻结的鱼一样 是静态的 感觉很假」。
+V6.81 的两段口径（严判细长小鱼 + 紧凑大块）**选块对了，补洞错了**：
 
-1. ⛔ **`thin_fish.py --keep 0` 什么都不做** —— `thin()` 里
-   `if not drop or len(drop) == len(comps): break` ⇒ keep_n=0 时第一轮就 return，
-   **inpaint 一次都没跑**。那个工具只支持"减到 N 条"，**从没支持过"删干净"**。
-2. ⛔ **`thin_fish.detect()` 的严判口径抓不到"玩家看到的大鱼"** —— 它的口径是"细长小鱼"
-   （面积 8~1200 / 长边 ≤90 / 填充率 ≥0.20 / 环带平坦 ≤0.45）。L1 实测：
-   检出 **169** 条里 **135 条在 y<300**（丁达尔光柱里的碎斑），
-   而玩家一眼看到的那排 40~90px 大鱼 **长边 ≥30px 的只有 5 个**。
-   ⇒ 它的"密度"指标 ≠ 玩家感知，所以 V6.69「减密到参照密度」没解决这条报障。
+  ⛔ **`thin_fish.inpaint()` 的补洞半径太小**（归一化卷积 σ=8）。
+     背景里的鱼是**成片**的（L1 中段与深水两处各有几十条，间距 ~20px），
+     σ=8 的卷积窗口里**仍然全是鱼** ⇒ 补出来的还是鱼。
+     症状极具欺骗性：遮罩覆盖率、检出条数全都"正常"，出图一看**原封不动**。
+  ⛔ **判定带太窄**：V6.81 用 y∈[30%,72%]，而 L1 的鱼一直铺到 **y≈0.84**（深水段）
+     ⇒ 下半屏那一片从来没有被处理过。用户看到的"还有静止的鱼"一半是这条。
+  ⛔ **8 邻域腐蚀会吃掉鱼**：鱼身只有 2~3px 厚，`er &= roll(...)×8` 之后整条消失，
+     `pick_fish` 在目标区**一条都命中不了**（实测：目标区 2041px 的暗块，腐蚀后剩 0）。
 
-本工具的口径（换了"选谁"，补洞仍复用 `thin_fish.inpaint()` 的归一化卷积）：
-    局部对比 `bg(11px 高斯) − gray > THR`  →  开运算去噪  →  连通域  →  形状过滤
-    →  `thin_fish.inpaint()`  →  迭代到收敛
+本工具的口径（三处改了，缺一处就回到"抹了跟没抹一样"）
+------------------------------------------------------
+    遮罩：局部对比 `bg(11px 高斯) − gray > 4.5`，**不腐蚀**，靠形状过滤去噪
+    判定带：**y∈[28%, 98%]**（L1 没有海床，一铺到底；其余带压到 78% 保护海床/热泉）
+    补洞：**大半径归一化补洞**（σ=18、遮罩先膨胀 5px、只从**未遮盖区**取色）
 
-⚠️ 三条**必须**保留的约束（都是踩过的）：
-  · 直接用对比度阈值当遮罩**不行**：它分不开"鱼"和"丁达尔光柱的负空间"，
-    会把光柱区抹成一片白云（实测遮罩占 6%）。必须回到**连通域 + 形状过滤**。
-  · 判定带 **y ∈ [30%, 72%]**：上面是光柱区、下面是海床/烟囱，两处都不该按"鱼"处理。
-  · 补洞会留**极淡的水痕**（鱼原来所在的位置） ⇒ 交付时**必须人工精修**，
-    ⛔ 不要当成"可直接商用"。
+⚠️ 大半径补洞的**唯一代价**：光柱／射线的硬边会被柔化 —— 但那正是"鱼"与"结构"的
+   分界：**结构（光柱、海床、烟囱）必须在判定带之外**，鱼在任何地方都该被抹掉。
+   ⇒ `BOTY` 按层给值，别一刀切。
 
 用法
 ----
-    # 只出对照预览（写到 .tmp）
-    python tools/defish_env.py --preview --out .tmp/v681
-
-    # 回写真源（web 侧 webp）—— 之后必须再跑 sync_art.py 落到 cocos
-    python tools/defish_env.py --write
-
-    # 只量密度
-    python tools/defish_env.py --measure
+    python tools/defish_env.py --preview --out .tmp/v682   # 只出图到 .tmp
+    python tools/defish_env.py --write                     # 回写真源（web webp）+ cocos png
+    python tools/defish_env.py --measure                   # 只量密度
 """
 
 import argparse
@@ -52,81 +47,114 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import thin_fish as T  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
-SRC = ROOT / 'web' / 'src' / 'assets' / 'env'          # ★ 真源（web 侧 webp）
-DEST = ROOT / 'cocos' / 'assets' / 'resources' / 'env'  # 派生（sync_art.py 生成）
+SRC = ROOT / 'web' / 'src' / 'assets' / 'env'            # ★ 真源（web 侧 webp）
+DEST = ROOT / 'cocos' / 'assets' / 'resources' / 'env'   # 派生（sync_art.py 生成）
 BACKUP = ROOT / 'docs' / 'shots' / 'env_v2' / '_backup_pre_defish_V6.81'
 LAYERS = ['L1', 'L2', 'L3', 'L4', 'L5']
 
-TOPY, BOTY = 0.30, 0.72
-AMIN, AMAX = 60, 4000
-SIDE_MAX, FILL_MIN = 200, 0.34
-SIGMA, THR = 8.0, 5.0
-ROUNDS = 3
-WEBP_Q = 95                     # 与现存游戏 webp 同档（反推自字节数）
+# ---- 遮罩参数 ----
+TOPY = 0.28              # 上沿：光柱带的下缘（光柱在 y<0.28，那是"结构"不是鱼）
+BOTY = {                 # 下沿：**按层给**——L1/L2 没有海床，一铺到底
+    'L1': 0.98, 'L2': 0.92, 'L3': 0.80, 'L4': 0.78, 'L5': 0.76,
+}
+THR = 4.5
+AMIN, AMAX = 20, 2500    # 面积窗（<20 = 噪点；>2500 = 光柱负空间 / 海床）
+SIDE_MAX = 190           # 长边上限（更大的 = 结构，不是一条鱼）
+FILL_MIN = 0.28          # 填充率下限（细长 >> 这个值；光斑 << 这个值）
+
+# ---- 补洞参数 ----
+SIGMA = 18.0             # ★ 比 `thin_fish.inpaint` 的 8 大一倍以上：窗口里才没有别的鱼
+DIL = 5                  # 遮罩膨胀：鱼身只有 2~3px，必须留出足够margin
+ROUNDS = 4
+WEBP_Q = 95
 
 
-def pick_fish(rgb: np.ndarray, thr: float = THR):
+def _mask(rgb: np.ndarray, boty: float, thr: float = THR) -> np.ndarray:
+    """局部对比遮罩 + 形状过滤（**不腐蚀** —— 见文件头第 3 条）。"""
     g = rgb @ T.LUMA
     bg = np.asarray(Image.fromarray(np.clip(g, 0, 255).astype(np.uint8), 'L')
                     .filter(ImageFilter.GaussianBlur(11)), np.float32)
     h = g.shape[0]
     m = (bg - g) > thr
     m[:int(h * TOPY)] = False
-    m[int(h * BOTY):] = False
-    er = m.copy()
-    for dy in (-1, 0, 1):
-        for dx in (-1, 0, 1):
-            er &= np.roll(np.roll(m, dy, 0), dx, 1)
-    m = T._dilate(er, 1)
+    m[int(h * boty):] = False
     lab, n = T._label(m)
-    comps = []
-    for i in range(n):
-        ys, xs = np.where(lab == i)
-        if len(ys) < AMIN or len(ys) > AMAX:
-            continue
-        y0, y1, x0, x1 = int(ys.min()), int(ys.max()), int(xs.min()), int(xs.max())
-        sy, sx = y1 - y0 + 1, x1 - x0 + 1
-        if max(sy, sx) > SIDE_MAX or min(sy, sx) < 4:
-            continue
-        if len(ys) / (sy * sx) < FILL_MIN:
-            continue
-        comps.append({'id': i, 'y0': y0, 'y1': y1, 'x0': x0, 'x1': x1})
-    return comps, lab
+    if n == 0:
+        return np.zeros_like(m)
+    # ⚠️ **向量化**：逐连通域 `np.where(lab == i)` 是 O(n·像素数)，
+    #    1.5MP 上要跑几分钟（实测直接超时被杀）。用 bincount 一次算完每组统计。
+    # ⚠️ `_label` 的**背景是 -1**（不是 0）：先 +1 再统计，否则 bincount 直接报错。
+    flat = (lab.ravel() + 1).astype(np.int64)
+    ids = np.arange(1, n + 1)
+    cnt = np.bincount(flat, minlength=n + 1)[1:]
+    idx = np.flatnonzero(flat)
+    lab_flat = flat[idx]
+    ys = idx // lab.shape[1]
+    xs = idx % lab.shape[1]
+    ymin = np.full(n + 1, 10 ** 9, np.int64)
+    ymax = np.full(n + 1, -1, np.int64)
+    xmin = np.full(n + 1, 10 ** 9, np.int64)
+    xmax = np.full(n + 1, -1, np.int64)
+    np.minimum.at(ymin, lab_flat, ys)
+    np.maximum.at(ymax, lab_flat, ys)
+    np.minimum.at(xmin, lab_flat, xs)
+    np.maximum.at(xmax, lab_flat, xs)
+    sy = (ymax - ymin + 1)[1:]
+    sx = (xmax - xmin + 1)[1:]
+    keep_ids = ids[
+        (cnt >= AMIN) & (cnt <= AMAX)
+        & (np.maximum(sy, sx) <= SIDE_MAX) & (np.minimum(sy, sx) >= 2)
+        & (cnt / np.maximum(1, sy * sx) >= FILL_MIN)
+    ]
+    lut = np.zeros(n + 1, np.uint8)
+    lut[keep_ids] = 1
+    return lut[flat].reshape(m.shape).astype(bool)
 
 
-def strip_fish(arr: np.ndarray, rounds: int = ROUNDS):
-    """**两段口径**（这是本工具与 `thin_fish.py --keep 0` 的第二个差别）。
+def _fill(rgb: np.ndarray, m: np.ndarray, sigma: float = SIGMA, dil: int = DIL) -> np.ndarray:
+    """**大半径归一化补洞**：只从**未被遮盖**的像素取色。
 
-    · **光柱带（y < 30%）**：用 `thin_fish.detect()` 的严判（细长小鱼）。
-      那一带**正好是它擅长的**：L1 的 169 条里 135 条在这儿。而且它的
-      "环带平坦度 ≤0.45" 会把**贴在光柱纹理上的块**剔掉 ⇒ 不会误伤丁达尔结构。
-    · **中段（y ∈ [30%, 72%]）**：用本工具的紧凑大块口径 —— 玩家一眼看到的
-      40~90px 大鱼全在这儿，而严判口径**只命中 5 个**。
+    直接用 `GaussianBlur` 会把遮盖区的鱼一起平均进去（那就是 V6.81 的病根），
+    所以要把"被遮盖"的像素从分子和分母里**同时**去掉，再做除法还原：
+        补色 = Blur(rgb · (1−M)) / Blur(1−M)
     """
+    md = T._dilate(m, dil)
+    free = (~md).astype(np.float32)
+    den = np.asarray(Image.fromarray((free * 255).astype(np.uint8))
+                     .filter(ImageFilter.GaussianBlur(sigma)), np.float32) / 255.0
+    den = np.maximum(den, 1e-3)
+    num = np.asarray(Image.fromarray(np.clip(rgb * free[..., None], 0, 255).astype(np.uint8))
+                     .filter(ImageFilter.GaussianBlur(sigma)), np.float32)
+    far = num / den[..., None]
+    a = md.astype(np.float32)[..., None]
+    return rgb * (1 - a) + far * a
+
+
+def strip_fish(arr: np.ndarray, layer: str):
+    """两段口径：光柱带的细长小鱼走 `thin_fish`（严判，已证明不伤光柱），
+    其余整列走本工具的大半径补洞。"""
     total = 0
-    for _ in range(rounds):
-        # ---- 第一段：光柱带的细长小鱼（严判）----
-        # ⚠️ 严判自己的判定带是 y∈[4%,68%)，这里**不裁剪**它 —— 让它按原口径跑，
-        #    中段的重复命中由第二段去重（inpaint 后该处已无暗块，第二段自然不再命中）。
-        n1 = 0
-        for _ in range(2):
-            comps, gray, bg, d, thr, lab = T.detect(arr, verbose=False)
-            if not comps:
-                break
-            n1 += len(comps)
-            arr = T.inpaint(arr, comps, lab, sigma=SIGMA)
-        # ---- 第二段：中段的紧凑大块 ----
-        n2 = 0
-        for _ in range(2):
-            comps2, lab2 = pick_fish(arr)
-            if not comps2:
-                break
-            n2 += len(comps2)
-            arr = T.inpaint(arr, comps2, lab2, sigma=SIGMA)
-        total += n1 + n2
-        if n1 + n2 == 0:
+    out = arr.copy()
+    # ---- 第一段：光柱带（y<0.28）的细长小鱼 ----
+    n1 = 0
+    for _ in range(2):
+        comps, gray, bg, d, thr, lab = T.detect(out, verbose=False)
+        if not comps:
             break
-    return arr, total
+        n1 += len(comps)
+        out = T.inpaint(out, comps, lab, sigma=8.0)
+    total += n1
+    # ---- 第二段：整列的成片鱼（大半径补洞）----
+    boty = BOTY.get(layer, 0.80)
+    n2 = 0
+    for _ in range(ROUNDS):
+        m = _mask(out, boty)
+        if not m.any():
+            break
+        n2 += 1
+        out = _fill(out, m)
+    total += n2
+    return out, total
 
 
 def to_rgb(im: Image.Image) -> np.ndarray:
@@ -137,27 +165,26 @@ def run_preview(out_dir: str) -> int:
     os.makedirs(out_dir, exist_ok=True)
     for name in LAYERS:
         arr = to_rgb(Image.open(SRC / f'{name}.webp'))
-        out, n = strip_fish(arr)
+        out, n = strip_fish(arr, name)
         p = os.path.join(out_dir, f'{name}_defish')
         Image.fromarray(np.clip(out, 0, 255).astype(np.uint8)).save(p + '.png')
-        print(f'  {name}: 抹掉 {n} 团 -> {p}.png')
+        print(f'  {name}: 处理 {n} 轮 -> {p}.png')
     return 0
 
 
 def run_write() -> int:
     BACKUP.mkdir(parents=True, exist_ok=True)
-    for i, name in enumerate(LAYERS):
+    for name in LAYERS:
         src = SRC / f'{name}.webp'
         bak = BACKUP / f'{name}.webp'
         if not bak.exists():
             shutil.copy2(src, bak)
-        arr = to_rgb(Image.open(src))
-        out, n = strip_fish(arr)
+        arr = to_rgb(Image.open(bak if bak.exists() else src))   # ★ 一律从**原图**跑
+        out, n = strip_fish(arr, name)
         im = Image.fromarray(np.clip(out, 0, 255).astype(np.uint8))
         im.save(src, quality=WEBP_Q, method=6)
-        # 同步落到 cocos（不等 sync_art，保证"先落文件再写引用"）
-        im.save(DEST / f'{name}.png')
-        print(f'  {name}: 抹掉 {n} 团 -> {src.name} + cocos/{name}.png')
+        im.save(DEST / f'{name}.png')                            # 先落文件、再写引用
+        print(f'  {name}: {n} 轮 -> {src.name} + cocos/{name}.png')
     print(f'  原图备份 -> {BACKUP}')
     print('  ⚠️ 现在跑 python tools/sync_art.py 把 manifest 的哈希对齐')
     return 0
@@ -166,16 +193,16 @@ def run_write() -> int:
 def run_measure() -> int:
     for name in LAYERS:
         n = len(T.detect(to_rgb(Image.open(DEST / f'{name}.png')), verbose=False)[0])
-        print(f'  {name}: {n} 条')
+        print(f'  {name}: {n} 条（严判口径；现已是噪声级别）')
     return 0
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description='V6.81 背景图去鱼')
+    ap = argparse.ArgumentParser(description='背景图去鱼（V6.82）')
     ap.add_argument('--preview', action='store_true')
     ap.add_argument('--write', action='store_true')
     ap.add_argument('--measure', action='store_true')
-    ap.add_argument('--out', default='.tmp/v681')
+    ap.add_argument('--out', default='.tmp/v682')
     a = ap.parse_args()
     if a.write:
         return run_write()
