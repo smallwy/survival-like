@@ -58,6 +58,24 @@ ENV_TOL = (0, 40)              # 画布尺寸容差：不小于目标宽，高�
 LUMA_CUT = 90                  # 亮度分界（0-255）
 LUMA_MIN_PCT = 6.0             # ★ 亮于 LUMA_CUT 的像素占比下限（对压暗层有 50% 余量）
 SEAM_MAX_DIFF = 14.0           # 上下边缘的无缝判据：首行/末行逐列平均绝对差
+# ⛔ 只对**无地形带**成立（V6.68 修正）。有海床/地形的带（L3/L4）天然「上水+下床」，
+#    首末行必然不同色 —— 那不是缺陷。整图纵向滚动本身也已改成视差（背景不动）。
+SEAM_SKIP = {'L3', 'L4'}
+
+# ★ 亮度判据必须**分带**（V6.66 立，V6.68 落到脚本）：判据要匹配「光是怎么分布的」。
+#   ⛔ V6.58 的「每张 ≥6% 像素亮于 90」一刀切是错的 —— 强行提亮暗带会让水体变灰绿浑水、
+#      暗岩壁被照亮出噪点，「午夜带」当场变成「浑浊白天」，段感全丢。
+#   面光源(天光)  → 全画面亮部占比
+#   局部光源(荧光/热泉) → **峰值够亮 且 面积够**（两个都要，缺一个就是「要么不亮、要么一小坨」）
+#   稀疏微光(深渊雪) → 对比与结构（p50 够暗 + p99 够亮 = 有可辨的微光点）
+#   ⚠️ 阈值一律留 ±2 的噪声余量 —— 别把定性判据写成精确判据（FISH_CX 踩过同一个坑）。
+LUMA_BY_BAND = {
+    'L1': ('area', 40.0),            # 面光源：亮部占比 >= 40%
+    'L2': ('area', 12.0),
+    'L3': ('local', (130.0, 1.5)),   # 局部光源：p99 >= 130 且 亮部占比 >= 1.5%
+    'L4': ('local', (130.0, 1.5)),
+    'L5': ('sparse', (42.0, 55.0)),  # 稀疏微光：p50 <= 42 且 p99 >= 55
+}
 
 FISH_LONG = 512                # 长边（key_fish_bg.py --long 512）
 # 重心 x 区间 = 头朝左。**判据口径**：现有三张实测 42/42/46%，
@@ -105,6 +123,18 @@ def luma_stats(img: Image.Image, cut: int = LUMA_CUT):
     return bright, mean
 
 
+def luma_pct(img: Image.Image, q: float) -> float:
+    """亮度分位数（q 取 0~100）。用于**分带**亮度判据：局部亮区看 p98，深渊雪看 p50/p99。"""
+    h = img.convert('L').histogram()
+    t = sum(h) or 1
+    need, acc = t * q / 100.0, 0
+    for i, n in enumerate(h):
+        acc += n
+        if acc >= need:
+            return float(i)
+    return 255.0
+
+
 def edge_seam(img: Image.Image) -> float:
     """
     上下无缝判据：首行与末行逐列的平均绝对亮度差。
@@ -127,7 +157,7 @@ def row(name, tag, detail):
 # ---------------------------------------------------------------------------
 def check_env(quiet=False) -> int:
     print('=' * 78)
-    print('环境图 env  —— 判据：画布 / 体积 / 亮度红线 / 上下无缝')
+    print('环境图 env  —— 判据：画布 / 体积 / 亮度(分带) / 上下无缝(仅无地形带 L1/L2/L5)')
     print('=' * 78)
     fails = 0
     for d, label in ((ENV_SRC, '真源 webp'), (ENV_COC, 'cocos 副本')):
@@ -150,18 +180,41 @@ def check_env(quiet=False) -> int:
             mb = os.path.getsize(p) / 1e6
             bright, mean = luma_stats(img)
             seamed = edge_seam(img)
+            band = p.stem[:2]
 
             bad = []
             if w < ENV_TARGET[0] or abs(h - ENV_TARGET[1]) > ENV_TOL[1]:
                 bad.append(f'画布 {w}x{h} (目标 {ENV_TARGET[0]}x{ENV_TARGET[1]}±{ENV_TOL[1]})')
             if mb > ENV_MAX_MB:
                 bad.append(f'体积 {mb:.2f}MB > {ENV_MAX_MB}')
-            if bright < LUMA_MIN_PCT:
-                bad.append(f'亮度 {bright:.1f}% < {LUMA_MIN_PCT}%')
-            if seamed > SEAM_MAX_DIFF:
+
+            # ---- 亮度：分带判据（面光源 / 局部光源 / 稀疏微光）----
+            mode, thr = LUMA_BY_BAND.get(band, ('area', LUMA_MIN_PCT))
+            if mode == 'area':
+                if bright < thr:
+                    bad.append(f'亮度(面光源) 亮部 {bright:.1f}% < {thr}%')
+            elif mode == 'local':
+                p99 = luma_pct(img, 99)
+                pk, area = thr
+                if p99 < pk:
+                    bad.append(f'亮度(局部光源) 峰值 p99 {p99:.0f} < {pk:.0f} —— 亮区不够亮')
+                if bright < area:
+                    bad.append(f'亮度(局部光源) 亮部占比 {bright:.1f}% < {area}% —— 亮区太小')
+            else:  # sparse
+                p50, p99 = luma_pct(img, 50), luma_pct(img, 99)
+                q50, q99 = thr
+                if p50 > q50 or p99 < q99:
+                    bad.append(f'亮度(稀疏微光) p50 {p50:.0f}(<={q50:.0f}) / p99 {p99:.0f}(>={q99:.0f}) 不达标')
+
+            # ---- 上下无缝：仅无地形带（有海床的带首末行天然不同色）----
+            if band not in SEAM_SKIP and seamed > SEAM_MAX_DIFF:
                 bad.append(f'上下不无缝(首末行差 {seamed:.1f} > {SEAM_MAX_DIFF})')
 
-            detail = (f'{w}x{h} {mb:.2f}MB 亮{bright:5.1f}% 均{mean:5.1f} 缝{seamed:5.1f}')
+            p98 = luma_pct(img, 98)
+            p50, p99 = luma_pct(img, 50), luma_pct(img, 99)
+            seam_note = '  n/a' if band in SEAM_SKIP else f'{seamed:5.1f}'
+            detail = (f'{w}x{h} {mb:.2f}MB 亮{bright:5.1f}% 均{mean:5.1f} '
+                      f'p50/p98/p99 {p50:.0f}/{p98:.0f}/{p99:.0f} 缝{seam_note}')
             if bad:
                 if not quiet:
                     print(f'[{BAD}] {p.name:<20} {detail}')
