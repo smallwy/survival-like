@@ -521,7 +521,8 @@ def draw_sockets(d, cx, cy, installed, maxw, scale=1.0, m=1, top=None):
 
 
 def draw_turret(d, cx, cy, ang_deg, scale=6.0, ext=False, firing=False, sgn=1, base='A',
-                ro=None, tail=None, plain=True, warm_edge=False, no_ring=True):
+                ro=None, tail=None, plain=True, warm_edge=False, no_ring=True,
+                fam='gun', wid=None):
     """V6.76 安装结构的 Python 复刻（与 `DiveGame.drawTurret` 同步）。
 
     ★ V6.76 大改：**删掉 V6.74 的"梯形悬臂台"**（`MOUNT_BASE_R=15` 的底板，
@@ -640,32 +641,20 @@ def draw_turret(d, cx, cy, ang_deg, scale=6.0, ext=False, firing=False, sgn=1, b
             d.line([(bx, by), (ax, ay)], fill=rgb(C_BODY, 1.22 if sx < 0 else 0.80),
                    width=max(1, round(RR * 0.15)))
 
-    # ---- 发射器（枪族）：**逐值复刻** `DiveGame.drawEmitter(id='gun*')` ----
+    # ---- 发射器：**7 族**（V6.79 起全部硬件化）----
     #  ⚠️ 2026-10-15 修正：旧版漏画了**机匣**、管径比也是自己编的（0.20 vs 真源 0.155），
     #     而"机匣尾端伸进槽内"正是"插上去"的机械依据 ⇒ 漏了它，这张图就在骗人。
-    #     现在参数全部取自真源：机匣 `h_gl?0.185:0.155` … 见 `DiveGame` 4426-4453 行。
-    gl = False                       # 预览按"普通枪族"画；加特林的差异不影响本轮判据
+    #  ★ V6.79：族特征**全部交给 `draw_emitter`**（与 `DiveGame.drawEmitter` 同源），
+    #     这里只负责 **机匣 + 枪族开火焰** 这两件全族共用的事。
+    #     ⚠️ 替换掉了原来内联的"双管"，所以 `gun` 分支的 pitch/管径只剩一处定义。
     c_emit = rgb(C_AMBER)
     # ⓪ 机匣（全族共用）：尾厚前薄，尾端要**伸进槽里**。`warm=False` ⇒ 不给本色
     draw_barrel(d, rx, ry, ang, S * 0.06, -S * tail_f, S * 0.34, c_emit, scale,
                 bore=False, plain=plain, warm=False, no_ring=no_ring)
-    # 双管
-    pitch = S * (0.19 if gl else 0.26)
-    for i in range(2):
-        yy = (i - 0.5) * pitch
-        bs = (rx - math.sin(ang) * yy, ry + math.cos(ang) * yy)
-        draw_barrel(d, bs[0], bs[1], ang, -S * 0.30, S * 0.68,
-                    S * (0.185 if gl else 0.155), c_emit, scale, True, firing, plain, True,
-                    warm_edge, no_ring)
-    # 加特林额外的两根细管（小口径，不给内孔 —— 那是主炮的特权）
-    if gl:
-        for k in (-1.5, 1.5):
-            yy = k * S * 0.19
-            bs = (rx - math.sin(ang) * yy, ry + math.cos(ang) * yy)
-            draw_barrel(d, bs[0], bs[1], ang, -S * 0.22, S * 0.50, S * 0.075,
-                        c_emit, scale, False, False, plain, True, warm_edge, no_ring)
-    # 开火：枪口焰 + 前向长焰
-    if firing:
+    # ① 族特征
+    draw_emitter(d, fam, rx, ry, ang, S, c_emit, scale, firing, wid=wid)
+    # ② 开火：枪口焰 + 前向长焰（**枪族专属**；其余族的"开火"写在各自分支里）
+    if firing and fam == 'gun':
         mx, my = _R(rx, ry, ang, S * 0.86, 0)
         fr = 9 * scale
         d.ellipse([mx - fr, my - fr, mx + fr, my + fr], fill=blend(rgb(C_AMBER), BG_RGB, 0.9))
@@ -782,21 +771,104 @@ def draw_barrel(d, cx, cy, ang, l0, l1, hh, col, scale=1.0, bore=True, firing=Fa
                   fill=blend((255, 255, 255), BG_RGB, 0.9))
 
 
-def draw_emitter(d, fam, cx, cy, ang, S, col, scale=6.0, firing=False, shotgun=False):
-    """`DiveGame.drawEmitter` 的 gun / torpedo 两族复刻（其余族本轮未动）。"""
+def draw_tube(d, cx, cy, ang, l0, h0, l1, h1, scale=6.0, bore=False, bore_r=0.46):
+    """V6.79 `DiveGame.metalTube` 的 Python 复刻（**变径**金属管）。
+
+    ⚠️ 与 `cocos/assets/scripts/view/DiveGame.ts` 的 `metalTube()` 同步，改那边要改这里。
+    逐条复刻 `barrel` 的四条体积线索，唯一差别是**两端半径可不同**：
+      ① 管身 = 四边围成的锥形圆柱（不是一条线）
+      ② 上缘受光带 / 下缘暗线（上亮下暗 = 圆柱感）
+      ③ 轮廓走**暗缝**（⛔ 不描本色亮边 —— 闭合亮色轮廓是「UI 框」的语汇）
+      ④ 前端可选内孔
+    用途：**喇叭**（`h0 < h1`，声呐）× **喷嘴**（`h0 > h1`，酸液）——
+    这两个形态等半径的 `barrel` 画不出来，而它们正是"这一族长什么样"的全部。
+
+    ⚠️ 轮廓/内孔的线宽这里**随 `scale` 缩放**（`draw_barrel` 是 `S(1.3)`，1.3 未随 scale
+       缩放 ⇒ 6× 下轮廓只有 1px、几乎看不见）。预览是给人看的诊断图，粗一点才读得出形态。
+    """
+    P = lambda lx, ly: _R(cx, cy, ang, lx, ly)          # noqa: E731
+    SW = lambda v: max(1, round(v))                      # noqa: E731
+    body = [P(l0, -h0 * 0.82), P(l1, -h1), P(l1, h1), P(l0, h0 * 0.82)]
+    d.polygon([(round(p[0]), round(p[1])) for p in body], fill=rgb(C_BODY, 0.60))
+    hmin = min(h0, h1)
+    hi0, hi1 = P(l0 + 1.5 * scale, -h0 * 0.58), P(l1 - 1.2 * scale, -h1 * 0.72)
+    d.line([(round(hi0[0]), round(hi0[1])), (round(hi1[0]), round(hi1[1]))],
+           fill=blend(rgb(C_BODY, 1.30), BG_RGB, 0.80), width=SW(hmin * 0.42))
+    lo0, lo1 = P(l0 + 1.5 * scale, h0 * 0.64), P(l1 - 1.2 * scale, h1 * 0.78)
+    d.line([(round(lo0[0]), round(lo0[1])), (round(lo1[0]), round(lo1[1]))],
+           fill=blend(rgb(C_ABYSS), BG_RGB, 0.50), width=SW(hmin * 0.36))
+    d.polygon([(round(p[0]), round(p[1])) for p in body],
+              outline=blend(rgb(C_ABYSS), BG_RGB, 0.62), width=SW(1.3 * scale))
+    if bore:
+        mo = P(l1, 0)
+        r_in = h1 * bore_r
+        d.ellipse([mo[0] - r_in, mo[1] - r_in, mo[0] + r_in, mo[1] + r_in],
+                  fill=blend(rgb(C_ABYSS), BG_RGB, 0.72))
+        d.ellipse([mo[0] - r_in * .66, mo[1] - r_in * .66,
+                   mo[0] + r_in * .66, mo[1] + r_in * .66],
+                  outline=blend(rgb(C_BODY, 1.30), BG_RGB, 0.40), width=SW(1 * scale))
+
+
+def _disk(d, cx, cy, r, lum, arc_hi=True, dark=True, scale=6.0):
+    """厚盘端面（回声族用）：实心盘 + 上缘受光弧 + 对侧暗弧。
+
+    ⚠️ 三个线索缺一不可 —— 少了受光弧/暗弧，圆盘会退化回"平面的圆"（那正是旧版的问题）。
+    """
+    SW = lambda v: max(1, round(v))                     # noqa: E731
+    d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=rgb(C_BODY, lum))
+    if arc_hi:
+        d.arc([cx - r * .94, cy - r * .94, cx + r * .94, cy + r * .94], 176, 295,
+              fill=blend(rgb(C_BODY, 1.34), BG_RGB, 0.55), width=SW(r * 0.22))
+    if dark:
+        d.arc([cx - r * .94, cy - r * .94, cx + r * .94, cy + r * .94], 10, 122,
+              fill=blend(rgb(C_ABYSS), BG_RGB, 0.42), width=SW(r * 0.18))
+
+
+def draw_emitter(d, fam, cx, cy, ang, S, col, scale=6.0, firing=False, shotgun=False,
+                 wid=None):
+    """`DiveGame.drawEmitter` 的 Python 复刻（**V6.79：7 族全部硬件化**）。
+
+    ⚠️ 与 `cocos/assets/scripts/view/DiveGame.ts` 的 `drawEmitter()` 同步，改那边要改这里。
+
+    ★ V6.79 之前的实况：只有 `gun` / `torpedo` 是**真零件**（走 `barrel`），其余 5 族是
+      "细线 + 实心圆"的粗符号 ⇒ 用户在两轮里分别报
+      「只有脉冲机关枪装在炮头上是很适配的，其他的器械都没做好吗」（V6.70）
+      与「为什么还有自己画的箭头这些」（V6.79，截图上圈的是鱼叉=箭头 / 声呐·回声=圆形）。
+      V6.73 只补了**全族共用的尾部机匣** ⇒ 解决了"有没有身体"，**前端族特征一直是符号**。
+
+    ⇒ 现在 5 族统一改走 `draw_tube`（变径管）+ 厚盘语汇，与枪族共用同一套四条体积线索。
+      族与族的差别**全部落在剪影上**（下面这张表就是全部内容）：
+        gun     = 双平行管（大口径）
+        torpedo = 单粗管 / 集束三管
+        sonar   = **外扩喇叭**（h0<h1）+ 开口环 + 振子
+        acid    = **收细喷嘴锥**（h0>h1）+ 喷口内孔
+        harpoon = **粗杆 + 亮箍 + 2~3 根前张的齿**（★ 鱼叉就是"叉"；"前端收敛成一个尖"
+                  必然读作箭头，前后三版都栽在这条线上 —— 详见 `DiveGame.ts` 该分支的注释）
+        echo    = 短粗筒 + **封闭厚盘** + 中心凸起
+        arc     = **两根短粗电极柱** + 球头（电弧是效果层，仍是细线）
+      ⛔ 声呐与回声的分界 = **开口 vs 封死**（喇叭 vs 厚盘）—— 它们曾经都是一个圆，
+         正是必须靠剪影分开的那一对。
+
+    ⚠️ 本函数只画**族特征**；全族共用的**尾部机匣**由 `draw_turret` 在调用前画
+       （`DiveGame.drawEmitter` 里机匣与族特征是同一个函数，这里为了单独对比族形态拆开了）。
+    """
     if fam == 'gun':
+        # ⚠️ `plain=True, no_ring=True` = **实机 V6.77 拍板的「去黄」样式，必须显式传** ——
+        #    `draw_barrel` 的默认值是**旧样式**（本色口环 + 本色管身轮廓），
+        #    漏传就会画出实机上**已经不存在**的黄色炮口（"预览比实机差一层"的老坑，
+        #    见 `draw_turret` 的 docstring；本次第一版 7 族图又踩了一次）。
         # 双管（加特林另加两根细管）
         for i in range(2):
             yy = (i - 0.5) * S * 0.26
             bs = (cx - math.sin(ang) * yy, cy + math.cos(ang) * yy)
             draw_barrel(d, bs[0], bs[1], ang, -S * 0.30, S * 0.68,
-                        S * 0.185, col, scale, True, firing)
+                        S * 0.185, col, scale, True, firing, plain=True, no_ring=True)
         # 加特林：两根细管（小口径，不给内孔 —— 那是主炮的特权）
         for k in (-1.5, 1.5):
             yy = k * S * 0.19
             bs = (cx - math.sin(ang) * yy, cy + math.cos(ang) * yy)
             draw_barrel(d, bs[0], bs[1], ang, -S * 0.22, S * 0.50, S * 0.075,
-                        col, scale, False, False)
+                        col, scale, False, False, plain=True, no_ring=True)
         # 霰弹喇叭口：**只在霰弹上画**（画在所有枪族上会让两根炮口之间多出一对交叉斜撑，
         # 6× 下读成一个 "X"  propeller —— 那正是第一版预览被否掉的原因）
         if shotgun:
@@ -809,7 +881,263 @@ def draw_emitter(d, fam, cx, cy, ang, S, col, scale=6.0, firing=False, shotgun=F
         for yy in (-S * 0.21, 0, S * 0.21):      # 集束三管
             bs = (cx - math.sin(ang) * yy, cy + math.cos(ang) * yy)
             draw_barrel(d, bs[0], bs[1], ang, -S * 0.42, S * 0.62,
-                        S * 0.115, col, scale, True, firing)
+                        S * 0.115, col, scale, True, firing, plain=True, no_ring=True)
+    # ===== 以下 5 族 = V6.79 新增（改走变径管 / 厚盘语汇）=====
+    elif fam == 'sonar':
+        SW = lambda v: max(1, round(v * scale))         # noqa: E731  # 参数是实机 px
+        fc = (wid == 'sonar_fc')
+        hornL = S * (0.62 if fc else 0.52)
+        hornR = S * (0.46 if fc else 0.40)
+        draw_tube(d, cx, cy, ang, S * 0.02, S * 0.12, hornL, hornR, scale)
+        ho = _R(cx, cy, ang, hornL, 0)
+        rr = hornR * 0.62
+        d.ellipse([ho[0] - rr, ho[1] - rr, ho[0] + rr, ho[1] + rr],
+                  fill=blend(rgb(C_ABYSS), BG_RGB, 0.74))
+        d.ellipse([ho[0] - rr, ho[1] - rr, ho[0] + rr, ho[1] + rr],
+                  outline=blend(rgb(C_BODY, 1.30), BG_RGB, 0.52), width=SW(hornR * 0.24))
+        rz = hornR * 0.24
+        d.ellipse([ho[0] - rz, ho[1] - rz, ho[0] + rz, ho[1] + rz], fill=rgb(C_BODY, 0.94))
+        if fc:
+            d.ellipse([ho[0] - hornR * .86, ho[1] - hornR * .86,
+                       ho[0] + hornR * .86, ho[1] + hornR * .86],
+                      outline=blend(rgb(C_BODY, 1.30), BG_RGB, 0.42), width=SW(1))
+        if wid == 'sonar_rs':
+            for da in (-0.9, 0, 0.9):
+                p = _R(cx, cy, ang, hornL + S * 0.26, math.sin(da) * S * 0.34)
+                d.ellipse([p[0] - S * .085, p[1] - S * .085, p[0] + S * .085, p[1] + S * .085],
+                          fill=rgb(C_BODY, 1.10))
+                d.ellipse([p[0] - S * .085, p[1] - S * .085, p[0] + S * .085, p[1] + S * .085],
+                          outline=blend(rgb(C_ABYSS), BG_RGB, 0.45), width=SW(1))
+        if firing:
+            r = hornR * 1.35
+            d.arc([ho[0] - r, ho[1] - r, ho[0] + r, ho[1] + r],
+                  math.degrees(ang - 0.85), math.degrees(ang + 0.85),
+                  fill=(255, 255, 255), width=SW(1.8))
+    elif fam == 'arc':
+        SW = lambda v: max(1, round(v * scale))         # noqa: E731
+        # ⚠️ 电极**必须够粗**：第一版 eR=0.075S ⇒ 直径 3px、球头 4px，
+        #    实机 1× 下两根柱 + 两个球头全糊成**一条黑竖条**（管身是暗体，
+        #    3px 宽时没有受光带可读 ⇒ 只剩"黑"）。
+        eR, eL0 = S * 0.125, S * 0.04
+        eL1 = S * (0.56 if wid == 'arc_ov' else 0.48)
+        eOff = S * 0.34
+        TIP_R = 0.48      # 球头收拢比例；0.34 会让两颗球头**叠在一起**（读作一根粗棒）
+        nvx, nvy = -math.sin(ang), math.cos(ang)     # 法向（背 -1 / 腹 +1）
+        fwx, fwy = math.cos(ang), math.sin(ang)      # 前向
+        # ⚠️ 两根电极柱**向前收拢**（尖端靠近）—— 平行朝前读作"两根炮管"。
+        tips = []
+        for sy in (-1, 1):
+            p0 = (cx + nvx * sy * eOff, cy + nvy * sy * eOff)
+            p1 = (cx + nvx * sy * eOff * TIP_R + fwx * eL1,
+                  cy + nvy * sy * eOff * TIP_R + fwy * eL1)
+            d_ang = math.atan2(p1[1] - p0[1], p1[0] - p0[0])
+            draw_tube(d, p0[0], p0[1], d_ang, eL0, eR * 1.20,
+                      math.hypot(p1[0] - p0[0], p1[1] - p0[1]), eR * 0.90, scale)
+            d.ellipse([p1[0] - eR * 1.5, p1[1] - eR * 1.5, p1[0] + eR * 1.5, p1[1] + eR * 1.5],
+                      fill=rgb(C_BODY, 0.86))
+            d.arc([p1[0] - eR * 1.5, p1[1] - eR * 1.5, p1[0] + eR * 1.5, p1[1] + eR * 1.5],
+                  176, 292, fill=blend(rgb(C_BODY, 1.34), BG_RGB, 0.60), width=SW(eR * 0.7))
+            tips.append(p1)
+        if wid == 'arc_st':
+            for i in range(8):
+                a = (i / 8) * math.pi * 2
+                p = _R(cx, cy, ang, math.cos(a) * S * 0.66, math.sin(a) * S * 0.66)
+                d.line([(cx, cy), p], fill=(255, 255, 255) if firing else col, width=SW(1.4))
+        else:
+            tz = [0, 0.20, 0.42, 0.68, 1] if wid == 'arc_ov' else [0, 0.34, 0.66, 1]
+            vz = [1, -0.15, 1.15, -0.25, -1] if wid == 'arc_ov' else [1, -0.15, 1.15, -1]
+            # ⚠️ 必须带**前向抖动**（dz）—— 只改法向偏移的话所有点共线，
+            #    折线退化成一条直线，6× 下读成一个实心色块（第一版就是这样）。
+            dz = [0, 0.12, -0.08, 0.10, 0] if wid == 'arc_ov' else [0, 0.12, -0.08, 0]
+            mx = (tips[0][0] + tips[1][0]) / 2
+            my = (tips[0][1] + tips[1][1]) / 2
+            z = [(mx + nvx * eOff * TIP_R * v + fwx * S * 0.05 * dd,
+                  my + nvy * eOff * TIP_R * v + fwy * S * 0.05 * dd)
+                 for v, dd in zip(vz, dz)]
+            # ⚠️ 实机上电弧走 `neon()`（**外辉光 + 白核**）。预览不给辉光的话，
+            #    6× 下那几段会读成"一个实心黄色块"（第一版就是）——
+            #    那是**预览的失真**，不是实机的问题。这里按三层模拟：辉光 / 主弧 / 白核。
+            for w, f in ((4.0, blend(col, BG_RGB, 0.30)),
+                         (1.8, (255, 255, 255) if firing else blend(col, BG_RGB, 0.95)),
+                         (1.0, (255, 255, 255))):
+                for i in range(1, len(z)):
+                    d.line([z[i - 1], z[i]], fill=f, width=SW(w))
+    elif fam == 'harpoon':
+        SW = lambda v: max(1, round(v * scale))         # noqa: E731
+        # ★★ 三版教训：**只要前端收敛成一个尖，它一定是箭头**（细线+V / 粗杆+三角 /
+        #   菱形叶+长倒须 三版全否）。鱼叉本就是**叉** ⇒ 前端**分成多股、向前张开**。
+        tri = (wid == 'harp_tr')
+        for k in ((-1, 0, 1) if tri else (0,)):
+            yy = k * (S * 0.15 if tri else 0)
+            bc = (cx - math.sin(ang) * yy, cy + math.cos(ang) * yy)
+            draw_tube(d, bc[0], bc[1], ang, -S * 0.42, S * 0.13, S * 0.60, S * 0.10, scale)
+        Q = lambda lx, ly: _R(cx, cy, ang, lx, ly)      # noqa: E731
+        # 亮箍：叉杆 → 叉头的接头
+        fw = S * (0.20 if tri else 0.145)
+        draw_tube(d, cx, cy, ang, S * 0.52, fw * 0.80, S * 0.66, fw, scale)
+        # 齿：向前张开（★ 与箭头分界）。**基础款也必须是三齿** —— 二齿的外轮廓
+        #   在 1× 下就是 `—<`，仍旧读作箭头；中央那根**伸得更长**露出叉口，才破掉这个读法。
+        prongs = ([(0, 1.20), (-1, 1.04), (1, 1.04)] if tri
+                  else [(0, 1.16), (-1, 0.96), (1, 0.96)])
+        spread = 0.34 if tri else 0.28
+        for sy, ex in prongs:
+            a0, a1 = Q(S * 0.62, sy * S * 0.054), Q(S * ex, sy * S * spread)
+            # 齿径 0.078→0.030S 在 1× 下细成"须" ⇒ 提到 0.105→0.050S 才是**有厚度的齿**
+            draw_tube(d, a0[0], a0[1], math.atan2(a1[1] - a0[1], a1[0] - a0[0]),
+                      0, S * 0.105, math.hypot(a1[0] - a0[0], a1[1] - a0[1]), S * 0.050, scale)
+            d.ellipse([a1[0] - S * .060, a1[1] - S * .060, a1[0] + S * .060, a1[1] + S * .060],
+                      fill=rgb(C_BODY, 0.96),
+                      outline=blend(rgb(C_ABYSS), BG_RGB, 0.46), width=SW(1))
+        if wid == 'harp_cb':
+            lp = _R(cx, cy, ang, -S * 0.58, 0)
+            d.ellipse([lp[0] - S * .22, lp[1] - S * .22, lp[0] + S * .22, lp[1] + S * .22],
+                      fill=rgb(C_BODY, 0.70))
+            d.ellipse([lp[0] - S * .11, lp[1] - S * .11, lp[0] + S * .11, lp[1] + S * .11],
+                      fill=blend(rgb(C_ABYSS), BG_RGB, 0.66))
+            d.ellipse([lp[0] - S * .22, lp[1] - S * .22, lp[0] + S * .22, lp[1] + S * .22],
+                      outline=blend(rgb(C_BODY, 1.26), BG_RGB, 0.55), width=SW(1.2))
+        if firing:
+            mz = _R(cx, cy, ang, S * (1.30 if tri else 1.22), 0)
+            d.ellipse([mz[0] - S * .12, mz[1] - S * .12, mz[0] + S * .12, mz[1] + S * .12],
+                      fill=(255, 255, 255))
+    elif fam == 'echo':
+        SW = lambda v: max(1, round(v * scale))         # noqa: E731
+        big = (wid == 'echo_fo')
+        diskL = S * (0.40 if big else 0.34)
+        diskR = S * (0.32 if big else 0.26)
+        draw_tube(d, cx, cy, ang, S * 0.02, S * 0.13, diskL, diskR, scale)
+        dp = _R(cx, cy, ang, diskL, 0)
+        _disk(d, dp[0], dp[1], diskR, 0.94, scale=scale)
+        d.ellipse([dp[0] - diskR * .30, dp[1] - diskR * .30,
+                   dp[0] + diskR * .30, dp[1] + diskR * .30], fill=rgb(C_BODY, 1.20))
+        d.ellipse([dp[0] - diskR * .30, dp[1] - diskR * .30,
+                   dp[0] + diskR * .30, dp[1] + diskR * .30],
+                  outline=blend(rgb(C_ABYSS), BG_RGB, 0.40), width=SW(1))
+        if wid == 'echo_mu':
+            for k in (-1, 0, 1):
+                p = _R(cx, cy, ang, diskL + S * 0.24, k * S * 0.30)
+                d.ellipse([p[0] - S * .10, p[1] - S * .10, p[0] + S * .10, p[1] + S * .10],
+                          fill=rgb(C_BODY, 1.06))
+                d.ellipse([p[0] - S * .10, p[1] - S * .10, p[0] + S * .10, p[1] + S * .10],
+                          outline=blend(rgb(C_ABYSS), BG_RGB, 0.45), width=SW(1))
+        elif big:
+            p = _R(cx, cy, ang, diskL + S * 0.30, 0)
+            d.ellipse([p[0] - S * .30, p[1] - S * .30, p[0] + S * .30, p[1] + S * .30],
+                      outline=blend(rgb(C_BODY, 1.24), BG_RGB, 0.55), width=SW(1.8))
+        if firing:
+            d.ellipse([dp[0] - diskR * .52, dp[1] - diskR * .52,
+                       dp[0] + diskR * .52, dp[1] + diskR * .52], fill=(255, 255, 255))
+    else:   # acid
+        SW = lambda v: max(1, round(v * scale))         # noqa: E731
+        big = (wid == 'acid_fd')
+        nz0 = S * (0.40 if big else 0.34)
+        nz1 = S * 0.11
+        nzL = S * (0.56 if big else 0.64)
+        draw_tube(d, cx, cy, ang, -S * 0.16, nz0, nzL, nz1, scale, bore=True, bore_r=0.52)
+        mz = _R(cx, cy, ang, nzL, 0)
+        if wid == 'acid_ra':
+            for k in (-1, 0, 1):
+                p = _R(cx, cy, ang, nzL + S * 0.28, k * S * 0.28)
+                d.ellipse([p[0] - S * .09, p[1] - S * .09, p[0] + S * .09, p[1] + S * .09],
+                          fill=(255, 255, 255) if firing else col)
+        elif big:
+            p = _R(cx, cy, ang, -S * 0.30, 0)
+            d.ellipse([p[0] - S * .24, p[1] - S * .24, p[0] + S * .24, p[1] + S * .24],
+                      outline=blend(rgb(C_BODY, 1.22), BG_RGB, 0.55), width=SW(1.4))
+        if firing:
+            d.ellipse([mz[0] - nz1 * 1.1, mz[1] - nz1 * 1.1,
+                       mz[0] + nz1 * 1.1, mz[1] + nz1 * 1.1], fill=(255, 255, 255))
+
+
+def draw_emitter_old(d, fam, cx, cy, ang, S, col, scale=6.0, wid=None):
+    """V6.29–V6.78 的**旧**族特征（❌ 已从实机删除，**只作对照图用**）。
+
+    ⛔ 不要在任何"代表实机"的模式（`--bitmap` / `--combat` / `--unlock` / `--mount` /
+       `--turret`）里调用它 —— 它是用来给用户看"改前长什么样"的，不是当前画面。
+    逐值翻译自 V6.78 的 `DiveGame.drawEmitter`（那一版的 sonar/arc/harpoon/echo/acid
+    五个分支）。共同点：**全部是线 + 实心圆**，没有一处体积线索 —— 这正是用户说的
+    「自己画的箭头这些」。
+    """
+    PX = lambda v: max(1, round(v * scale / 6.0))       # noqa: E731  # 实机 px → 本图 px
+    P = lambda lx, ly: _R(cx, cy, ang, lx, ly)          # noqa: E731
+    if fam == 'sonar':
+        fc = (wid == 'sonar_fc')
+        for i in range(1, (2 if fc else 3) + 1):
+            r = S * (0.2 if fc else 0.26) * i
+            d.arc([cx - r, cy - r, cx + r, cy + r],
+                  math.degrees(ang - (0.62 if fc else 1.0)),
+                  math.degrees(ang + (0.62 if fc else 1.0)),
+                  fill=blend(col, BG_RGB, 1.0 if i == 1 else 0.7),
+                  width=PX(2.6 if fc else 1.8))
+        r = S * 0.12
+        d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=blend(col, BG_RGB, 0.9))
+    elif fam == 'arc':
+        for sy in (-1, 1):
+            d.line([P(-S * 0.2, sy * S * 0.36), P(S * 0.5, sy * S * 0.36)],
+                   fill=blend(col, BG_RGB, 0.95), width=PX(2))
+        if wid == 'arc_st':
+            for i in range(8):
+                a = (i / 8) * math.pi * 2
+                d.line([(cx, cy), P(math.cos(a) * S * 0.66, math.sin(a) * S * 0.66)],
+                       fill=blend(col, BG_RGB, 0.85), width=PX(1.4))
+        else:
+            zz = ([(S * 0.5, -S * 0.36), (S * 0.2, -S * 0.16), (S * 0.62, -S * 0.02),
+                   (S * 0.28, S * 0.14), (S * 0.62, S * 0.36)] if wid == 'arc_ov' else
+                  [(S * 0.5, -S * 0.36), (S * 0.26, -S * 0.06),
+                   (S * 0.62, S * 0.06), (S * 0.38, S * 0.36)])
+            pts = [P(a, b) for a, b in zz]
+            for i in range(1, len(pts)):
+                d.line([pts[i - 1], pts[i]], fill=blend(col, BG_RGB, 0.95), width=PX(1.6))
+    elif fam == 'harpoon':
+        for k in ((-1, 0, 1) if wid == 'harp_tr' else (0,)):
+            yy = k * S * 0.28
+            d.line([P(-S * 0.42, yy), P(S * 0.86, yy)],
+                   fill=blend(col, BG_RGB, 1.0 if k == 0 else 0.7), width=PX(2.2))
+            t0, t1, t2 = P(S * 0.86, yy), P(S * 0.64, yy - S * 0.16), P(S * 0.64, yy + S * 0.16)
+            d.line([t0, t1], fill=blend(col, BG_RGB, 0.95), width=PX(1.6))
+            d.line([t0, t2], fill=blend(col, BG_RGB, 0.95), width=PX(1.6))
+        if wid == 'harp_cb':
+            lp = P(-S * 0.62, 0)
+            d.ellipse([lp[0] - S * .22, lp[1] - S * .22, lp[0] + S * .22, lp[1] + S * .22],
+                      outline=blend(col, BG_RGB, 0.9), width=PX(1.6))
+    elif fam == 'echo':
+        bp = P(S * 0.18, 0)
+        r = S * (0.3 if wid == 'echo_fo' else 0.22)
+        d.ellipse([bp[0] - r, bp[1] - r, bp[0] + r, bp[1] + r], fill=blend(col, BG_RGB, 0.85))
+        if wid == 'echo_mu':
+            for k in (-1, 0, 1):
+                p = P(S * 0.55, k * S * 0.34)
+                d.ellipse([p[0] - S * .13, p[1] - S * .13, p[0] + S * .13, p[1] + S * .13],
+                          fill=blend(col, BG_RGB, 0.95))
+        elif wid == 'echo_fo':
+            p = P(S * 0.62, 0)
+            d.ellipse([p[0] - S * .22, p[1] - S * .22, p[0] + S * .22, p[1] + S * .22],
+                      fill=blend(col, BG_RGB, 0.95))
+            d.ellipse([p[0] - S * .36, p[1] - S * .36, p[0] + S * .36, p[1] + S * .36],
+                      outline=blend(col, BG_RGB, 0.8), width=PX(1.6))
+        else:
+            p = P(S * 0.55, 0)
+            d.ellipse([p[0] - S * .15, p[1] - S * .15, p[0] + S * .15, p[1] + S * .15],
+                      fill=blend(col, BG_RGB, 0.9))
+            d.ellipse([p[0] - S * .26, p[1] - S * .26, p[0] + S * .26, p[1] + S * .26],
+                      outline=blend(col, BG_RGB, 0.6), width=PX(1.2))
+    else:   # acid
+        n0, n1, n2 = P(-S * 0.4, -S * 0.34), P(-S * 0.4, S * 0.34), P(S * 0.7, 0)
+        d.polygon([n0, n1, n2], fill=blend(col, BG_RGB, 0.28))
+        d.polygon([n0, n1, n2], outline=blend(col, BG_RGB, 0.95), width=PX(1.6))
+        if wid == 'acid_ra':
+            for k in (-1, 0, 1):
+                p = P(S * 0.95, k * S * 0.3)
+                d.ellipse([p[0] - S * .1, p[1] - S * .1, p[0] + S * .1, p[1] + S * .1],
+                          fill=blend(col, BG_RGB, 0.95))
+        else:
+            if wid == 'acid_fd':
+                p = P(-S * 0.5, 0)
+                d.ellipse([p[0] - S * .24, p[1] - S * .24, p[0] + S * .24, p[1] + S * .24],
+                          outline=blend(col, BG_RGB, 0.8), width=PX(1.4))
+            mz = P(S * 0.7, 0)
+            r = S * (0.12 if wid == 'acid_fd' else 0.14)
+            d.ellipse([mz[0] - r, mz[1] - r, mz[0] + r, mz[1] + r], fill=blend(col, BG_RGB, 0.9))
 
 
 def main():
@@ -899,12 +1227,14 @@ def main():
         print('已出图:', p)
         return
 
-    if mode == '--combat':
+    if mode in ('--combat', '--combatmix'):
         # V6.75 **实机合成图** —— 真实背景 + 位图机体 + 6 门炮 + 探照灯。
         # 这是唯一能回答"用户在屏幕上到底看到什么"的图：
         # 判据 ① 88px 宽的艇在真实背景上认不认得出是潜艇
         #      ② 6 门炮有没有"装在艇上"（圆心贴轮廓）
         #      ③ 机体与深海背景的对比度够不够（位图是暗青金属，最容易糊在暗水里）
+        # V6.79：`--combatmix` = **6 个炮位装 6 族不同武器** —— 直接回答用户那句
+        #   「不都要改吗」：混装时是否还能一眼看出"每门都是装在座上的零件"。
         ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         W, H = 1304, 749
         try:
@@ -920,22 +1250,27 @@ def main():
         seat_ang = [math.degrees(math.atan2(SEAT_MOUNTS[i][1] * (HULL_H / 2),
                                             SEAT_MOUNTS[i][0] * (SUB_D / 2)))
                     for i in range(len(SEAT_MOUNTS))]
+        # 混装表（6 座，按座号）—— 覆盖 7 族里的 6 族，剩一族见 --emit7
+        MIX = [('sonar', 'sonar'), ('acid', 'acid'), ('echo', 'echo'),
+               ('arc', 'arc'), ('harpoon', 'harpoon'), ('torpedo', 'torp_cl')]
         # 艏部探照灯（白点 + 光锥）**已删除**（V6.77b）：用户 2026-10-15「扫描仪不要
         # 白点 和三角形 全去掉」。⛔ 别再把这一段加回来 —— 它贴在 HULL_OUTLINE 之外，
         # 正是"读作画上去的"那一类（铁规 12）。朝向由位图自身的 faceX 镜像承担。
         for i in range(len(SEAT_MOUNTS)):
+            fam, wid = MIX[i] if mode == '--combatmix' else ('gun', None)
             draw_turret(d, cx + SEAT_MOUNTS[i][0] * (SUB_D / 2),
                         cy + SEAT_MOUNTS[i][1] * (HULL_H / 2),
-                        seat_ang[i], 1.0, ext=(i >= 4),
+                        seat_ang[i], 1.0, ext=(i >= 4), fam=fam, wid=wid,
                         sgn=(-1 if SEAT_MOUNTS[i][1] < 0 else 1))
-        path = os.path.join(OUT_DIR, 'hull_combat.png')
+        tag = 'mix' if mode == '--combatmix' else ''
+        path = os.path.join(OUT_DIR, f'hull_combat{tag}.png')
         bg.save(path)
         print('已出图:', path)
         # 局部 3× 放大（以机体为中心，看"炮有没有装在艇上"）
         bx0, by0 = int(cx - 160), int(cy - 110)
         crop = bg.crop((bx0, by0, bx0 + 320, by0 + 220))
         crop = crop.resize((320 * 3, 220 * 3), Image.NEAREST)
-        p2 = os.path.join(OUT_DIR, 'hull_combat_zoom.png')
+        p2 = os.path.join(OUT_DIR, f'hull_combat{tag}_zoom.png')
         crop.save(p2)
         print('已出图:', p2)
         return
@@ -1299,6 +1634,66 @@ def main():
                 txt(d2, (6, i * (cell2 + 16) + 4 + j * (cell2 / 2)),
                     f'{sc:g}x  dorsal' if sg < 0 else f'{sc:g}x  ventral', rgb(C_CYAN_DIM))
         p2 = os.path.join(OUT_DIR, 'mount_ingame.png')
+        img2.save(p2)
+        print('已出图:', p2)
+        return
+
+    if mode == '--emit7':
+        # ===== V6.79：**7 族发射器硬件化**对照（改前 vs 改后）=====
+        # 判据两条：① 7 族剪影**互不相同**（不靠颜色也能分辨）；
+        #           ② 实机尺寸（1x / 2x）下都读得出是**金属件**，而不是"线画的东西"。
+        ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        OUTD = os.path.join(ROOT, 'docs', 'shots')
+        os.makedirs(OUTD, exist_ok=True)
+        # (家族, 变体 id, 标签)
+        FAM = [('gun', 'gun', 'gun'), ('torpedo', 'torp_cl', 'torpedo'),
+               ('sonar', 'sonar', 'sonar'), ('arc', 'arc', 'arc'),
+               ('harpoon', 'harpoon', 'harpoon'), ('echo', 'echo', 'echo'),
+               ('acid', 'acid', 'acid')]
+        col = rgb(C_AMBER)
+        cell, SC = 240, 5.0
+        S = EMITTER_SIZE * SC
+        ROWH, HEAD = cell + 26, 52
+        img, d = canvas(cell * 7, HEAD + ROWH * 2 + 30)
+        txt(d, (8, 8),
+            'BEFORE  (V6.78 实机：枪/雷两族已是硬件 —— 其余五族仍是"线 + 实心圆")',
+            rgb(C_AMBER, 0.95))
+        txt(d, (8, HEAD + ROWH - 16),
+            'AFTER   (V6.79: 七族统一到 metalTube / 厚盘 —— 与枪族同一套四条体积线索)',
+            rgb(C_CYAN_HI))
+        txt(d, (8, HEAD + ROWH * 2 + 8),
+            '注：本图只对比**族特征**，未画全族共用的尾部机匣；'
+            '装到炮座上的完整样子见 --turret / --combat。', rgb(C_CYAN_DIM, 0.9))
+        for i, (fam, wid, lab) in enumerate(FAM):
+            gx = i * cell + cell / 2
+            yB = HEAD + cell / 2
+            yA = HEAD + ROWH + cell / 2
+            txt(d, (i * cell + 8, HEAD - 16), lab, rgb(C_CYAN_DIM))
+            if fam in ('gun', 'torpedo'):
+                # ⚠️ 这两族 **V6.70 就已硬件化** —— 用户正是拿它们当"正确"的标杆。
+                #    BEFORE 行必须画**实机同款**；把它们画成"三条线"是伪造历史，
+                #    会让读者以为"枪族也刚被改"，反而看不出 5 族的落差在哪。
+                draw_emitter(d, fam, gx, yB, 0.0, S, col, SC, wid=wid)
+            else:
+                draw_emitter_old(d, fam, gx, yB, 0.0, S, col, SC, wid=wid)
+            draw_emitter(d, fam, gx, yA, 0.0, S, col, SC, wid=wid)
+        p = os.path.join(OUTD, 'emitter_7fam.png')
+        img.save(p)
+        print('已出图:', p)
+
+        # ---- 实机尺寸：AFTER 在 1x / 2x 下的可读性（**真正的验收尺度**）----
+        cell2 = 150
+        img2, d2 = canvas(cell2 * 7, cell2 * 2 + 60)
+        for row, (sc, rl) in enumerate(((1.0, '1x  (EMITTER_SIZE = 18, 实机尺寸)'),
+                                        (2.0, '2x'))):
+            gy = row * (cell2 + 30) + cell2 / 2 + 16
+            txt(d2, (6, row * (cell2 + 30) + 2), rl, rgb(C_CYAN_HI))
+            for i, (fam, wid, lab) in enumerate(FAM):
+                gx = i * cell2 + cell2 / 2
+                if row == 0:
+                    txt(d2, (i * cell2 + 6, cell2 + 20), lab, rgb(C_CYAN_DIM))
+                draw_emitter(d2, fam, gx, gy, 0.0, EMITTER_SIZE * sc, col, sc, wid=wid)
+        p2 = os.path.join(OUTD, 'emitter_7fam_ingame.png')
         img2.save(p2)
         print('已出图:', p2)
         return

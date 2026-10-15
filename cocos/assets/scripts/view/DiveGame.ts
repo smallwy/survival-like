@@ -4149,6 +4149,56 @@ export class DiveGame extends Component {
     }
   }
 
+  /**
+   * **变径金属管**（V6.79）—— `barrel` 的兄弟，唯一差别是**两端半径可以不同**。
+   *
+   * 为什么新开一个方法而不是给 `barrel` 加参数：`barrel` 已被枪族 / 鱼雷族 / 机匣
+   * 三处共用，它那几个参数（`hh` / `bore` / `rIn = hh×0.46`）都是预览图试出来的
+   * 边界值（见它的注释）。动它 = 同时动三处已验收的观感，风险大于收益。
+   * 这里**逐条复刻** `barrel` 的四条体积线索，保证两者是**同一套语汇** ——
+   * 玩家不该看出"这两族是两套零件"：
+   *   ① 管身 = 四边围成的锥形圆柱（不是一条线）；
+   *   ② 上缘受光带 / 下缘暗线（上亮下暗 = 圆柱感）；
+   *   ③ 轮廓走**暗缝** —— ⛔ 不描本色亮边（铁规 14：闭合的亮色轮廓 = "UI 框"的语汇，
+   *      那正是用户说的"像是画上去的"）；
+   *   ④ 前端可选内孔。
+   *
+   * 用途就是**族特征本身**：**喇叭**（`h0 < h1`，声呐）× **喷嘴**（`h0 > h1`，酸液）——
+   * 这两个形态等半径的 `barrel` 画不出来，而它们恰恰是"这一族长什么样"的全部内容。
+   */
+  private metalTube(cx: number, cy: number, ang: number,
+                    l0: number, h0: number, l1: number, h1: number,
+                    bore = false, boreR = 0.46): void {
+    const g = this.gPlayer
+    const P = (lx: number, ly: number) => this.rot(cx, cy, ang, lx, ly)
+    // ① 管身：两端半径不同的锥形圆柱
+    const body = () => {
+      const a = P(l0, -h0 * 0.82), b = P(l1, -h1)
+      const c = P(l1, h1), d = P(l0, h0 * 0.82)
+      g.moveTo(a.x, a.y); g.lineTo(b.x, b.y); g.lineTo(c.x, c.y); g.lineTo(d.x, d.y)
+      g.close()
+    }
+    g.fill(shade(BODY_METAL, 0.60), 1); body(); g.fillPath()
+    // ② 上缘受光带 / 下缘暗线。线宽取**两端较细的那一端** —— 取粗端会让细端
+    //    的高光糊出管外（细端本来就只有几 px）。
+    const hmin = Math.min(h0, h1)
+    const hi = P(l0 + 1.5, -h0 * 0.58), hi2 = P(l1 - 1.2, -h1 * 0.72)
+    g.line(shade(BODY_METAL, 1.30), 0.80, Math.max(1, hmin * 0.42))
+    g.strokeSeg(hi.x, hi.y, hi2.x, hi2.y)
+    const lo = P(l0 + 1.5, h0 * 0.64), lo2 = P(l1 - 1.2, h1 * 0.78)
+    g.line(UI.abyss, 0.50, Math.max(1, hmin * 0.36))
+    g.strokeSeg(lo.x, lo.y, lo2.x, lo2.y)
+    // ③ 轮廓：暗缝
+    g.line(UI.abyss, 0.62, 1.3); body(); g.stroke()
+    // ④ 前端内孔
+    if (bore) {
+      const mo = P(l1, 0)
+      const rIn = h1 * boreR
+      g.fill(UI.abyss, 0.72); g.fillCircle(mo.x, mo.y, rIn)
+      g.line(shade(BODY_METAL, 1.30), 0.40, 1); g.strokeCircle(mo.x, mo.y, rIn * 0.66)
+    }
+  }
+
 /**
    * 炮位总成 = **焊在艇体上的炮口 + 坐在炮口上的发射器**（V6.71 重做）。
    *
@@ -4501,20 +4551,44 @@ export class DiveGame extends Component {
     this.barrel(ox, oy, ang, s * 0.06, -s * 0.58, s * 0.34, c, false)
 
     if (fam === 'sonar') {
-      // 声呐族：同心弧。定向聚焦改"短而粗"；共振炮额外三颗散射点。
+      // 声呐族（V6.79 **硬件化**）：**外扩的喇叭换能器**。
+      //
+      // ⛔ 旧版画的是「3 条同心弧 + 一个中心点」—— 那是**声波的符号**，不是零件。
+      //    弧线没有任何厚度，`Graphics` 又画不出柔化 ⇒ 实机尺寸下读作"水面上浮着
+      //    三道括弧"。符号能描述"它在发声"，但描述不了"**有个东西装在座上**" ——
+      //    而后者才是发射器要回答的第一个问题。
+      // ⇒ 改：**喇叭**（`h0 < h1` 的变径管）+ 开口环 + 振子，三条体积线索把它钉成
+      //    一个金属件；"发声"改由**开火时**才出现的一道口环弧回答（效果不常驻）。
+      //    共振炮（`sonar_fc`）喇叭更大 + 口部双环；散射（`sonar_rs`）口外三颗小振子。
       const fc = id === 'sonar_fc'
-      const arcs = fc ? 2 : 3
-      for (let i = 1; i <= arcs; i++) {
-        g.line(c, firing ? 1 : 0.7, fc ? 2.6 : 1.8)
-        g.arc(ox, oy, s * (fc ? 0.2 : 0.26) * i, ang - (fc ? 0.62 : 1.0), ang + (fc ? 0.62 : 1.0))
-        g.stroke()
+      const hornL = s * (fc ? 0.62 : 0.52)
+      const hornR = s * (fc ? 0.46 : 0.40)
+      this.metalTube(ox, oy, ang, s * 0.02, s * 0.12, hornL, hornR)
+      // 口部走**开口环**（不是实心圆）—— 开口才读作"喇叭"；封死就退化成一个圆盘，
+      // 而那正是回声族的样子（两族必须一眼可分）。
+      const ho = this.rot(ox, oy, ang, hornL, 0)
+      g.fill(UI.abyss, 0.74); g.fillCircle(ho.x, ho.y, hornR * 0.62)
+      g.line(shade(BODY_METAL, 1.30), 0.52, Math.max(1, hornR * 0.24))
+      g.strokeCircle(ho.x, ho.y, hornR * 0.62)
+      // 振子：口内一颗小球头（金属亮面）—— "里面有东西在发波"
+      g.fill(shade(BODY_METAL, 0.94), 1); g.fillCircle(ho.x, ho.y, hornR * 0.24)
+      if (fc) {
+        // 共振炮：口部第二道环 —— "更粗"要写成**结构**，不只是更大
+        g.line(shade(BODY_METAL, 1.30), 0.42, 1)
+        g.strokeCircle(ho.x, ho.y, hornR * 0.86)
       }
-      g.fill(c, 0.9); g.fillCircle(ox, oy, s * 0.12)
       if (id === 'sonar_rs') {
+        // 散射：口外三颗小振子（保留变体语言，改成实心金属点）
         for (const da of [-0.9, 0, 0.9]) {
-          const p = P(Math.cos(da) * s * 0.5, Math.sin(da) * s * 0.5)
-          g.fill(c, 0.85); g.fillCircle(p.x, p.y, s * 0.09)
+          const p = P(hornL + s * 0.26, Math.sin(da) * s * 0.34)
+          g.fill(shade(BODY_METAL, 1.10), 1); g.fillCircle(p.x, p.y, s * 0.085)
+          g.line(UI.abyss, 0.45, 1); g.strokeCircle(p.x, p.y, s * 0.085)
         }
+      }
+      // 开火：口部一道**前向弧** —— "发出声波"该出现的位置与时机
+      if (firing) {
+        g.line(0xffffff, 0.85, 1.8)
+        g.arc(ho.x, ho.y, hornR * 1.35, ang - 0.85, ang + 0.85); g.stroke()
       }
     } else if (fam === 'gun') {
       // 机关枪族（V6.70 重做）：**真有炮管**的双管/五管 + 喇叭口。
@@ -4586,13 +4660,43 @@ export class DiveGame extends Component {
         }
       }
     } else if (fam === 'arc') {
-      // 电弧族：两根电极柱 + 跳跃弧光。过载加一段；定点雷暴向四周放射。
-      const e1a = P(-s * 0.2, -s * 0.36), e1b = P(s * 0.5, -s * 0.36)
-      const e2a = P(-s * 0.2, s * 0.36), e2b = P(s * 0.5, s * 0.36)
-      g.line(c, 0.95, 2)
-      g.strokeSeg(e1a.x, e1a.y, e1b.x, e1b.y)
-      g.strokeSeg(e2a.x, e2a.y, e2b.x, e2b.y)
+      // 电弧族（V6.79 **硬件化**）：**两根金属电极柱 + 球头**；中间那束电是效果层。
+      //
+      // ⛔ 旧版把"两根电极"本身画成 2px 线 ⇒ **零件与效果同宽同质感**，实机尺寸下
+      //    整体读作"一撮彩色划痕"：分不出哪里是硬件、哪里在通电。
+      // ⇒ 电极改成有体积的柱（`metalTube`）+ 顶端**球头**（放电点必须是实体，
+      //    否则"从哪打出去"没有答案）。电弧仍是细折线 —— **电离空气本来就没有厚度**，
+      //    这与"体积光必须位图"同源：承不承认边缘模糊，决定该用哪种语汇。
+      // ⚠️ 电极**必须够粗**：第一版 `eR = s*0.075` ⇒ 直径 3px、球头 4px，
+      //    实机 1× 下两根柱 + 两个球头全糊成**一条黑竖条**（管身是 `shade(BODY_METAL,0.60)`
+      //    的暗体，3px 宽时暗体没有受光带可读 ⇒ 只剩"黑"）。同样尺寸下枪族管径是这个的 2 倍。
+      const eR = s * 0.125
+      const eL0 = s * 0.04
+      const eL1 = s * (id === 'arc_ov' ? 0.56 : 0.48)
+      const eOff = s * 0.34
+      // ⚠️ `TIP_R` = 球头中心相对于中线的收拢比例，它同时决定**两根球头的间距**
+      //    （= 2×eOff×TIP_R）。第一版取 0.34 ⇒ 间距比球头直径还小，
+      //    两个球头**叠在一起**、读作"一根粗棒的两个头"。0.48 才分得开。
+      const TIP_R = 0.48
+      const nvx = -Math.sin(ang), nvy = Math.cos(ang)     // 法向（背 -1 / 腹 +1）
+      const fwx = Math.cos(ang), fwy = Math.sin(ang)      // 前向
+      // ⚠️ 两根电极柱必须**向前收拢**（尖端靠近）—— 平行朝前读作"两根炮管"；
+      //    收拢 + 球头相对，才读作"一对电极在放电"。
+      const tipX: number[] = [], tipY: number[] = []
+      for (const sy of [-1, 1]) {
+        const p0x = ox + nvx * sy * eOff, p0y = oy + nvy * sy * eOff
+        const p1x = ox + nvx * sy * eOff * TIP_R + fwx * eL1
+        const p1y = oy + nvy * sy * eOff * TIP_R + fwy * eL1
+        this.metalTube(p0x, p0y, Math.atan2(p1y - p0y, p1x - p0x), eL0, eR * 1.20,
+                       Math.hypot(p1x - p0x, p1y - p0y), eR * 0.90)
+        // 球头（放电点必须是实体，否则"从哪打出去"没有答案）
+        g.fill(shade(BODY_METAL, 0.86), 1); g.fillCircle(p1x, p1y, eR * 1.5)
+        g.line(shade(BODY_METAL, 1.34), 0.60, Math.max(1, eR * 0.7))
+        g.arc(p1x, p1y, eR * 1.5, Math.PI * 0.98, Math.PI * 1.62); g.stroke()
+        tipX.push(p1x); tipY.push(p1y)
+      }
       if (id === 'arc_st') {
+        // 定点雷暴：向四周放射（效果层 —— 细线）
         for (let i = 0; i < 8; i++) {
           const a = (i / 8) * Math.PI * 2
           const p = P(Math.cos(a) * s * 0.66, Math.sin(a) * s * 0.66)
@@ -4600,9 +4704,22 @@ export class DiveGame extends Component {
           g.strokeSeg(ox, oy, p.x, p.y)
         }
       } else {
-        const z = id === 'arc_ov'
-          ? [P(s * 0.5, -s * 0.36), P(s * 0.2, -s * 0.16), P(s * 0.62, -s * 0.02), P(s * 0.28, s * 0.14), P(s * 0.62, s * 0.36)]
-          : [P(s * 0.5, -s * 0.36), P(s * 0.26, -s * 0.06), P(s * 0.62, s * 0.06), P(s * 0.38, s * 0.36)]
+        // 两根**球头之间**跳跃的折线：`t` 沿柱长 0→1、`v` 在 ±1 之间来回。
+        // ⚠️ 端点必须收在球头上 —— 沿用旧的固定坐标会让电弧**悬空**，读作"飘着的线"。
+        const tz = id === 'arc_ov' ? [0, 0.20, 0.42, 0.68, 1] : [0, 0.34, 0.66, 1]
+        const vz = id === 'arc_ov' ? [1, -0.15, 1.15, -0.25, -1] : [1, -0.15, 1.15, -1]
+        // ⚠️ 两个坑，都只有**放大图**才能发现：
+        //   ① 端点必须落在**两个球头**上（`vz = ±1` ⇒ 正好是 `eOff × TIP_R` 那两点）。
+        //      沿用旧的固定坐标会让电弧**悬空**，读作"飘在旁边的一根线"。
+        //   ② **必须带前向抖动**（`dz`）—— 只改法向偏移的话所有点共线，
+        //      折线退化成一条直线，6× 下读成一个**实心色块**（第一版就是这样）。
+        const midX = (tipX[0] + tipX[1]) * 0.5, midY = (tipY[0] + tipY[1]) * 0.5
+        const dz = id === 'arc_ov' ? [0, 0.12, -0.08, 0.10, 0] : [0, 0.12, -0.08, 0]
+        const z = tz.map((_: number, i: number) => {
+          const off = eOff * TIP_R * vz[i]
+          const push = s * 0.05 * dz[i]
+          return { x: midX + nvx * off + fwx * push, y: midY + nvy * off + fwy * push }
+        })
         neon(g, firing ? 0xffffff : c, () => {
           g.moveTo(z[0].x, z[0].y)
           for (let i = 1; i < z.length; i++) g.lineTo(z[i].x, z[i].y)
@@ -4610,61 +4727,131 @@ export class DiveGame extends Component {
         }, { width: 1.6, bloom: firing })
       }
     } else if (fam === 'harpoon') {
-      // 鱼叉族（V6.29 新增造型）：一根长矛 + 前端倒钩。三重鱼叉三根平行；回旋鱼叉尾端带环。
-      const shafts = id === 'harp_tr' ? [-1, 0, 1] : [0]
+      // 鱼叉族（V6.79 **硬件化**）：**粗杆 + 亮箍 + 向前张开的三齿**（一支装上去的叉头）。
+      //
+      // ⛔ 旧版是"2.2px 的线 + 两条斜线当倒钩" —— 用户截图里圈的那个**箭头**就是它。
+      // ★★ 这一族前后试了**三版**才想明白，"箭头"这个读法必须从**字形**上根除：
+      //   ① "细线 + V 形倒钩" = 箭头（用户圈的就是它）；
+      //   ② "粗杆 + 实心三角矛头 + 倒钩" = **还是箭头**，加粗只让它更像箭头
+      //      —— 一根杆 + 一个三角，那就是"箭头"的字形本身；
+      //   ③ "粗杆 + 菱形叶片 + 向后大张的长倒须" = 6× 读成 **X / 星号**，1× 退回来仍是 "→"。
+      //   ⇒ 结论：**只要前端收敛成一个尖，它就一定是箭头**。粗细 / 形状 / 倒钩方向
+      //      都改不出这个坑。要跳出去，**前端必须分成多股** ——
+      //      而鱼叉本来就是**叉**：杆 → 亮箍（装叉头的接头）→ 2~3 根**向前张开**的齿。
+      //   ⚠️ 齿必须**张开**（尖端离轴）；收拢 = 又变回一个尖 = 又是箭头。
+      //      `harp_tr`（三重）= 三根平行杆 + **张得更开、更长**；基础款三齿束在一根杆上；
+      //      回旋（`harp_cb`）尾端配重环。
+      const tri = id === 'harp_tr'
+      const shafts = tri ? [-1, 0, 1] : [0]
+      const gap = tri ? s * 0.15 : 0
       for (const k of shafts) {
-        const yy = k * s * 0.28
-        const a1 = P(-s * 0.42, yy), a2 = P(s * 0.86, yy)
-        g.line(c, k === 0 ? 1 : 0.7, 2.2)
-        g.strokeSeg(a1.x, a1.y, a2.x, a2.y)
-        const t0 = P(s * 0.86, yy), t1 = P(s * 0.64, yy - s * 0.16), t2 = P(s * 0.64, yy + s * 0.16)
-        g.line(c, 0.95, 1.6)
-        g.strokeSeg(t0.x, t0.y, t1.x, t1.y)
-        g.strokeSeg(t0.x, t0.y, t2.x, t2.y)
+        const yy = k * gap
+        const bc = { x: ox - Math.sin(ang) * yy, y: oy + Math.cos(ang) * yy }
+        // 杆：尾粗前细，但**整体与枪族管径同量级** —— 实机尺寸（`EMITTER_SIZE=18`
+        //   ⇒ 整台发射器约 36px）下"细"是读不出来的，能读的只有剪影大形。
+        this.metalTube(bc.x, bc.y, ang, -s * 0.42, s * 0.13, s * 0.60, s * 0.10)
+      }
+      const Q = (lx: number, ly: number) => this.rot(ox, oy, ang, lx, ly)
+      // 亮箍：叉杆 → 叉头的接头（"这是一支装上去的叉头"的全部证据）
+      const fw = tri ? s * 0.20 : s * 0.145
+      this.metalTube(ox, oy, ang, s * 0.52, fw * 0.80, s * 0.66, fw)
+      // 齿：向前**张开** —— ★ 与箭头分界的那一条。
+      //   ⚠️ **基础款也必须是三齿**：二齿在 1× 下外轮廓就是 `—<`，仍旧读作箭头。
+      //      中央那根**伸得比两侧长**，露出叉口之外 ⇒ 剪影是 `—Ψ`，箭头读法才被破掉。
+      //   `harp_tr` 只是**张得更开、更粗**，并配三根平行杆。
+      const prongs: Array<[number, number]> = tri
+        ? [[0, 1.20], [-1, 1.04], [1, 1.04]]
+        : [[0, 1.16], [-1, 0.96], [1, 0.96]]
+      const spread = tri ? 0.34 : 0.28
+      for (const [sy, ex] of prongs) {
+        const a0 = Q(s * 0.62, sy * s * 0.054)
+        const a1 = Q(s * ex, sy * s * spread)
+        // 齿径 `s*0.078 → s*0.030`（实机 2.8→1.1px）在 1× 下细成"须"，
+        // 读作"线画的叉"；提到 `s*0.105 → s*0.050` 才是**有厚度的齿**。
+        this.metalTube(a0.x, a0.y, Math.atan2(a1.y - a0.y, a1.x - a0.x),
+                       0, s * 0.105, Math.hypot(a1.x - a0.x, a1.y - a0.y), s * 0.050)
+        // 齿尖球头（"着力点"——齿是零件，不是一个箭头符号）
+        g.fill(shade(BODY_METAL, 0.96), 1); g.fillCircle(a1.x, a1.y, s * 0.060)
+        g.line(UI.abyss, 0.46, 1); g.strokeCircle(a1.x, a1.y, s * 0.060)
       }
       if (id === 'harp_cb') {
-        const lp = P(-s * 0.62, 0)
-        g.line(firing ? 0xffffff : c, 0.9, 1.6)
-        g.strokeCircle(lp.x, lp.y, s * 0.22)
+        // 回旋：尾端**配重环**（实心环，不是细圈）
+        const lp = P(-s * 0.58, 0)
+        g.fill(shade(BODY_METAL, 0.70), 1); g.fillCircle(lp.x, lp.y, s * 0.22)
+        g.fill(UI.abyss, 0.66); g.fillCircle(lp.x, lp.y, s * 0.11)
+        g.line(shade(BODY_METAL, 1.26), 0.55, 1.2); g.strokeCircle(lp.x, lp.y, s * 0.22)
+      }
+      if (firing) {
+        const mz = P(tri ? s * 1.30 : s * 1.22, 0)
+        g.fill(0xffffff, 0.85); g.fillCircle(mz.x, mz.y, s * 0.12)
       }
     } else if (fam === 'echo') {
-      // 回声族（V6.29 新增造型）：**机匣前端的发射盘** + 前方聚焦点。多重三点；聚焦一个大点 + 双环。
-      // ⚠️ V6.73：发射盘从 -0.12s 前移到 +0.18s —— 原位置被新机匣整个盖住（机匣占到 +0.06s）。
-      const bp = P(s * 0.18, 0)
-      g.fill(c, 0.85); g.fillCircle(bp.x, bp.y, s * (id === 'echo_fo' ? 0.3 : 0.22))
+      // 回声族（V6.79 **硬件化**）：**短粗筒 + 封闭厚盘** —— 与声呐的**开口喇叭**
+      // 共用同一套变径管语汇（同一个方法、方向相反，就是两种零件）。
+      //
+      // ⛔ 旧版是"一个实心圆 + 前方另一个圆 + 一圈细环"，三个**平面圆**没有任何
+      //    厚度线索 ⇒ 实机下读作"枪管前面画了个靶心"；而且与声呐长得像（都是圆）。
+      //    用户圈的那个"炮塔图形"就是二者之一 —— 两族本来就该靠**剪影**分开。
+      // ⇒ 回声 = **封死的厚盘**（端面 + 中心凸起 + 受光弧 + 对侧暗弧）；
+      //    声呐 = **张口的喇叭**。一个像铆钉头、一个像扩音器。
+      const big = id === 'echo_fo'
+      const diskL = s * (big ? 0.40 : 0.34)
+      const diskR = s * (big ? 0.32 : 0.26)
+      this.metalTube(ox, oy, ang, s * 0.02, s * 0.13, diskL, diskR)
+      const dp = this.rot(ox, oy, ang, diskL, 0)
+      // 端面：实心盘 + 上缘受光弧 + 右下暗弧（厚度线索的另一半）
+      g.fill(shade(BODY_METAL, 0.94), 1); g.fillCircle(dp.x, dp.y, diskR)
+      g.line(shade(BODY_METAL, 1.34), 0.55, Math.max(1, diskR * 0.22))
+      g.arc(dp.x, dp.y, diskR * 0.94, Math.PI * 0.98, Math.PI * 1.64); g.stroke()
+      g.line(UI.abyss, 0.42, Math.max(1, diskR * 0.18))
+      g.arc(dp.x, dp.y, diskR * 0.94, Math.PI * 0.06, Math.PI * 0.68); g.stroke()
+      // 中心凸起（振膜中心）—— "敲一下再听回声"的那个点
+      g.fill(shade(BODY_METAL, 1.20), 1); g.fillCircle(dp.x, dp.y, diskR * 0.30)
+      g.line(UI.abyss, 0.40, 1); g.strokeCircle(dp.x, dp.y, diskR * 0.30)
       if (id === 'echo_mu') {
+        // 多重：盘外三颗小振子（金属化 —— 保留变体语言）
         for (const k of [-1, 0, 1]) {
-          const p = P(s * 0.55, k * s * 0.34)
-          g.fill(firing ? 0xffffff : c, 0.95); g.fillCircle(p.x, p.y, s * 0.13)
+          const p = P(diskL + s * 0.24, k * s * 0.30)
+          g.fill(shade(BODY_METAL, 1.06), 1); g.fillCircle(p.x, p.y, s * 0.10)
+          g.line(UI.abyss, 0.45, 1); g.strokeCircle(p.x, p.y, s * 0.10)
         }
       } else if (id === 'echo_fo') {
-        const p = P(s * 0.62, 0)
-        g.fill(firing ? 0xffffff : c, 0.95); g.fillCircle(p.x, p.y, s * 0.22)
-        g.line(c, 0.8, 1.6); g.strokeCircle(p.x, p.y, s * 0.36)
-      } else {
-        const p = P(s * 0.55, 0)
-        g.fill(firing ? 0xffffff : c, 0.9); g.fillCircle(p.x, p.y, s * 0.15)
-        g.line(c, 0.6, 1.2); g.strokeCircle(p.x, p.y, s * 0.26)
+        // 聚焦：盘外一道粗环 —— "把回声聚成一束"
+        const p = P(diskL + s * 0.30, 0)
+        g.line(shade(BODY_METAL, 1.24), 0.55, 1.8)
+        g.strokeCircle(p.x, p.y, s * 0.30)
+      }
+      if (firing) {
+        g.fill(0xffffff, 0.9); g.fillCircle(dp.x, dp.y, diskR * 0.52)
       }
     } else {
-      // 酸液族（V6.29 新增造型）：朝前的喷嘴锥。持久酸池尾端带池环；酸雨三点。
-      const n0 = P(-s * 0.4, -s * 0.34), n1 = P(-s * 0.4, s * 0.34), n2 = P(s * 0.7, 0)
-      g.fill(c, 0.28)
-      g.moveTo(n0.x, n0.y); g.lineTo(n1.x, n1.y); g.lineTo(n2.x, n2.y); g.close(); g.fillPath()
-      g.line(c, 0.95, 1.6)
-      g.moveTo(n0.x, n0.y); g.lineTo(n1.x, n1.y); g.lineTo(n2.x, n2.y); g.close(); g.stroke()
+      // 酸液族（V6.79 **硬件化**）：**收细的喷嘴锥** —— 与声呐的**外扩喇叭**是同一个
+      // 变径管语汇，**方向相反就是两种零件**（这是"7 族共用一套硬件语言"的最小证明）。
+      //
+      // ⛔ 旧版是一个 `fill(c, 0.28)` 的空三角 + 描边，零体积线索 ⇒ 实机下读作
+      //    "枪管前面画了个三角形"。它和鱼叉那个"箭头"是同一类问题：
+      //    **线框符号冒充零件**。
+      // ⇒ 现在：从粗到细的锥 + 前端喷口内孔；"喷"由开火时的口部亮点回答。
+      const big = id === 'acid_fd'
+      const nz0 = s * (big ? 0.40 : 0.34)      // 尾端半径（接机匣）
+      const nz1 = s * 0.11                     // 喷嘴口半径
+      const nzL = s * (big ? 0.56 : 0.64)
+      this.metalTube(ox, oy, ang, -s * 0.16, nz0, nzL, nz1, true, 0.52)
+      const mz = this.rot(ox, oy, ang, nzL, 0)
       if (id === 'acid_ra') {
+        // 酸雨：口外三颗液滴（它们是**抛射物**，允许保留本色与亮面 —— 与零件区分开）
         for (const k of [-1, 0, 1]) {
-          const p = P(s * 0.95, k * s * 0.3)
-          g.fill(firing ? 0xffffff : c, 0.95); g.fillCircle(p.x, p.y, s * 0.1)
+          const p = P(nzL + s * 0.28, k * s * 0.28)
+          g.fill(firing ? 0xffffff : c, 0.9); g.fillCircle(p.x, p.y, s * 0.09)
         }
-      } else {
-        if (id === 'acid_fd') {
-          const p = P(-s * 0.5, 0)
-          g.line(c, 0.8, 1.4); g.strokeCircle(p.x, p.y, s * 0.24)
-        }
-        const mz = P(s * 0.7, 0)
-        g.fill(firing ? 0xffffff : c, 0.9); g.fillCircle(mz.x, mz.y, s * (id === 'acid_fd' ? 0.12 : 0.14))
+      } else if (id === 'acid_fd') {
+        // 持久酸池：尾端配重环
+        const p = P(-s * 0.30, 0)
+        g.line(shade(BODY_METAL, 1.22), 0.55, 1.4)
+        g.strokeCircle(p.x, p.y, s * 0.24)
+      }
+      if (firing) {
+        g.fill(0xffffff, 0.9); g.fillCircle(mz.x, mz.y, nz1 * 1.1)
       }
     }
   }
