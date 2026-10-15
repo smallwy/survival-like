@@ -73,6 +73,9 @@ import {
   Node, Label, Graphics, Sprite, UITransform, UIOpacity,
 } from 'cc'
 import { Gfx, col } from './Gfx'
+// 字号阶梯（V6.74）：**一套阶梯只定义一次**，主界面与战斗 HUD 共用。
+// ⚠️ Title 不反向被 Hud 引用 ⇒ `Hud → Title` 无环，这个方向的 import 是安全的。
+import { FS } from './Hud'
 import {
   neon, neonLine, neonCircle, neonPoly, verticalBands, glowPool, lightCone,
 } from './neon'
@@ -1117,7 +1120,7 @@ export class Title {
         art.node.setPosition(x + col.size / 2, this.H - (col.tops[i] + col.size / 2))
         art.node.active = false
 
-        const label = this.center(x + col.size / 2, col.labelCenters[i], e.label, 16,
+        const label = this.center(x + col.size / 2, col.labelCenters[i], e.label, FS.title,
           on ? TXT_LIGHT.dim : TXT_LIGHT.mute)
 
         const hit = this.hitRect(this.root, x, col.tops[i], col.size, col.size)
@@ -1815,7 +1818,7 @@ export class Title {
 
   /** 简易 toast：停留 2.2s，最后 0.6s 淡出。给"点了没反应"一个交代。 */
   private toast(msg: string): void {
-    if (!this.toastLabel) this.toastLabel = this.center(this.W / 2, 700, '', 16, TXT.amber)
+    if (!this.toastLabel) this.toastLabel = this.center(this.W / 2, 700, '', FS.title, TXT.amber)
     this.toastLabel.string = msg
     this.opacityOf(this.toastLabel.node).opacity = 255
     this.toastT = 2.2
@@ -1893,7 +1896,7 @@ export class Title {
     if (s === this.footer) return
     this.footer = s
     if (!this.footerLabel) {
-      this.footerLabel = this.text(this.W - BAR_PAD, FOOTER_Y, s, 14, TXT.mute, true)
+      this.footerLabel = this.text(this.W - BAR_PAD, FOOTER_Y, s, FS.body, TXT.mute, true)
       this.opacityOf(this.footerLabel.node).opacity = Math.round(0.9 * 255)
     } else {
       this.footerLabel.string = s

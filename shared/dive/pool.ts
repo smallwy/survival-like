@@ -7,7 +7,7 @@
  */
 
 import type { UpgradeDef, ShopTarget, RelicId } from './types'
-import { RELIC_DEF, RELIC_SLOTS } from './tables'
+import { RELIC_DEF, RELIC_SLOTS, STREAK_MAX_LV } from './tables'
 
 export const CARD_POOL: UpgradeDef[] = [
   // ⚠️ 武器卡都带 `family`（解锁过滤用，见 `unlocks.ts` filterPool）。
@@ -194,6 +194,55 @@ export const CARD_POOL: UpgradeDef[] = [
   { id: 's_luck', name: '打捞直觉', desc: '鱼骨换钱 +15%', kind: 'stat',
     cost: 24,
     apply: s => s.addStat('luck', 0.15),
+  },
+
+  // ---- V6.77d 六条新属性卡：每张各占一个**新维度**（被动 24 → 30）----
+  //
+  // ★ 选型标准（为什么是这六个）：现有 12 张属性卡已经把 `Stats` 的每个键占满，
+  //   再补卡只能重复效果 ⇒ 必须**先扩维度再补卡**。这六条的共同点是
+  //   **改"打起来的手感/反馈"，而不是单纯再加一个百分比**（承接 P0「单波爽」）：
+  //
+  //   · `s_critmul` 破甲弹头 —— `critMul` 一直是个**没有卡的空维度**（默认 0.8）。
+  //     ⚠️ 它只在**暴击那一刻**生效 ⇒ 价值与暴击率强耦合，所以定价(32)高于
+  //        只看单张收益的估计：买了它但没暴击率的人会觉得"卡没生效"。
+  //   · `s_streak` 猎杀节奏 —— **复用现成的 `comboCnt`**（V6.62 骨雨那套），
+  //     不新增任何计时器状态。这是本轮唯一一张"越打越强"的卡。
+  //     ⚠️ 无 `dead`：加成值本身不封顶（层数封顶由 `STREAK_MAX_LV` 管）。
+  //   · `s_hunt` 狩猎本能 —— 与**网族 / 定身雷**协同：控住再打的收益被放大，
+  //     这是给"控制流"的第一张收益卡（之前控制只服务生存）。
+  //   · `s_bspeed` 弹道增压 —— ⚠️ **射程不变**（发射时同步缩 `life`）⇒
+  //     它是纯手感卡，不会偷偷变成射程卡。上限由 `STAT_CAP.bulletSpd = 1.0` 定。
+  //   · `s_servo` 伺服转台 —— 转座动画的**跟随速度**。多座 + 高速时收益最大
+  //     （炮口不用"等"转到位），单座低速时几乎无感。
+  //   · `s_pen` 破甲穿透 —— 重甲（减伤 60%、只吃爆炸/穿透）的**第三条解法**：
+  //     前两条是换武器，这条是花 32 买一个"我的子弹也吃一半护甲"。
+  { id: 's_critmul', name: '破甲弹头', desc: '暴击伤害 +40%', kind: 'stat',
+    cost: 32,
+    apply: s => s.addStat('critMul', 0.4),
+  },
+  { id: 's_streak', name: '猎杀节奏', desc: `连杀每层伤害 +5%（最多 ${STREAK_MAX_LV} 层）`, kind: 'stat',
+    cost: 34,
+    apply: s => s.addStat('streak', 0.05),
+  },
+  { id: 's_hunt', name: '狩猎本能', desc: '对被减速 / 定身的敌人伤害 +35%', kind: 'stat',
+    cost: 30,
+    apply: s => s.addStat('slowDmg', 0.35),
+    dead: s => s.st.slowDmg >= 0.9,
+  },
+  { id: 's_bspeed', name: '弹道增压', desc: '弹速 +35%（射程不变）', kind: 'stat',
+    cost: 26,
+    apply: s => s.addStat('bulletSpd', 0.35),
+    dead: s => s.st.bulletSpd >= 1.0,
+  },
+  { id: 's_servo', name: '伺服转台', desc: '炮塔转向速度 +40%', kind: 'stat',
+    cost: 28,
+    apply: s => s.addStat('turretSpeed', 0.4),
+    dead: s => s.st.turretSpeed >= 1.2,
+  },
+  { id: 's_pen', name: '破甲穿透', desc: '无视敌方 45% 护甲', kind: 'stat',
+    cost: 32,
+    apply: s => s.addStat('armorPen', 0.45),
+    dead: s => s.st.armorPen >= 0.8,
   },
 ]
 

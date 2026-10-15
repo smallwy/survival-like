@@ -62,3 +62,6 @@ web/src/assets/items/_regen/
 # WorkBuddy 会话产出图（诊断图 _diag_*/iso*/turret_*、设计对照图）；
 # 可随时重新生成，且体积大。仓库只留 overview.md 与 memory。
 .workbuddy/artifacts/*.png
+
+# WorkBuddy 会话临时产物（env 打样/对比的中间图，可达数十 MB，随时可重新生成）
+.workbuddy/tmp/

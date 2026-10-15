@@ -80,11 +80,18 @@ _ASSET_RULES: list[tuple[str, str, str]] = [
     #   `artKeys.ts` 从 ENEMY_TEX 推导 key，`verify_cocos` 又要求每个 key 在磁盘上有文件，
     #   所以"加了敌人类型却忘了加这一行"会在验证阶段直接红，而不是上线才发现少张图。
     ("fish/armor.png", "fish/armor.png", "copy"),
+    # V6.79 第 5 类「盘旋猎手」。同一条硬约束：**ENEMY_TEX 加了 key，这里就欠一行**，
+    #   漏了会在验证阶段直接红（`artKeys` 从 ENEMY_TEX 推导、闸门要求 key 落盘）。
+    ("fish/orbit.png", "fish/orbit.png", "copy"),
     # ---- 潜航器机体（正俯视；SUB_ART_PATH 指向其中三张）----
     ("sub/sub_lumen.png", "sub/sub_lumen.png", "copy"),
     ("sub/sub_raia.png", "sub/sub_raia.png", "copy"),
     ("sub/sub_bathy.png", "sub/sub_bathy.png", "copy"),
     ("sub/sub_body.png", "sub/sub_body.png", "copy"),   # 变体缺失时的兜底
+    # V6.75 **侧视位图机体**：战斗里机体本体的贴图（`DiveGame.syncSub` 在用）。
+    # 真源由 `tools/prep_sub_art.py` 从 AI 出图对齐产出（抠底 → 各向异性缩放到
+    # 88×56 → 用 `HULL_OUTLINE` 裁剪影），**不要手改这张 png**。
+    ("sub/sub_hull.png", "sub/sub_hull.png", "copy"),
     # 非道具的三类到此为止（数量固定）；道具立绘见下面的 _item_rules()
 ]
 

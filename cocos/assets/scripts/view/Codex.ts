@@ -77,6 +77,7 @@ const CATS: CodexCat[] = ['enemy', 'boss', 'weapon', 'relic']
 /** 敌人的立绘 key（`ENEMY_TEX` 的值；Boss 暂时复用 drift 的图） */
 const ENEMY_KEY: Record<string, string> = {
   'enemy:swarm': 'f_swarm', 'enemy:dash': 'f_dash', 'enemy:drift': 'f_drift', 'boss:abyss': 'f_drift',
+  'enemy:armor': 'f_armor', 'enemy:orbit': 'f_orbit',
 }
 
 /** 条目 → 立绘 key。武器用**基础族**的立绘（进化共用族图即可） */

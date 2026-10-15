@@ -41,7 +41,7 @@ import { UI, TXT, MENU, BRIGHT, TXT_LIGHT } from '../shared/theme'
 import {
   LAYERS, RELIC_SLOTS, STAT_META, STAT_CARD, STAT_CAP, WEAPON_DEF, CARD_WEAPON_ID,
   O2, MAX_SEATS, BONE, weaponFamily, evolutionBase, RELIC_DEF, layerO2,
-  SEAT_RING_R, SEAT_ANGLES_DEG, TURRET_R, BASE_SEATS,
+  SEAT_MOUNTS, MOUNT_BASE_R, HULL_H, SUB_D, BASE_SEATS,
 } from '../shared/dive/tables'
 import type { DiveWorld } from '../shared/dive/world'
 import type { UpgradeDef, WeaponId, RelicId, Stats } from '../shared/dive/types'
@@ -56,6 +56,36 @@ const clamp01 = (v: number): number => (v < 0 ? 0 : v > 1 ? 1 : v)
  * ⛔ 不改模拟层：`w.depthM` 仍是真值，**只有显示滞后**。
  */
 const DEPTH_FOLLOW = 6
+
+/**
+ * **字号阶梯**（V6.74 · 用户："整个界面的字体规划下字体 以及颜色"）。
+ *
+ * 为什么必须收敛成一个阶梯而不是各处写字号：HUD 上原先散落着
+ * 11/12/13/15/16/17/18/20 七档，相邻两档只差 1px —— 差 1px 时人眼读不出
+ * "这是标题还是正文"，只会读成"排版不齐"。而且本项目**没有任何 ttf/otf**
+ * （`Label` 走 `useSystemFont`）⇒ 层级只能靠**字号 + 字色 + 描边**三件事表达，
+ * 字号再糊掉就一件都不剩了。
+ *
+ * 六档的语义（从大到小只表示"重要程度"，不表示"位置"）：
+ *   huge  26  一整屏只有一个（主数值）
+ *   big   20  关键数值（氧气量）
+ *   title 17  区块标题（波次 / 鱼骨 / 生物质）
+ *   lead  15  强调行（剩余秒数 / 倒计时数字）
+ *   body  13  正文（默认档）
+ *   micro 12  角标 / 槽位编号
+ *
+ * ⚠️ **micro = 12 是硬下限**（用户长期规约：正文不低于 12px）—— 原来有 11px
+ *    的角标，那一档全部抬到 12。
+ * ⚠️ 相邻档差 ≥2px：差 1px 的两档在 1304×749 上不可分辨，等于白分。
+ */
+export const FS = {
+  micro: 12,
+  body: 13,
+  lead: 15,
+  title: 17,
+  big: 20,
+  huge: 26,
+} as const
 
 /**
  * 估算一段文字的像素宽（CJK ≈ 字号，ASCII ≈ 0.6×字号）。
@@ -278,8 +308,24 @@ export class Hud {
     this.put(x, y, s, size, color, right ? 'right' : 'left')
   }
 
-  private center(x: number, y: number, s: string, size: number, color: string): void {
-    this.put(x, y, s, size, color, 'center')
+  /**
+   * 居中文字。
+   *
+   * ⚠️ `stroke` / `strokeW`（V6.70 新增）：压在**高饱和色块上**的文字必须有描边。
+   * Cocos `Label` 没有 outline 组件（`LabelOutline` 需要 `enableOutline`，但它会额外
+   * 走一遍渲染批次，HUD 里上百个 Label 代价太高）⇒ 用**同一段文字画两遍**实现描边：
+   * 先画偏移的深色底，再画本色。`Label` 是节点，按 `labels[]` 池取两个即可。
+   * 「字号小」这个表象的常见真因就是没描边 —— 深底上 12px 灰字根本读不出来。
+   */
+  private center(x: number, y: number, s: string, size: number, color: string,
+                 right = false, stroke = 0, strokeCol = '#000000'): void {
+    if (stroke > 0) {
+      const r = Math.max(1, Math.round(stroke * 0.5))
+      for (const [dx, dy] of [[-r, 0], [r, 0], [0, -r], [0, r], [-r, -r], [r, -r], [-r, r], [r, r]]) {
+        this.put(x + dx, y + dy, s, size, strokeCol, right ? 'right' : 'center')
+      }
+    }
+    this.put(x, y, s, size, color, right ? 'right' : 'center')
   }
 
   /**
@@ -433,7 +479,7 @@ export class Hud {
     this.text(dx0, dy0 + 26, `L${w.layerIdx + 1} ${L.name}`, 13, TXT.cyber)
     this.text(dx0, dy0 + 44, L.sub, 12, TXT.mute)
     if (L.mech) this.text(dx0, dy0 + 62, `◆ ${L.mech}`, 13, TXT.amber)
-    this.text(dx0, dy0 + 86, `×${w.mult.toFixed(1)}`, 14, TXT.amber)
+    this.text(dx0, dy0 + 86, `×${w.mult.toFixed(1)}`, FS.lead, TXT.amber)
 
     // ===== ①b 深度计（左侧竖直 · V6.51 §9 第 12 步）=====
     // 原先是 5 条小横杠：它只能回答"我在第几层"，回答不了"我在这一层的哪儿"。
@@ -457,7 +503,7 @@ export class Hud {
         g.fill(sc, done ? 0.75 : (cur ? 1 : 0.30))
         g.fillRect(mgX, sy + 1.5, mgW, segH - 3)
         if (i > 0) { g.line(UI.line, 0.5, 1); g.strokeSeg(mgX - 4, sy, mgX, sy) }
-        this.text(mgX + mgW + 12, sy + segH / 2 - 7, LAYERS[i].name, 11,
+        this.text(mgX + mgW + 12, sy + segH / 2 - 7, LAYERS[i].name, FS.micro,
           cur ? TXT.cyber : (done ? TXT.dim : TXT.mute))
       }
       g.line(UI.cyanDim, 0.6, 1); g.strokeRect(mgX, mgY0, mgW, mgH)
@@ -487,18 +533,32 @@ export class Hud {
     // 两段式：剩余氧（实心） | 本层上限被压缩的余量（灰）。
     // 分母用 max(基准, 当前上限)：买了扩容气瓶条会**变长**（正反馈可见）又不会超出槽宽；
     // 下潜后上限压缩必须**可见地变短** —— 这是玩家理解"越深容错越小"的唯一显式信号。
+    //
+    // ⚠️ **V6.70 优化（用户："氧气条需要优化"）**。原来这条只有 `当前/上限` + `-x.x/s`
+    //   + 一个「危险」线，玩家真正想知道的两件事都没给：
+    //   ① **还能撑多久**（秒）—— 玩家要判断的是"够不够打完这一波"，不是"还剩多少点"。
+    //   ② **现在处在哪个危险段** —— 原来只有 20% 一根线，是"连续量"却只给一个阈值。
+    //   ⇒ 加：分段色阶（≥50% 青 / 20–50% 琥珀 / <20% 危红）+ **剩余秒数**大字 + 临界闪烁。
+    //   ⚠️ 秒数必须按**当前真实净耗氧**算（`drain − regen`，且算上当前上限），
+    //      拿表里的裸 `drain` 算会和条上显示的速率对不上 —— 两个数字打架比没数字更糟。
     const bw = 420, bh = 20, bx = (W - bw) / 2, by = 26
     const full = Math.max(O2.max, w.o2Max)
     const curRatio = clamp01(w.o2 / full)
     const capRatio = clamp01(w.o2Max / full)
     const pct = w.o2 / Math.max(1, w.o2Max)
     const low = pct < 0.2
-    const barCol = low ? UI.danger : (pct < 0.5 ? UI.amber : UI.cyan)
+    const mid = !low && pct < 0.5
+    const barCol = low ? UI.danger : (mid ? UI.amber : UI.cyan)
     // 低氧脉冲用**正弦**而不是方波：方波是"闪"，正弦是"呼吸"，更贴近窒息这个生理联想
     const pulse = low ? 0.6 + 0.4 * Math.abs(Math.sin(t * 4.2)) : 1
 
     g.fill(UI.panel, 0.75); g.fillRoundRect(bx, by, bw, bh, 9)
     if (capRatio < 1) { g.fill(UI.line, 0.5); g.fillRoundRect(bx + bw * capRatio, by, bw * (1 - capRatio), bh, 9) }
+
+    // 分段底色：先铺一层"当前所处危险段"的整条底色，再在上面画实心剩余量。
+    // 这样**空条本身也带语义**（只剩 15% 时，那条槽一眼就是红的），而不是"空的"。
+    g.fill(low ? UI.danger : (mid ? UI.amber : UI.cyanDim), low ? 0.16 + 0.10 * Math.abs(Math.sin(t * 4.2)) : 0.12)
+    g.fillRoundRect(bx, by, bw, bh, 9)
     g.fill(barCol, pulse); g.fillRoundRect(bx, by, Math.max(2, bw * curRatio), bh, 9)
 
     // 刻度：每 20 单位一格，让"还剩几格"可以目测（空条上画细刻度、实心区上画暗色刻度）
@@ -509,22 +569,41 @@ export class Hud {
       g.fill(lit ? UI.abyss : UI.line, lit ? 0.45 : 0.55)
       g.fillRect(tx, by + 4, 1, bh - 8)
     }
-    // 危险阈值线：20% 处一条竖线 —— 玩家不该靠心算判断"还剩多少会死"
-    const dzX = bx + bw * (0.2 * w.o2Max / full)
-    g.fill(UI.danger, 0.55 + 0.35 * Math.abs(Math.sin(t * 2)))
-    g.fillRect(dzX - 1, by - 3, 2, bh + 6)
-    this.center(dzX, by + bh + 12, '危险', 12, TXT.warn)
+    // 危险阈值线：20% / 50% 两档 —— 玩家不该靠心算判断"还剩多少会死"
+    for (const [frac, isDz] of [[0.5, false], [0.2, true]] as const) {
+      const tx = bx + bw * (frac * w.o2Max / full)
+      const blink = isDz ? 0.55 + 0.35 * Math.abs(Math.sin(t * 2)) : 0.42
+      g.fill(isDz ? UI.danger : UI.amber, blink)
+      g.fillRect(tx - (isDz ? 1 : 0.5), by - 3, isDz ? 2 : 1, bh + 6)
+    }
+    this.center(bx + bw * (0.2 * w.o2Max / full), by + bh + 12, '危险', FS.body, TXT.warn)
 
     g.line(low ? UI.danger : UI.cyanDim, 0.8, low ? 2 : 1)
     g.strokeRoundRect(bx, by, bw, bh, 9)
-    this.center(W / 2, by + bh / 2, `${Math.ceil(w.o2Shown)} / ${w.o2Max}`, 20, low ? TXT.warn : TXT.cyber)
+    this.center(W / 2, by + bh / 2, `${Math.ceil(w.o2Shown)} / ${w.o2Max}`, FS.big, low ? TXT.warn : TXT.cyber)
+
+    // ---- 剩余秒数（V6.70 新增 · 条**下方**右端）----
+    // ⚠️ **不能放条右侧**：`wx0 = bx+bw+18 = 880` 就是波次面板的左边界，
+    //    往右写会被「第 N 波 / 环形倒计时 / 剩余 N」整块盖住（画在 `gHud` 同一层，
+    //    谁后画谁盖 —— 两个 HUD 块打架是最难查的那类 bug）。
+    //    条下方（y = by+bh+12，与「危险」标签同一行）到 x=862 之间是空的，安全。
+    // ⛔ `drain ≤ regen`（养满再生）时净耗氧 ≤ 0，秒数是无穷大 ⇒ 必须换文案，
+    //   显示成 99+ 会让玩家以为卡住了。
+    const sy2 = by + bh + 12
+    if (L.drain <= 0.001) {
+      this.text(bx + bw, sy2 - 5, '回氧中', FS.lead, TXT.jade, true)
+    } else {
+      const secs = w.o2 / Math.max(0.05, L.drain)
+      const sCol = secs < 10 ? TXT.warn : (secs < 25 ? TXT.amber : TXT.dim)
+      this.text(bx + bw, sy2 - 5, `${secs >= 99 ? '99+' : Math.floor(secs)}s`, FS.lead, sCol, true)
+    }
     // 耗氧速率（越深越快，必须显式告诉玩家）
-    this.text(bx - 12, by + 2, `-${L.drain.toFixed(1)}/s`, 13, TXT.dim, true)
+    this.text(bx - 12, by + 2, `-${L.drain.toFixed(1)}/s`, FS.body, TXT.dim, true)
 
     // ===== ③ 波次进度（氧气条右侧）=====
     const wx0 = bx + bw + 18
     const total = w.waves().length
-    this.text(wx0, by + 2, `第 ${w.waveInLayer + 1} / ${total} 波`, 16, TXT.main)
+    this.text(wx0, by + 2, `第 ${w.waveInLayer + 1} / ${total} 波`, FS.title, TXT.main)
     for (let i = 0; i < total; i++) {
       const px1 = wx0 + i * 16, py1 = by + bh + 6
       const done = w.phase === 'result' ? i < w.waveInLayer : i <= w.waveInLayer
@@ -544,12 +623,12 @@ export class Hud {
       g.line(UI.abyss, 0.75, 3); g.strokeCircle(wcx, wcy, wr)
       g.line(left < 0.25 ? UI.danger : UI.cyan, 0.95, 3)
       g.arc(wcx, wcy, wr, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * left); g.stroke()
-      this.center(wcx, wcy, `${Math.max(0, Math.ceil(w.waveTimer))}`, 15, left < 0.25 ? TXT.warn : TXT.cyber)
-      this.text(wcx + wr + 6, wcy - 6, 's', 12, TXT.dim)
+      this.center(wcx, wcy, `${Math.max(0, Math.ceil(w.waveTimer))}`, FS.lead, left < 0.25 ? TXT.warn : TXT.cyber)
+      this.text(wcx + wr + 6, wcy - 6, 's', FS.body, TXT.dim)
       // 剩余敌人：清波进度的唯一确定信号（计时器到点 ≠ 波次结束，还要清场）
       const alive = w.enemies.reduce((n, e) => n + (e.alive ? 1 : 0), 0)
       this.text(wx0, by + bh + 60, w.spawnLeft > 0 ? `剩余 ${alive} · 涌入中` : `剩余 ${alive}`,
-        13, alive > 0 ? TXT.dim : TXT.jade)
+        FS.body, alive > 0 ? TXT.dim : TXT.jade)
     } else if (w.phase === 'descending') {
       // 下潜进度条：下潜是一次"过渡"，玩家需要一个明确的进度
       const k = clamp01(w.descT / Math.max(0.01, w.descDur))
@@ -557,8 +636,8 @@ export class Hud {
       g.fill(UI.panel, 0.7); g.fillRoundRect(dx2, dy2, dw, 8, 4)
       g.fill(UI.cyan, 0.9); g.fillRoundRect(dx2, dy2, Math.max(3, dw * k), 8, 4)
       g.line(UI.cyanDim, 0.7, 1); g.strokeRoundRect(dx2, dy2, dw, 8, 4)
-      this.text(dx2, dy2 - 14, '下潜中', 12, TXT.cyan)
-      this.text(dx2 + dw + 8, dy2 - 2, `${Math.round(k * 100)}%`, 12, TXT.dim)
+      this.text(dx2, dy2 - 14, '下潜中', FS.body, TXT.cyan)
+      this.text(dx2 + dw + 8, dy2 - 2, `${Math.round(k * 100)}%`, FS.body, TXT.dim)
     }
 
     // ===== ③b 鱼情雷达（右上角，V6.55）=====
@@ -573,11 +652,16 @@ export class Hud {
     //
     // ⚠️ 点位**绝不给 2px 发光核**（那是"可瞄准敌人"的铁律，见 `drawEnemies`）：
     //    雷达点纯信息，给了核会和战斗画面里真正能打的目标混淆。
-    // 2026-10-14 用户：「鱼情图小了点」⇒ 外环 52→**64**（+23%）、映射半径 44→**54**。
-    // ⚠️ 放大的**上限**由上方波次环（底 ≈ y 97）与右侧屏幕边共同压住：
-    //    RCY − RR = 110 > 97（不撞波次环）、RCX + RR = W−22（右边留 22px）。
-    //    再往上加会同时踩到这两条，所以这里是"刚好放下"的尺寸，不是随手取的。
-    const RCX = W - 86, RCY = 174, RR = 64, RPLOT = 54
+    // 2026-10-14 用户：「鱼情图小了点」⇒ 外环 52→64。
+    // 2026-10-15 用户：「鱼情局这个圆圈需要大点」⇒ 外环 64 → **88**（+37.5%）。
+    //
+    // ⚠️ **放大必须同时挪点位**，否则一定撞上别的东西：
+    //    ① 上方波次环形倒计时的底 ≈ y 97 ⇒ `RCY − RR ≥ 110`
+    //    ② 右侧屏幕边 ⇒ `RCX + RR ≤ W − 22`
+    //   RR=88 时这两条把 y 压到 198、x 压到 W−110 —— 也就是**必须往下挪**，
+    //   而下面就是装备槽（左）与鱼骨/暂停（右下），所以半径只能涨到 88 就该停。
+    //   真要再大，得先把波次环挪走，那是另一个改动。
+    const RCX = W - 110, RCY = 198, RR = 88, RPLOT = 74
     // 量程比屏幕半对角线（≈752）略大 ⇒ 画面内出现的敌人**必然**落在圈内；
     // 落在外环上的只可能是"还没进画面"的 —— 那正是"它正从那个方向来"的导航语义。
     const RANGE = 780
@@ -587,7 +671,21 @@ export class Hud {
     g.line(UI.line, 0.32, 1); g.strokeCircle(RCX, RCY, RR * 0.5)
     g.line(UI.line, 0.22, 1); g.strokeSeg(RCX - RR, RCY, RCX + RR, RCY)
     g.line(UI.line, 0.22, 1); g.strokeSeg(RCX, RCY - RR, RCX, RCY + RR)
-    this.center(RCX, RCY - RR + 14, '鱼情', 12, TXT.mute)
+    // 外环加一道"量程刻度"：四向短齿，让放大后的圆不至于只是一条空线圈
+    g.line(UI.cyanDim, 0.45, 1.4)
+    for (let i = 0; i < 12; i++) {
+      const a = (i / 12) * Math.PI * 2
+      const r0 = RR - (i % 3 === 0 ? 9 : 5)
+      g.strokeSeg(RCX + Math.cos(a) * r0, RCY + Math.sin(a) * r0,
+        RCX + Math.cos(a) * RR, RCY + Math.sin(a) * RR)
+    }
+    // ---- V6.78：副标题「声呐扫描」**整行删除** ----
+    // 用户 2026-10-15：「鱼情局 后面的声呐扫描去掉」。
+    // ⚠️ **只删副标题，圈的几何与标题都不动**：`RCX/RCY/RR = W−110 / 198 / 88`、
+    //    标题 `鱼情局` 仍钉在 `RCY − RR + 15`（圈内上沿）。
+    //    ⚠️ 别顺手把标题往上挪到 `RCY − RR + 30` 去"补空" —— 那是原副标题的位置，
+    //       `RR=88` 时它离圈顶只剩 30px，会把标题压到刻度齿上。
+    this.center(RCX, RCY - RR + 15, '鱼情局', FS.title, TXT.cyber)
 
     for (const e of w.enemies) {
       if (!e.alive) continue
@@ -598,19 +696,20 @@ export class Hud {
       const px = RCX + ux * k * RPLOT, py = RCY + uy * k * RPLOT
       if (e.kind === 'boss') {
         // BOSS 是本作唯一"必须提前知道它从哪来"的目标 ⇒ 大点 + 呼吸环
-        const br = 7 + 2.5 * Math.abs(Math.sin(t * 3))
+        const br = 9.5 + 3.2 * Math.abs(Math.sin(t * 3))
         g.line(UI.violet, 0.7, 1.8); g.strokeCircle(px, py, br)
-        g.fill(UI.violet, 1); g.fillCircle(px, py, 4.2)
+        g.fill(UI.violet, 1); g.fillCircle(px, py, 5.6)
       } else {
         // 贴边（k=1）的压暗：它还没进画面，只表示"那个方向有东西"
-        // 点位半径同步上调（3.0/2.2 → 3.6/2.6）—— 圈放大了点位不放大，读起来会更"空"
+        // ⚠️ 点位半径随圈一起放大（3.0/2.2 → 4.6/3.3）—— 圈大了点没大，
+        //    在更大的空画面里点会读成一粒灰噪（用户看到的"圈里很空"就是这个）。
         g.fill(e.color, k >= 1 ? 0.5 : 0.95)
-        g.fillCircle(px, py, e.kind === 'drift' ? 3.6 : 2.6)
+        g.fillCircle(px, py, e.kind === 'drift' ? 4.6 : 3.3)
       }
     }
     // 圆心 = 玩家自己，**最后画**，保证永不被点位盖住。小箭头 = 航向（`w.aim` 是 sim 角度）
-    g.fill(UI.cyanHi, 1); g.fillCircle(RCX, RCY, 3.4)
-    g.fill(UI.cyanHi, 0.8); g.fillTri(RCX, RCY, w.aim, 10, 5)
+    g.fill(UI.cyanHi, 1); g.fillCircle(RCX, RCY, 4.6)
+    g.fill(UI.cyanHi, 0.8); g.fillTri(RCX, RCY, w.aim, 13, 6.5)
 
     // ===== ④ 生物质（层末才显示）/ 鱼骨（常驻）/ 暂停按钮（常驻·**右下角**）=====
     // 鱼骨必须**常驻**：玩家要在战斗中就看见数字在涨，才会把"捡鱼骨"和"待会儿能买什么"连起来。
@@ -621,9 +720,9 @@ export class Hud {
     //   2026-10-13 为让角做过一次左移，现在角让回来了，那 44px 的偏移一并撤销。
     const bY = by + (w.mult > 1 ? 48 : 26)
     g.line(BONE, 0.9, 1.4); g.strokeCircle(W - 106, bY + 8, 7)
-    this.text(W - 88, bY, `${w.bank}`, 17, TXT.cyber)
+    this.text(W - 88, bY, `${w.bank}`, FS.title, TXT.cyber)
     if (w.phase !== 'wave') {
-      this.text(W - 24, by + 2, `生物质 ${w.biomass}`, 18, TXT.jade, true)
+      this.text(W - 24, by + 2, `生物质 ${w.biomass}`, FS.title, TXT.jade, true)
       if (w.mult > 1) this.text(W - 24, by + 26, `上浮可得 ${Math.floor(w.biomass * w.mult)}`, 13, TXT.amber, true)
     }
 
@@ -663,11 +762,30 @@ export class Hud {
       this.button(pbx, pby, 76, 76, '', cbs.onPause, true, { fillA: 0, edgeA: 0 })
     }
 
-    // ===== ⑤ 装备槽（底部左）=====
-    // 每槽同时回答四个问题：装了什么（图形签名）· 多强（等级点）· 什么时候好（冷却环）· 是不是扩容座（角标）
+    // ===== ⑤ 装备槽 · 座圈（底部左）=====
+    // 每槽回答四个问题：装的是**哪台发射器**（立绘）· 多强（等级点）·
+    // 什么时候好（冷却条）· 是不是扩容座（角标）
+    //
+    // ---- V6.78：槽内图标从"矢量重画的弹体"改成**发射器立绘本身** ----
+    // 用户第三次点名（2026-10-15）：
+    //   「目前这几个区域 我一直强调要放对应的发射器的图片 波次间选卡那种」。
+    // 前两版分别画过「发射器侧视小像」(V6.73) 与「发射物弹体」(V6.74)—— 都是
+    // **在 46px 的方槽里用 Graphics 重画一遍**。而用户要的是**那张图本身**：
+    // 商店 / 波间选卡卡面上的 `item_<id>.png`。
+    // ★ 判据：**同一个东西在两张界面里必须长得一模一样**。卡面用立绘、座圈用矢量，
+    //   两边就必然对不上 —— 这正是这条需求反复三轮没落地的根因（不是尺寸不够，
+    //   是"换了个东西画"，V6.74b 把 s 从 12 提到 16 也救不了）。
+    //
+    // 尺寸依据（两个硬约束，动之前先算）：
+    //   ① 立绘素材统一 **2:1**（600×300，`tools/process_item_art.py` 规定内容 FILL=0.86 居中）
+    //      ⇒ 窗口必须 2:1，否则 contain 后上下留大片死空间（垫光晕只会把画面弄脏）；
+    //   ② 槽宽是**上限**：6 座时右端 = `24 + 5×100 + 88 = 612`，而技能冷却圆环的左缘
+    //      在 `W/2 − 20 = 632` ⇒ 88 是能放下的最大宽度（再宽就撞冷却环）。
+    //   ⇒ 槽 88×52 / 立绘窗 80×40。
     const sy = H - 50
+    const seatY = H - 56
     const slots = Math.min(w.maxWeapons, MAX_SEATS)
-    const sw = 46, gap = 52
+    const sw = 88, sh = 52, gap = 100
     const plan = w.mountPlan()
     for (let i = 0; i < slots; i++) {
       const sx = 24 + i * gap
@@ -676,59 +794,104 @@ export class Hud {
       const wcol = wp ? WEAPON_DEF[wp.id].color : UI.line
 
       g.fill(wp ? UI.panelHi : UI.panel, wp ? 0.9 : 0.55)
-      g.fillRoundRect(sx, sy, sw, sw, 9)
+      g.fillRoundRect(sx, seatY, sw, sh, 9)
+
+      // 窗口几何（空槽也要画）—— 空槽画同样的 2:1 窗，玩家开打前就知道
+      // "这里能插一台横过来的东西"，而不是一个空白方块
+      const ax = sx + 4, ay = seatY + 4, aw = sw - 8, ah = sh - 12
 
       if (!wp) {
-        g.line(UI.line, 0.45, 1); g.strokeRoundRect(sx, sy, sw, sw, 9)
-        this.center(sx + sw / 2, sy + sw / 2 - 6, String(i + 1), 13, TXT.mute)
+        g.line(UI.line, 0.45, 1); g.strokeRoundRect(sx, seatY, sw, sh, 9)
+        g.fill(UI.abyss, 0.22); g.fillRoundRect(ax, ay, aw, ah, 7)
+        this.center(ax + aw / 2, ay + ah / 2, String(i + 1), FS.body, TXT.mute)
         continue
       }
 
-      g.line(wcol, 0.9, ext ? 2.4 : 2); g.strokeRoundRect(sx, sy, sw, sw, 9)
-      const icx = sx + sw / 2, icy = sy + 19
-      this.weaponIcon(wp.id, icx, icy, 12)
+      g.line(wcol, 0.9, ext ? 2.4 : 2); g.strokeRoundRect(sx, seatY, sw, sh, 9)
 
-      // 冷却环：绕图标画一圈、从 12 点顺时针填充 —— "转满一圈"直接对应"又射了一发"
+      // ---- 立绘窗（2:1，与商店卡 `shopCard` 的立绘槽同一套语言）----
+      // 窗底**比卡面深**：亮色立绘要靠"更深的底"跳出来（`BRIGHT.slot` < `BRIGHT.card`
+      // 是同一条依据；垫光晕只会把画面弄脏）。
+      g.fill(UI.abyss, 0.55); g.fillRoundRect(ax, ay, aw, ah, 7)
+      g.line(wcol, 0.35, 1); g.strokeRoundRect(ax + 0.5, ay + 0.5, aw - 1, ah - 1, 7)
+      // ⚠️ key 与商店卡 `cardArtKey()` 同源（`item_<武器id>`），**不要另起一套映射** ——
+      //    漂移的症状是"卡面是声呐、座圈是回声"，两边各对一半。
+      // ⚠️ `artPaths()` 已为每把武器解析过回退路径，所以 `item_mine` 这类
+      //    尚未出图的 id **也能取到图**（借语义最近的），不会静默空窗。
+      const seatSf = this.art.get('item_' + wp.id)
+      if (seatSf) this.putArt(ax + aw / 2, ay + ah / 2, aw - 4, ah - 2, seatSf)
+      // 银行里真没有时才退回矢量弹体（"美术没接上"不该表现成"槽是空的"）
+      else this.weaponIcon(wp.id, ax + aw / 2, ay + ah / 2, 30)
+
+      // ---- 冷却条（贴在窗口下沿）----
+      // 换成横条不是审美：窗口已经是 2:1，画不下 r=15 的环；而"从 12 点顺时针转一圈"
+      // 这个语义在横条上就是"从左往右填满"，读数反而更稳。
       if (wp.timer > 0) {
         const k = clamp01(1 - wp.timer / Math.max(0.01, wp.ivLast || wp.iv))
-        g.line(UI.abyss, 0.8, 3); g.strokeCircle(icx, icy, 15)
-        g.line(wcol, 0.95, 3)
-        g.arc(icx, icy, 15, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * k); g.stroke()
+        const cbx = sx + 6, cby = seatY + sh - 5, cbw = sw - 12
+        g.fill(UI.abyss, 0.85); g.fillRoundRect(cbx, cby, cbw, 3, 1.5)
+        g.fill(wcol, 0.95); g.fillRoundRect(cbx, cby, Math.max(2, cbw * k), 3, 1.5)
       }
 
-      // 等级点：最多 5 个小方块
+      // ---- 等级点（叠在窗口左下角**内侧**）----
+      // 位置不是随便挑的：立绘内容按 FILL=0.86 居中，左下角是**透明**的 ⇒ 压上去
+      // 不会和枪身打架，也不用在 52px 高的卡里再切一行出来。
       for (let k2 = 0; k2 < 5; k2++) {
         g.fill(k2 < wp.lvl ? wcol : UI.line, k2 < wp.lvl ? 1 : 0.45)
-        g.fillRect(sx + 8 + k2 * 6.5, sy + 35, 4, 4)
+        g.fillRect(ax + 5 + k2 * 6, ay + ah - 7, 4, 4)
       }
       // 扩容座角标（与商店卡里的座圈示意图同一套视觉语言：扩容座 = 琥珀）
+      // ⚠️ 先垫一层暗底：琥珀压在亮色立绘上会读不出来（角标的全部意义就是"看得见"）
       if (ext) {
+        g.fill(UI.abyss, 0.6); g.fillRoundRect(ax + aw - 17, ay + 2, 15, 16, 4)
         g.fill(UI.amber, 0.95)
-        g.fillRect(sx + sw - 13, sy + 4, 7, 4)
-        g.fillRect(sx + sw - 13, sy + 10, 7, 4)
+        g.fillRect(ax + aw - 14, ay + 4, 7, 4)
+        g.fillRect(ax + aw - 14, ay + 10, 7, 4)
       }
     }
-    this.text(24, sy - 16, `座圈 ${w.weapons.length}/${slots}`,
-      12, w.weapons.length < w.maxWeapons ? TXT.dim : TXT.cyan)
+    this.text(24, seatY - 16, `座圈 ${w.weapons.length}/${slots}`,
+      FS.body, w.weapons.length < w.maxWeapons ? TXT.dim : TXT.cyan)
 
     // ===== ⑥ 遗物槽（底部右）=====
     // 遗物必须战斗中也能看见：效果多为条件触发，玩家得知道"我现在有条件可触发"
     // ⚠️ 2026-10-14：右端从 `W-24` 退到 `W-92` —— 给右下角的暂停键让出 23px 间隔。
     //    底部这一行现在是**从右往左**排的：暂停键 → 遗物槽 → (空) → 技能冷却 → 装备槽。
     {
-      const rs = 30, rgap = 36
+      // ---- V6.74 遗物槽重做（用户：「遗物也没有任何显示」）----
+      // 三件事一起补，缺一件都还是"没有显示"：
+      //   ① **槽位放大 + 图标放大**（30→34 / 11→14）：11px 的遗物图标在 34px 槽里
+      //      只是一粒灰点，用户看到的"没有任何显示"有一半是这个；
+      //   ② **空槽也画编号**：原来空槽是一条空心框，玩家数不出"我一共能带几个"；
+      //   ③ **激活反馈从"描边变亮"升级为"槽内呼吸填充 + 顶部生效条"** ——
+      //      遗物的效果多为条件触发（低氧 / 3 秒无伤 / 深潜），玩家必须能看见
+      //      "它此刻正在起作用"，否则整件遗物等于不存在。
+      const rs = 34, rgap = 40
       const rx0 = W - 92 - RELIC_SLOTS * rgap + (rgap - rs)
       for (let i = 0; i < RELIC_SLOTS; i++) {
         const rx = rx0 + i * rgap
         const id = w.relics[i]
-        if (!id) { g.line(UI.line, 0.4, 1); g.strokeRoundRect(rx, sy + 7, rs, rs, 7); continue }
-        g.fill(UI.panelHi, 0.8); g.fillRoundRect(rx, sy + 7, rs, rs, 7)
+        if (!id) {
+          g.fill(UI.panel, 0.4); g.fillRoundRect(rx, sy + 5, rs, rs, 7)
+          g.line(UI.line, 0.4, 1); g.strokeRoundRect(rx, sy + 5, rs, rs, 7)
+          this.center(rx + rs / 2, sy + 5 + rs / 2, String(i + 1), FS.micro, TXT.mute)
+          continue
+        }
         const live = w.relicActive(id)
-        g.line(live ? UI.cyanHi : BONE, live ? 0.95 : 0.6, live ? 2 : 1.2)
-        g.strokeRoundRect(rx, sy + 7, rs, rs, 7)
-        this.relicIcon(id, rx + rs / 2, sy + 22, 11)
+        g.fill(UI.panelHi, 0.85); g.fillRoundRect(rx, sy + 5, rs, rs, 7)
+        // 激活：槽内一层呼吸填充（由外向内叠的第二层，不是换底色）
+        if (live) {
+          const br = 0.10 + 0.08 * Math.abs(Math.sin(t * 3.2))
+          g.fill(UI.cyanHi, br); g.fillRoundRect(rx, sy + 5, rs, rs, 7)
+        }
+        g.line(live ? UI.cyanHi : BONE, live ? 0.95 : 0.6, live ? 2.2 : 1.2)
+        g.strokeRoundRect(rx, sy + 5, rs, rs, 7)
+        this.relicIcon(id, rx + rs / 2, sy + 5 + rs / 2, 14)
+        if (live) {
+          // 顶部一条"生效"小条：条件触发的遗物必须常驻告知，不能只靠描边呼吸
+          g.fill(UI.cyanHi, 0.9); g.fillRoundRect(rx + 5, sy + 1, rs - 10, 2.4, 1.2)
+        }
       }
-      this.text(W - 92, sy - 16, '遗物', 12, TXT.dim, true)
+      this.text(W - 92, sy - 16, `遗物 ${w.relics.length}/${RELIC_SLOTS}`, FS.body, TXT.dim, true)
     }
 
     // ===== ⑦ 技能冷却（底部中）=====
@@ -736,14 +899,14 @@ export class Hud {
     const kk = ready ? 1 : clamp01(1 - w.burstTimer / O2.burstCd)
     g.line(ready ? UI.cyan : UI.cyanDim, 0.9, 2); g.strokeCircle(W / 2, sy + 22, 20)
     g.fill(ready ? UI.cyan : UI.cyanDim, 0.25); g.fillCircle(W / 2, sy + 22, 20 * kk)
-    this.center(W / 2, sy + 22, ready ? '空格' : `${Math.ceil(w.burstTimer)}`, 13, ready ? TXT.cyber : TXT.mute)
+    this.center(W / 2, sy + 22, ready ? '空格' : `${Math.ceil(w.burstTimer)}`, FS.body, ready ? TXT.cyber : TXT.mute)
 
     // ===== ⑧ 环境状态提示（左，**深度计右侧**）=====
     // x 从 24 移到 106：深度计的带名标签占到 x≈78，两个挤在一起会互相压字。
     let ty = 250
-    if (w.vpCur > 0) { this.text(106, ty, `暗流 ${w.vpCur.toFixed(0)}`, 13, TXT.amber); ty += 20 }
-    if (w.vpPush > 0) { this.text(106, ty, `热泉上推 ${w.vpPush.toFixed(0)}`, 13, TXT.amber); ty += 20 }
-    if (w.burstTimer > 0) this.text(106, ty, `排气冷却 ${w.burstTimer.toFixed(1)}s`, 13, TXT.mute)
+    if (w.vpCur > 0) { this.text(106, ty, `暗流 ${w.vpCur.toFixed(0)}`, FS.body, TXT.amber); ty += 20 }
+    if (w.vpPush > 0) { this.text(106, ty, `热泉上推 ${w.vpPush.toFixed(0)}`, FS.body, TXT.amber); ty += 20 }
+    if (w.burstTimer > 0) this.text(106, ty, `排气冷却 ${w.burstTimer.toFixed(1)}s`, FS.body, TXT.mute)
 
     // ===== ⑨ 低氧压迫：心跳边框 + "O₂ 告急" =====
     // 玩家要能把"我为什么喘不上气"归因到正确原因，就必须有常驻显式指示。
@@ -773,88 +936,218 @@ export class Hud {
    * 进化形态（`weaponFamily(id) !== id`）在右上角加一颗小菱形角标 ——
    * "这是同一族的进化版"一眼可辨（V6 §5.2 质变密度原则）。
    */
+  /** 通用**弹丸**（枪族 / 兜底）：尖头 + 圆柱身 + 尾翼，朝右飞。 */
+  private iconShot(cx: number, cy: number, s: number, c: number): void {
+    const g = this.g
+    g.fill(c, 0.55)
+    g.moveTo(cx + s * 0.62, cy)
+    g.lineTo(cx - s * 0.18, cy - s * 0.17)
+    g.lineTo(cx - s * 0.42, cy - s * 0.24)
+    g.lineTo(cx - s * 0.42, cy + s * 0.24)
+    g.lineTo(cx - s * 0.18, cy + s * 0.17)
+    g.close(); g.fillPath()
+    g.line(c, 1, 1.5)
+    g.moveTo(cx + s * 0.62, cy)
+    g.lineTo(cx - s * 0.18, cy - s * 0.17)
+    g.lineTo(cx - s * 0.42, cy - s * 0.24)
+    g.lineTo(cx - s * 0.42, cy + s * 0.24)
+    g.lineTo(cx - s * 0.18, cy + s * 0.17)
+    g.close(); g.stroke()
+    g.fill(0xffffff, 0.95); g.fillCircle(cx + s * 0.34, cy, s * 0.13)
+  }
+
+  /** **鱼雷弹体**：钝头圆柱 + 尾鳍 + 螺旋桨，朝右飞（与实机 `drawShots` 同型）。 */
+  private iconTorpedo(cx: number, cy: number, s: number, c: number): void {
+    const g = this.g
+    const N = 0.72, T = 0.62, H = 0.30
+    const body = () => {
+      g.moveTo(cx + s * N, cy)
+      g.lineTo(cx - s * T, cy - s * H)
+      g.lineTo(cx - s * (T + 0.16), cy - s * (H + 0.20))
+      g.lineTo(cx - s * (T + 0.16), cy + s * (H + 0.20))
+      g.lineTo(cx - s * T, cy + s * H)
+      g.close()
+    }
+    g.fill(c, 0.5); body(); g.fillPath()
+    g.line(c, 1, 1.6); body(); g.stroke()
+    // 螺旋桨（尾端一个十字 + 外圈）—— "水里跑的"与"空气里飞的"的分界
+    g.line(c, 0.9, 1.3)
+    g.strokeSeg(cx - s * (T + 0.06), cy - s * 0.34, cx - s * (T + 0.06), cy + s * 0.34)
+    g.strokeSeg(cx - s * (T + 0.24), cy - s * 0.30, cx - s * (T + 0.24), cy + s * 0.30)
+    g.fill(0xffffff, 0.9); g.fillCircle(cx + s * (N - 0.16), cy, s * 0.11)
+  }
+
+  /** **鱼叉**：长杆 + 倒刺箭头；`spin` = 回旋鱼叉加一道回旋弧。 */
+  private iconHarpoon(cx: number, cy: number, s: number, c: number, spin: boolean): void {
+    const g = this.g
+    g.line(c, 1, 1.8)
+    g.strokeSeg(cx - s * 0.52, cy, cx + s * 0.24, cy)
+    g.line(c, 1, 1.5)
+    g.moveTo(cx + s * 0.70, cy)
+    g.lineTo(cx + s * 0.14, cy - s * 0.36)
+    g.lineTo(cx + s * 0.30, cy)
+    g.lineTo(cx + s * 0.14, cy + s * 0.36)
+    g.close(); g.stroke()
+    if (spin) {
+      g.line(c, 0.6, 1.2)
+      g.arc(cx - s * 0.60, cy, s * 0.30, -1.2, 1.2); g.stroke()
+    }
+    g.fill(0xffffff, 0.9); g.fillCircle(cx + s * 0.50, cy, s * 0.10)
+  }
+
   private weaponIcon(id: WeaponId, cx: number, cy: number, s: number): void {
     const g = this.g
     const color = WEAPON_DEF[id].color
     const fam = weaponFamily(id)
 
-    if (fam === 'sonar') {
-      g.line(color, 0.95, 1.6); g.strokeCircle(cx, cy, s * 0.9)
-      // 共振炮：多一层同心回波 —— 读作"伤害会往下传"
-      if (id === 'sonar_rs') { g.line(color, 0.55, 1.2); g.strokeCircle(cx, cy, s * 0.66) }
-      // 定向聚焦：把环画成一段粗弧（"聚焦" = 只朝一个方向）
-      if (id === 'sonar_fc') { g.line(color, 0.95, 3.2); g.arc(cx, cy, s * 0.9, -0.9, 0.9); g.stroke() }
-      g.line(color, 0.6, 1.4); g.strokeCircle(cx, cy, s * 0.42)
-    } else if (fam === 'gun') {
-      // 霰弹画 5 根管（散射感），其余 3 根
-      const n = id === 'gun_sg' ? 5 : 3
-      for (let i = 0; i < n; i++) {
-        const yy = cy + (i - (n - 1) / 2) * (s * 0.44)
-        g.line(color, 0.9, id === 'gun_sg' ? 1.3 : 1.6)
-        g.strokeSeg(cx - s, yy, cx + s, yy)
+    // ---- V6.74：图标 = **发射物（打出去的那颗东西）**----
+    // 用户两轮反馈：
+    //   2026-10-15「座圈 毫无改变 我需要的是发射物的显示」。
+    // 上一版（V6.73）画的是"发射器侧视小像"（机匣 + 炮管）—— 那仍然回答的是
+    // "这台机器长什么样"，而装备槽要回答的是**"它打出去的是什么"**：
+    //   玩家在战斗中看到的是**满屏飞的弹体**，不是艇上那台机器。
+    //   槽位图标必须与"我正在躲/正在看的那颗东西"同型，否则图标与战场对不上号。
+    // ⚠️ 统一朝右飞（与机体默认朝向一致）—— 弹体是有方向的，方向错 = 读成另一种武器。
+    // ⚠️ 只画**弹体本体 + 一点拖尾**：46px 槽里塞机匣 + 炮管 + 弹体 = 三样都读不出。
+
+    // ⓪ 共用的"飞行辉光"：三层同 alpha 由外向内叠（Canvas 下没有 ADD，
+    //    这是唯一可靠的辉光写法，见 theme.ts 硬规约 ②）
+    g.fill(color, 0.10); g.fillCircle(cx + s * 0.16, cy, s * 0.86)
+    g.fill(color, 0.18); g.fillCircle(cx + s * 0.16, cy, s * 0.56)
+
+    // ① 拖尾：所有族都从**尾部后方**拉一道（越远越淡越细）
+    for (let i = 1; i <= 3; i++) {
+      g.line(color, 0.5 / i, 2.4 - i * 0.5)
+      g.strokeSeg(cx - s * (0.30 + i * 0.20), cy, cx - s * (0.52 + i * 0.20), cy)
+    }
+
+    // ② 弹体本体（按族路由；进化形态靠 `weaponFamily` 归族，不再掉进 else）
+    if (fam === 'gun') {
+      if (id === 'gun_sg') {
+        // 霰弹：**三颗弹丸**扇形散开（不是 5 —— 槽里 5 颗会糊成一团）
+        for (const [ox, oy] of [[0.34, -0.30], [0.52, 0], [0.34, 0.30]] as const) {
+          this.iconShot(cx + s * ox, cy + s * oy, s * 0.86, color)
+        }
+      } else if (id === 'gun_gl') {
+        // 加特林：一颗弹 + 后面**三颗待装弹**（弹链 = 射速翻倍的视觉签名）
+        this.iconShot(cx + s * 0.46, cy, s * 0.92, color)
+        for (const ox of [-0.24, -0.46, -0.68]) {
+          g.line(color, 0.5, 1.2)
+          g.strokeRoundRect(cx + s * ox - s * 0.11, cy - s * 0.13, s * 0.22, s * 0.26, 1.5)
+        }
+      } else {
+        // 脉冲机关枪：单发高速弹（细长尖头）
+        this.iconShot(cx + s * 0.46, cy, s * 1.05, color)
       }
-      // 加特林：管口加一个转环
-      if (id === 'gun_gl') { g.line(color, 0.8, 1.3); g.strokeCircle(cx + s * 0.72, cy, s * 0.42) }
     } else if (fam === 'torpedo') {
-      // 集束：3 枚小号；重型：1 枚大号（尾鳍同比例放大）
       const n = id === 'torp_cl' ? 3 : 1
-      const k = id === 'torp_cl' ? 0.62 : 1
+      const sc = id === 'torp_hv' ? 1.0 : id === 'torp_cl' ? 0.62 : 0.86
       for (let i = 0; i < n; i++) {
-        const oy = cy + (i - (n - 1) / 2) * (s * 0.62)
-        g.line(color, 0.9, 1.5); g.strokeEllipse(cx + s * 0.15, oy, s * 1.35 * k, s * 0.72 * k)
-        g.moveTo(cx - s * 0.5 * k, oy)
-        g.lineTo(cx - s * 1.05 * k, oy - s * 0.55 * k)
-        g.lineTo(cx - s * 1.05 * k, oy + s * 0.55 * k)
-        g.close(); g.stroke()
+        const oy = n === 1 ? 0 : (i - 1) * s * 0.34
+        this.iconTorpedo(cx + (n === 1 ? s * 0.18 : s * 0.10), cy + oy, s * sc, color)
       }
     } else if (fam === 'harpoon') {
-      // 长杆 + 倒刺箭头 —— "穿透"读得出来
-      g.line(color, 0.9, 1.8); g.strokeSeg(cx - s, cy, cx + s * 0.5, cy)
-      g.line(color, 0.9, 1.5)
-      g.moveTo(cx + s, cy)
-      g.lineTo(cx + s * 0.40, cy - s * 0.44)
-      g.lineTo(cx + s * 0.56, cy)
-      g.lineTo(cx + s * 0.40, cy + s * 0.44)
-      g.close(); g.stroke()
-    } else if (fam === 'echo') {
-      // 三层同心弧（声波）+ 中心点
-      for (let i = 1; i <= 3; i++) {
-        g.line(color, i === 1 ? 0.95 : 0.6, 1.5)
-        g.arc(cx - s * 0.32, cy, s * 0.34 * i, -0.95, 0.95); g.stroke()
+      const n = id === 'harp_tr' ? 3 : 1
+      for (let i = 0; i < n; i++) {
+        const oy = n === 1 ? 0 : (i - 1) * s * 0.32
+        this.iconHarpoon(cx + s * 0.10, cy + oy, s * (n === 1 ? 1.0 : 0.66), color, id === 'harp_cb')
       }
-      g.fill(color, 0.95); g.fillCircle(cx - s * 0.32, cy, s * 0.14)
-    } else if (fam === 'acid') {
-      // 主液滴 + 两枚溅出的小液滴
-      g.fill(color, 0.30); g.fillCircle(cx, cy, s * 0.52)
-      g.line(color, 0.9, 1.6); g.strokeCircle(cx, cy, s * 0.52)
-      g.fill(color, 0.85)
-      g.fillCircle(cx + s * 0.74, cy - s * 0.5, s * 0.16)
-      g.fillCircle(cx - s * 0.68, cy + s * 0.56, s * 0.13)
-    } else if (id === 'arc_st') {
-      // 雷暴：放射状多段 —— "一次电击全部目标"
-      for (let i = 0; i < 6; i++) {
-        const a = -Math.PI / 2 + (i / 6) * Math.PI * 2
-        g.line(color, 0.85, 1.4)
-        g.strokeSeg(cx, cy, cx + Math.cos(a) * s, cy + Math.sin(a) * s)
+    } else if (fam === 'sonar') {
+      // 声呐的"发射物"是**波前**：一个被推出去的开口环 + 内部两圈递减
+      const fx = cx + s * 0.30
+      if (id === 'sonar_fc') {
+        // 聚焦 = 短而粗的波束（梯形）
+        g.fill(color, 0.34)
+        g.moveTo(fx - s * 0.30, cy - s * 0.30); g.lineTo(fx + s * 0.44, cy - s * 0.52)
+        g.lineTo(fx + s * 0.44, cy + s * 0.52); g.lineTo(fx - s * 0.30, cy + s * 0.30)
+        g.close(); g.fillPath()
+        g.line(color, 0.95, 2.2)
+        g.moveTo(fx - s * 0.30, cy - s * 0.30); g.lineTo(fx + s * 0.44, cy - s * 0.52)
+        g.lineTo(fx + s * 0.44, cy + s * 0.52); g.lineTo(fx - s * 0.30, cy + s * 0.30)
+        g.close(); g.stroke()
+      } else {
+        for (let i = 1; i <= 3; i++) {
+          g.line(color, 0.95 - i * 0.22, 2.6 - i * 0.5)
+          g.arc(fx, cy, s * (0.30 + i * 0.22), -1.0, 1.0); g.stroke()
+        }
+        g.fill(color, 0.95); g.fillCircle(fx, cy, s * 0.13)
       }
-      g.fill(color, 0.95); g.fillCircle(cx, cy, s * 0.18)
-    } else {
-      // 折线闪电（基础 / 过载共用主形）
-      g.line(color, 0.9, 1.8)
-      g.moveTo(cx + s * 0.35, cy - s)
-      g.lineTo(cx - s * 0.35, cy + s * 0.12)
-      g.lineTo(cx + s * 0.1, cy + s * 0.12)
-      g.lineTo(cx - s * 0.3, cy + s)
-      g.stroke()
-      // 过载：左侧多一道小闪电（"链更长"）
-      if (id === 'arc_ov') {
-        g.line(color, 0.8, 1.4)
-        g.moveTo(cx - s * 0.78, cy - s * 0.9)
-        g.lineTo(cx - s * 1.02, cy - s * 0.2)
-        g.lineTo(cx - s * 0.82, cy - s * 0.2)
-        g.lineTo(cx - s * 1.02, cy + s * 0.35)
+      if (id === 'sonar_rs') {
+        // 共振：弹跳的两颗小点（"命中后向邻近弹射"）
+        for (const [ox, oy] of [[0.62, -0.46], [0.78, 0.40]] as const) {
+          g.fill(color, 0.9); g.fillCircle(cx + s * ox, cy + s * oy, s * 0.12)
+        }
+      }
+    } else if (fam === 'arc') {
+      // 电弧的发射物 = **电球**（球体 + 放射折线）
+      const bx2 = cx + s * 0.28, by2 = cy
+      const r = id === 'arc_st' ? s * 0.42 : s * 0.34
+      g.fill(color, 0.30); g.fillCircle(bx2, by2, r * 1.9)
+      g.fill(0xffffff, 0.92); g.fillCircle(bx2, by2, r * 0.52)
+      g.line(color, 1, id === 'arc_st' ? 2.4 : 2)
+      const nB = id === 'arc_st' ? 6 : 4
+      for (let i = 0; i < nB; i++) {
+        const a0 = (i / nB) * Math.PI * 2
+        const L = r * (id === 'arc_ov' ? 1.9 : 1.5)
+        g.moveTo(bx2 + Math.cos(a0) * r, by2 + Math.sin(a0) * r)
+        g.lineTo(bx2 + Math.cos(a0 + 0.3) * L * 0.6, by2 + Math.sin(a0 + 0.3) * L * 0.6)
+        g.lineTo(bx2 + Math.cos(a0 - 0.18) * L, by2 + Math.sin(a0 - 0.18) * L)
         g.stroke()
       }
+    } else if (fam === 'echo') {
+      // 回声 = **还没炸的弹**：球体 + 内部一圈引信环（"延迟爆发"写到脸上）
+      const n = id === 'echo_mu' ? 3 : 1
+      for (let i = 0; i < n; i++) {
+        const ox = n === 1 ? s * 0.22 : s * (0.02 + i * 0.30)
+        const oy = n === 1 ? 0 : (i - 1) * s * 0.34
+        const r = s * (id === 'echo_fo' ? 0.40 : 0.30)
+        g.fill(color, 0.26); g.fillCircle(cx + ox, cy + oy, r * 1.8)
+        g.fill(color, 0.9); g.fillCircle(cx + ox, cy + oy, r)
+        g.line(0xffffff, 0.8, 1.2)
+        g.strokeCircle(cx + ox, cy + oy, r * 0.55)
+      }
+    } else if (fam === 'acid') {
+      // 酸液 = **液滴**（上圆下尖的水滴形）+ 后方两颗飞散小滴
+      const dx0 = cx + s * 0.30, r = s * 0.42
+      g.fill(color, 0.26); g.fillCircle(dx0, cy, r * 1.7)
+      g.fill(color, 0.92)
+      g.moveTo(dx0, cy + r * 1.35)
+      g.lineTo(dx0 - r * 0.86, cy - r * 0.1)
+      g.arc(dx0, cy - r * 0.1, r * 0.86, Math.PI, Math.PI * 2, true)
+      g.close(); g.fillPath()
+      g.fill(0xffffff, 0.55); g.fillCircle(dx0 - r * 0.3, cy - r * 0.35, r * 0.22)
+      for (const [ox, oy] of [[-0.44, -0.34], [-0.62, 0.26]] as const) {
+        g.fill(color, 0.7); g.fillCircle(cx + s * ox, cy + s * oy, s * 0.13)
+      }
+    } else if (fam === 'mine') {
+      // 气泡雷 = 球体 + **引信闪**（红点）—— "原地布雷需预判"的签名
+      const r = s * 0.44
+      g.fill(color, 0.24); g.fillCircle(cx + s * 0.14, cy, r * 1.7)
+      g.fill(color, 0.9); g.fillCircle(cx + s * 0.14, cy, r)
+      g.line(0xffffff, 0.7, 1.2); g.strokeCircle(cx + s * 0.14, cy, r * 0.6)
+      g.fill(UI.danger, 0.95); g.fillCircle(cx + s * 0.14, cy - r * 0.5, s * 0.10)
+    } else if (fam === 'net') {
+      // 网弹 = **收拢的网束**（梭形 + 两道网目）—— 与实机飞行态同一读法
+      const c2 = id === 'net_el' ? UI.violet : id === 'net_cv' ? UI.cyanHi : UI.jade
+      g.fill(c2, 0.30)
+      g.moveTo(cx + s * 0.72, cy); g.lineTo(cx - s * 0.20, cy - s * 0.34)
+      g.lineTo(cx - s * 0.62, cy); g.lineTo(cx - s * 0.20, cy + s * 0.34)
+      g.close(); g.fillPath()
+      g.line(c2, 0.95, 1.6)
+      g.moveTo(cx + s * 0.72, cy); g.lineTo(cx - s * 0.20, cy - s * 0.34)
+      g.lineTo(cx - s * 0.62, cy); g.lineTo(cx - s * 0.20, cy + s * 0.34)
+      g.close(); g.stroke()
+      g.line(c2, 0.6, 1.1)
+      g.strokeSeg(cx - s * 0.30, cy - s * 0.17, cx + s * 0.40, cy - s * 0.17)
+      g.strokeSeg(cx - s * 0.30, cy + s * 0.17, cx + s * 0.40, cy + s * 0.17)
+    } else if (fam === 'lure') {
+      // 光饵 = 发光球 + 外扩光环（"它在吸引东西"）
+      g.fill(color, 0.22); g.fillCircle(cx + s * 0.18, cy, s * 0.66)
+      g.fill(color, 0.85); g.fillCircle(cx + s * 0.18, cy, s * 0.34)
+      g.line(color, 0.75, 1.4); g.strokeCircle(cx + s * 0.18, cy, s * 0.56)
+    } else {
+      // 兜底：通用弹体
+      this.iconShot(cx + s * 0.40, cy, s * 0.9, color)
     }
 
     // 进化角标：右上角一颗小菱形（`fam !== id` 即"这是进化形态"）
@@ -1090,6 +1383,41 @@ export class Hud {
         seg(cx - s * 0.2, cy, cx + s * 0.2, cy, 2.6)
         seg(cx, cy - s * 0.2, cx, cy + s * 0.2, 2.6)
         break
+      // ---- V6.77d 五个新维度：每个都要有**能缩到 20px 的形状签名** ----
+      // ⚠️ 不能用颜色区分（属性卡的色板只有那几种，撞色就认不出）——
+      //    这条规则来自本函数开头的注释，新加的同样适用。
+      case 'streak':   // 三段递增竖条 = 连杀计数
+        for (let i = 0; i < 3; i++) {
+          const h = s * (0.26 + i * 0.24)
+          g.fill(col, i === 2 ? 1 : 0.5)
+          g.fillRect(cx - s * 0.34 + i * s * 0.26, cy + s * 0.46 - h, s * 0.17, h)
+        }
+        break
+      case 'slowDmg':  // 准星 = "只对这类目标加伤"
+        neonCircle(g, cx, cy, s * 0.42, col, { width: 2.2, bloom: false })
+        seg(cx - s * 0.62, cy, cx - s * 0.32, cy, 2.4)
+        seg(cx + s * 0.32, cy, cx + s * 0.62, cy, 2.4)
+        seg(cx, cy - s * 0.62, cx, cy - s * 0.32, 2.4)
+        seg(cx, cy + s * 0.32, cx, cy + s * 0.62, 2.4)
+        break
+      case 'bulletSpd': // 前倾速度线 + 箭头（与 rate 的"水平三线"刻意不同角度）
+        for (let i = -1; i <= 1; i++) {
+          seg(cx - s * 0.46, cy + i * s * 0.26 + s * 0.14,
+            cx + s * 0.24, cy + i * s * 0.26 - s * 0.14, 2.2, i === 0 ? 1 : 0.5)
+        }
+        seg(cx + s * 0.14, cy - s * 0.42, cx + s * 0.48, cy, 2.4)
+        seg(cx + s * 0.48, cy, cx + s * 0.14, cy + s * 0.42, 2.4)
+        break
+      case 'turretSpeed':  // 开口弧 + 轴心 = 转台
+        path(() => { g.arc(cx, cy, s * 0.42, -Math.PI * 0.72, Math.PI * 0.38); g.stroke() }, 2.6)
+        g.fill(col, 1); g.fillCircle(cx, cy, s * 0.13)
+        break
+      case 'armorPen':     // 淡描的甲片 + 斜穿箭头
+        path(() => { g.strokeRoundRect(cx - s * 0.34, cy - s * 0.46, s * 0.68, s * 0.92, s * 0.12) }, 2.2, 0.55)
+        seg(cx - s * 0.46, cy + s * 0.32, cx + s * 0.28, cy - s * 0.3, 2.4)
+        seg(cx + s * 0.28, cy - s * 0.3, cx + s * 0.04, cy - s * 0.34, 2.4)
+        seg(cx + s * 0.28, cy - s * 0.3, cx + s * 0.24, cy - s * 0.05, 2.4)
+        break
       default:         // o2Bonus · 扩容气瓶：胶囊 + 加号
         path(() => { g.strokeRoundRect(cx - s * 0.28, cy - s * 0.46, s * 0.56, s * 0.92, s * 0.28) }, 2.4)
         seg(cx - s * 0.13, cy, cx + s * 0.13, cy, 2.4)
@@ -1101,6 +1429,14 @@ export class Hud {
   /**
    * 属性卡的**进度条**（web `drawStatGauge`）：浅色段 = 买完之后到哪、深色段 = 现在到哪。
    * 两个数字直接可比较，玩家不用心算"再买 3 张是多少"。
+   *
+   * ⚠️ **V6.70 三个错位一起修**（用户截图："商店现在还有文字排版错乱"）：
+   *   ① **数值与卡名重叠** —— 数值原画在 `cy + 22`（框内 y+150），卡名在 `y + ch-134`
+   *      （y+158），12px 与 17px 字只差 8px 基线，必然压在一起。
+   *      ⇒ 数值改为**画进条内**（左=现在 / 右=买完），不再单独占一行。
+   *   ② **横向溢出** —— 条宽 168 > 立绘框内宽 160（`cw-28-16`），两端各出框 4px。
+   *   ③ **纵向溢出** —— 条 `cy+32` 落在 y+118~138，已越过框底 y+136。
+   * 三条必须一起改：只动位置不管宽度，框内会左右出血；只动宽度不管数值，压字照旧。
    */
   private statGauge(cx: number, cy: number, cardId: string, w: DiveWorld): void {
     const g = this.g
@@ -1124,7 +1460,8 @@ export class Hud {
     const full = STAT_CAP[m.k] ?? (m.k === 'o2Bonus' ? 100 : m.k === 'killO2' ? 12 : 1.0)
     const cur = clamp01(w.st[m.k] / full)
     const next = clamp01((w.st[m.k] + m.add) / full)
-    const bw = 168, bh = 20
+    // 148 < 立绘框内宽 160（`cw-28-16`）⇒ 左右各留 6px 余量，不会顶到框线
+    const bw = 148, bh = 22
     const x0 = cx - bw / 2, y0 = cy - bh / 2
     // 进度条颜色跟**属性本身**走（和上面的大符号同色）：一律用同一种色等于放弃"余光辨色"
     const gcol = STAT_META.find(x => x.k === m.k)?.col ?? BRIGHT.stat
@@ -1139,43 +1476,63 @@ export class Hud {
       g.moveTo(mx - 3, y0 - 4); g.lineTo(mx + 3, y0 - 4); g.lineTo(mx, y0 + 1)
       g.close(); g.fillPath()
     }
-    const shown = (m.k === 'o2Bonus' || m.k === 'killO2' || m.k === 'regen')
-      ? `${w.st[m.k].toFixed(m.k === 'regen' ? 1 : 0)} → ${(w.st[m.k] + m.add).toFixed(m.k === 'regen' ? 1 : 0)}`
-      : `${Math.round(w.st[m.k] * 100)}% → ${Math.round(Math.min(full, w.st[m.k] + m.add) * 100)}%`
-    this.center(cx, cy + 22, shown, 12, TXT_LIGHT.accent)
+    // ⚠️ 数值**写在条内**（左=现在 / 右=买完），不再另起一行 —— 见方法注释 ①
+    const isRaw = m.k === 'o2Bonus' || m.k === 'killO2' || m.k === 'regen'
+    const fmt = (v: number) => isRaw
+      ? v.toFixed(m.k === 'regen' ? 1 : 0)
+      : `${Math.round(Math.min(full, v) * 100)}%`
+    const txt = `${fmt(w.st[m.k])} → ${fmt(w.st[m.k] + m.add)}`
+    // 深色描边保证压在 0.95 强度的色条上也读得出来（浮字硬规约：必须描边）
+    this.center(x0 + 8, cy, txt, 12, '#0d1a22', false, 2)
+    this.center(x0 + 8, cy, txt, 12, TXT_LIGHT.main)
   }
 
   /**
-   * 挂载位示意图（挂载扩容卡）。与战斗内**同一套角度常量与半径比例** ——
-   * 图上的记号在游戏里对不上，卡的说明就成废纸（所以这里和 `DiveGame.drawTurret`
-   * 共用 `SEAT_ANGLES_DEG` / `SEAT_RING_R` / `TURRET_R`）。
+   * 挂载位示意图（挂载扩容卡）。V6.71 从**俯视椭圆**改成**侧视舱段图**。
    *
-   * ⚠️ 椭圆的参数语义反了：web 的 `strokeEllipse(cx,cy,w,h)` 收**直径**，
-   *    Cocos 的 `ellipse` 收**半径** —— web 写 `bodyL*2`，这里必须写 `bodyL`（坑 13）。
+   * ⚠️ 为什么必须跟着改（这张图和战斗内共用同一套真源）：
+   *   战斗内的炮位真源已从「座圈角度 + 压扁投影」换成 `SEAT_MOUNTS`（背3 + 腹 3）。
+   *   图上还画俯视椭圆 ⇒ 卡上标的"新增第5 座"在游戏里根本找不到对应位置，
+   *   而这个图的**全部意义**就是告诉玩家"你买的是哪一座"。
+   *
+   * 画法：一条缩略的艇身轮廓（梭形），6 个舱位按 `SEAT_MOUNTS` 的 u/v 落点，
+   * 上排=背脊、下排=腹部；已装备的画成实心带本色描边，空座画虚圈，
+   * 本次要解锁的那座套一圈闪烁提示环（琥珀）。
+   *
+   * ⚠️ Cocos 的 `ellipse` 收**半径**不是直径（坑 13）—— web 的
+   *   `strokeEllipse(cx,cy,w,h)` 在这里必须写成 `bodyL` 而非 `bodyL*2`。
    */
   private mountDiagram(cx: number, cy: number, id: string, boxH: number, w: DiveWorld): void {
     const g = this.g
     const target = id === 't_slot5' ? 5 : id === 't_slot6' ? 6 : w.maxWeapons
     const n = Math.max(target, w.maxWeapons)
-    // 缩放由**立绘框实际高度**决定，而不是写死系数（写死会在卡高变化时把图示顶出框）
-    const needH = SEAT_RING_R * 2 * 1.15 * 1.7 + 16
-    const k = Math.max(0.30, Math.min(0.72, (boxH - 8) / needH))
-    const R = SEAT_RING_R * k
-    const bodyL = 30 * k, bodyW = 15 * k
 
-    // 艇身（俯视椭圆，与实机 99×52 的长宽比一致）
-    neon(g, UI.cyanDim, () => { g.ellipse(cx, cy, bodyL, bodyW); g.stroke() },
-      { width: 1.2, alpha: 0.45, bloom: false })
+    // 缩放由**立绘框实际高度**决定，而不是写死系数（写死会在卡高变化时把图示顶出框）。
+    // needH 要装下：艇身高 + 上下两排炮座 + 闪烁环 + 底部文字。
+    const needH = (HULL_H * 1.30 + MOUNT_BASE_R * 2.4) + 30
+    const k = Math.max(0.30, Math.min(1.10, (boxH - 8) / needH))
+    const HL = (SUB_D / 2) * k, HH = (HULL_H / 2) * k
+
+    // 艇身：沿艇背/艇腹两条弧各画一段 —— 侧视的"舱段示意"语汇，与战斗内同源。
+    const rail = (sgn: number) => {
+      g.moveTo(cx + HL * 0.92, cy + sgn * HH * 0.30)
+      g.lineTo(cx + HL * 0.30, cy + sgn * HH * 0.88)
+      g.lineTo(cx - HL * 0.55, cy + sgn * HH * 0.92)
+      g.lineTo(cx - HL * 0.92, cy + sgn * HH * 0.34)
+    }
+    g.line(UI.cyanDim, 0.55, 2.2); rail(-1); g.stroke()
+    g.line(UI.cyanDim, 0.55, 2.2); rail(1); g.stroke()
 
     for (let i = 0; i < n; i++) {
-      const a = (SEAT_ANGLES_DEG[i] * Math.PI) / 180
-      const x = cx + R * Math.cos(a)
-      const y = cy + R * Math.sin(a)
+      const m = SEAT_MOUNTS[i]
+      if (!m) break
+      const x = cx + m[0] * HL
+      const y = cy + m[1] * HH
       const occupied = i < w.weapons.length
       const isNew = i === target - 1
       const ext = i >= BASE_SEATS
       const col = occupied ? WEAPON_DEF[w.weapons[i].id].color : UI.cyan
-      const r = TURRET_R * k * (ext ? 1.15 : 1)
+      const r = MOUNT_BASE_R * k * (ext ? 1.10 : 1) * 0.92
       if (occupied) {
         g.fill(UI.panel, 0.6); g.fillCircle(x, y, r)
         neonCircle(g, x, y, r, col, { width: 1.4, alpha: 0.95, bloom: false })
@@ -1190,7 +1547,7 @@ export class Hud {
         neonCircle(g, x, y, r * 1.7, UI.amber, { width: 1.8, alpha: blink, bloom: false })
       }
     }
-    this.center(cx, cy + bodyW + 14, `${w.weapons.length} → ${target} 座`, 12, TXT_LIGHT.dim)
+    this.center(cx, cy + HH + 22, `${w.weapons.length} → ${target} 座`, 12, TXT_LIGHT.dim)
   }
 
   /** 等级点（web `drawLevelPips`）：5 格，已到的实心、未到的空心描边 */
@@ -1271,7 +1628,7 @@ export class Hud {
     const iy = py + vpad
 
     // ---- 顶栏：标题 + 副标题 + 骨币胶囊（右）----
-    this.text(ix, iy + 18, `L${w.layerIdx + 1} ${LAYERS[w.layerIdx].name} · 波间补给`, 20, TXT_LIGHT.main)
+    this.text(ix, iy + 18, `L${w.layerIdx + 1} ${LAYERS[w.layerIdx].name} · 波间补给`, FS.big, TXT_LIGHT.main)
     this.text(ix, iy + 41, `第 ${w.waveInLayer + 1} 波结束 · 点卡片或按 1 / 2 / 3 购买`, 13, TXT_LIGHT.dim)
 
     const bankStr = `${w.bank}`
@@ -1393,10 +1750,11 @@ export class Hud {
         const sk = STAT_CARD[up.id]
         if (sk) {
           const gcol = STAT_META.find(m => m.k === sk)?.col ?? UI.cyan
-          // 立绘框 148 → 88 后，图腾 / 量槽的偏移同比收小 ——
-          // 否则图腾会戳出框顶、量槽落到框外压到名字（框内高度只剩 88）
-          this.statGlyph(sk, cxm, artCy - 16, 48, gcol)
-          this.statGauge(cxm, artCy + 32, up.id, w)
+          // ⚠️ V6.70：图腾与量槽**必须都留在立绘框内**（框 = y+48 ~ y+136，高 88）。
+          //    旧值 图腾 y-16 / 量槽 y+32 会被框顶的 3px 类型色压住、并让量槽下沿越框。
+          //    现在：图腾占上半（中心 y-14，尺寸 40），量槽占下半（中心 y+26，高 22）。
+          this.statGlyph(sk, cxm, artCy - 14, 40, gcol)
+          this.statGauge(cxm, artCy + 26, up.id, w)
         }
       }
     }
@@ -1443,7 +1801,7 @@ export class Hud {
     if (foot) {
       // 状态行是全卡**最关键的一条**（"买了会发生什么"）—— 字号抬到 **14** 与描述（13）拉开一档，
       // 并保留告警色。原来它和描述同色同字号，玩家得自己猜是"新装备"还是"强化"。
-      this.center(cxm, y + ch - 92, fitText(foot, 14, cw - 20), 14,
+      this.center(cxm, y + ch - 92, fitText(foot, FS.body, cw - 20), FS.body,
         sold ? TXT_LIGHT.mute : (footWarn ? TXT_LIGHT.warn : TXT_LIGHT.dim))
     }
 
@@ -1508,7 +1866,7 @@ export class Hud {
 
     if (!opts.confirm) {
       this.center(cx, py + 32, '已暂停', 26, TXT.cyber)
-      this.center(cx, py + 84, `氧气 ${Math.ceil(w.o2)} / ${w.o2Max} · 敌人与计时已冻结`, 14, TXT.dim)
+      this.center(cx, py + 84, `氧气 ${Math.ceil(w.o2)} / ${w.o2Max} · 敌人与计时已冻结`, FS.body, TXT.dim)
       const bw = 288, bh = 50
       this.button(cx, cy - 14, bw, bh, '继续游戏', cbs.onResume, true)
       this.button(cx, cy + 56, bw, bh, '重新开始', cbs.onRestart, true)
@@ -1516,7 +1874,7 @@ export class Hud {
       this.center(cx, py + ph + 28, 'ESC 继续游戏', 13, TXT.mute)
     } else {
       this.center(cx, py + 32, '返回主界面？', 24, TXT.warn)
-      this.center(cx, py + 84, '本局进度将丢失', 16, TXT.main)
+      this.center(cx, py + 84, '本局进度将丢失', FS.title, TXT.main)
       this.center(cx, py + 112, '本局带出的生物质按 0 计 · 已沉淀的部分不受影响', 13, TXT.dim)
       const bw = 188, bh = 50
       this.button(cx - 104, cy + 58, bw, bh, '取消', cbs.onCancelConfirm, true)
@@ -1567,18 +1925,18 @@ export class Hud {
     this.center(W / 2, H / 2 - 16, w.win
       ? `${w.biomass} × ${w.mult.toFixed(1)}（下潜 ${w.layerIdx} 层）`
       : `沉没的 ${Math.floor(w.biomass * w.mult)} 生物质全部损失`, 15, w.win ? TXT.amber : TXT.warn)
-    this.center(W / 2, H / 2 + 12, `L${w.layerIdx + 1} ${LAYERS[w.layerIdx].name} · 第 ${w.waveInLayer + 1} 波`, 14, TXT.dim)
+    this.center(W / 2, H / 2 + 12, `L${w.layerIdx + 1} ${LAYERS[w.layerIdx].name} · 第 ${w.waveInLayer + 1} 波`, FS.body, TXT.dim)
 
     // 信息行：只画有内容的，逐行下移（沿用"没有就不画"的惯例）
     let y = H / 2 + 44
-    if (record) { this.center(W / 2, y, record, 16, TXT.cyan); y += 26 }
+    if (record) { this.center(W / 2, y, record, FS.title, TXT.cyan); y += 26 }
     if (banked > 0) {
-      this.center(W / 2, y, `沉淀 +${banked} 生物质（总额 ${bio}）`, 16, TXT.amber); y += 26
+      this.center(W / 2, y, `沉淀 +${banked} 生物质（总额 ${bio}）`, FS.title, TXT.amber); y += 26
     } else if (!w.win) {
       // 溺水：显式说明"无沉淀"，否则玩家不知道沉淀这一栏为什么消失
-      this.center(W / 2, y, '溺水 · 生物质全损，无沉淀', 16, TXT.warn); y += 26
+      this.center(W / 2, y, '溺水 · 生物质全损，无沉淀', FS.title, TXT.warn); y += 26
     }
-    if (unlocked.length) { this.center(W / 2, y, `解锁：${unlocked.join(' · ')}`, 16, TXT.jade); y += 26 }
+    if (unlocked.length) { this.center(W / 2, y, `解锁：${unlocked.join(' · ')}`, FS.title, TXT.jade); y += 26 }
 
     const by = Math.max(y + 40, H / 2 + 140)
     this.button(W / 2 - 115, by, 210, 52, '再来一次', cbs.onRestart, true)

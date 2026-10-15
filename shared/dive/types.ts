@@ -14,7 +14,7 @@
  * 而**爆炸 / 穿透类伤害无视护甲**。没有护甲的重甲只是"血厚的杂兵"。
  * ⚠️ 区分度来自**行为**（它不追你），不是外形 —— 外形只是给玩家一个"该换武器"的提醒。
  */
-export type Kind = 'swarm' | 'dash' | 'drift' | 'armor' | 'boss'
+export type Kind = 'swarm' | 'dash' | 'drift' | 'armor' | 'orbit' | 'boss'
 
 export interface Enemy {
   x: number; y: number
@@ -192,6 +192,15 @@ export interface Weapon {
   fireFlash: number
   /** 发射器**自己的**世界朝向（弧度）。由 `slewTurretAims` 每帧逼近最近目标。 */
   aimAng: number
+  /**
+   * 炮口**角速度**（弧度/秒）。V6.77 新增 —— 状态量，不持久化。
+   *
+   * ⚠️ 它是"丝滑转向"的全部秘密：`slewTurretAims` 用**角加速度限制**推它，再积分成 `aimAng`。
+   *    只写 `aimAng` 的话速度曲线必然是方波（第一帧满速、最后一帧归零）= "啪"地甩过去。
+   * ⚠️ 换武器（`evolveWeapon`）时必须**归零** —— 否则残留角速度会让下一帧的角度跳一下，
+   *    而那种跳变不会有任何报错。
+   */
+  aimV: number
 }
 
 /** 通用弹：机关枪（直线）、鱼雷（追踪）、鱼叉（穿透+拉拽）共用 */
@@ -311,6 +320,18 @@ export interface Arc {
  *
  * 约定：**百分比类存小数**（0.15 = +15%）；加成型卡走加法（Brotato 做法）；
  * `STAT_CAP` 里声明上限，`addStat()` 统一钳位。
+ *
+ * ---- V6.77d：新增 5 维（被动道具 24 → 30）----
+ * ★ **为什么是这 5 个，而不是"再堆六条数值卡"**：
+ *   原 12 条属性卡把 `Stats` 的每个键都占满了（dmg/rate/crit/range/armor/dodge/
+ *   speed/pickup/luck/regen/tank-o2Bonus/gill-killO2）⇒ 再加卡只能重复效果。
+ *   所以本轮**先扩维度、再补卡**，且这 5 个的共同点是：
+ *   ① **都改"打起来的手感/反馈"，而不是单纯加一个百分比**（呼应 P0「单波爽」）；
+ *   ② 都**不在 `dmgMulNow()` 之外另开口子**——伤害类全落在同一个入口，好审计；
+ *   ③ 都能**用世界状态直接算出来**，不需要新增计时器状态机（`streak` 复用现有
+ *      `comboCnt`、`slowDmg` 读敌人自己的 `slowT/rootT`）。
+ * ⚠️ `critMul` 是**已有键但一直没有卡**（默认 0.8 = 暴击 1.8×），本轮的破甲弹头
+ *   是第一张动它的卡；它不新增字段，但同属"补齐一个空维度"。
  */
 export interface Stats {
   dmg: number
@@ -327,6 +348,16 @@ export interface Stats {
   o2Bonus: number
   killO2: number
   twinRate: number
+  /** V6.77d 猎杀节奏：连杀**每层**的伤害加成（乘在 `dmgMulNow()`）。上限由 `STREAK_MAX_LV` 定 */
+  streak: number
+  /** V6.77d 狩猎本能：对**被减速 / 定身**的敌人附加的伤害倍率 —— 与网族/定身雷协同 */
+  slowDmg: number
+  /** V6.77d 弹道增压：子弹初速倍率。⚠️ **同步缩 `life`** ⇒ 射程不变，只改"命中提前量" */
+  bulletSpd: number
+  /** V6.77d 伺服转台：炮塔追踪角速度倍率（`TURRET_OMEGA_TRACK` 乘它） */
+  turretSpeed: number
+  /** V6.77d 破甲穿透：**无视敌方护甲的百分比**（重甲的 60% 减伤按此打折） */
+  armorPen: number
 }
 
 export interface LayerDef {
@@ -360,6 +391,14 @@ export interface LayerDef {
    * ⚠️ L1 必须为 0 —— 教学层不给机制（与 `driftRatio` 同规）。
    */
   armorRatio: number
+  /**
+   * **盘旋猎手占比**（V6.79）。0 = 该带不刷盘旋猎手。
+   * 与 `driftRatio` / `armorRatio` 同一套"占比"语义，在 `spawnEnemy` 里**最后**判定。
+   * ⚠️ L1 必须为 0 —— 教学层不给机制（与 `driftRatio` 同规）。
+   * ⚠️ 硬约束：`driftRatio + dashRatio×dashMul + armorRatio + orbitRatio ≤ 1`
+   *    （判定是一条顺序 `if/else`，超了后面的桶永远刷不出来，**且不报错**）。
+   */
+  orbitRatio: number
 }
 
 /** 一波的形状：数量 / 冲刺占比 / 血倍率 / 时长 */

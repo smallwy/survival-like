@@ -52,6 +52,14 @@ export function artPaths(): Record<string, string> {
     out['sub_' + id] = p.replace(/\.png$/, '')
   }
   out.sub_body = 'sub/sub_body'   // 变体图缺失时的兜底机体
+  // V6.75 **侧视位图机体**（战斗里机体本体，`DiveGame.syncSub` 在用）。
+  // ⚠️ 与上面那批正俯视立绘**不是一回事**：那批只在选艇界面（`Title.ts`）用，
+  //    战斗里静态的艇身/指挥塔/尾鳍/舷窗全部由这张位图承担 —— 用户 2026-10-15
+  //    拍板「不要用矢量画，要有立体感」。
+  //    它由 `tools/prep_sub_art.py` 产出：抠底 → 各向异性缩放到 `SUB_D × HULL_H`
+  //    → 用 `HULL_OUTLINE` 裁剪影 ⇒ **剪影与挂点基准严格一致**（挂点必然贴轮廓）。
+  //    摆放参数（画布尺寸 / 躯干在画布中的位置）见同目录 `sub_hull.json`。
+  out.sub_hull = 'sub/sub_hull'
 
   // 商店立绘：武器与遗物的贴图键**统一**是 `item_<id>`（模拟层只给 id）
   for (const id of Object.keys(WEAPON_DEF)) {
@@ -89,40 +97,30 @@ export function artPaths(): Record<string, string> {
 }
 
 /**
- * 武器立绘的**临时回退**（V6.29 引入 · V6.46 改名 + 复用）。
+ * 武器立绘的**临时回退**（V6.29 引入 · V6.46 改名 + 复用 · **V6.77d 清空**）。
  *
  * 用途：尚未出图的武器（基础或进化都一样），先复用**语义相近**的已有立绘 ——
  * 这样美术 key 表与磁盘一致、`verify_cocos.py` 不报缺失，也不会静默缺图
  * （症状是商店卡的立绘框里显示的是别的武器）。
  *
- * 原名 `EVO_ART_FALLBACK`（只管进化）；V6.46 新增三把基础武器（气泡雷 / 网 / 诱饵）
- * 也要回退，名字就不准了 —— 改成 `WEAPON_ART_FALLBACK`，基础与进化共用一张。
- *
  * ⚠️ **出图后必须把对应条目从这里删掉**，并在 `items/` 放入 `item_<id>.png`
  *   （走 `tools/process_item_art.py` → `tools/sync_art.py`）。
  *   留着不回退表 = 玩家看到的是别人的图，而管线一声不响。
+ *
+ * 📌 V6.77d：三把机制武器 + 六条进化的立绘**已全部出图**（批 5a），本表清空。
+ *   清空后 `artPaths()` 里 `WEAPON_ART_FALLBACK[id] ?? id` 自然指向 `items/item_<id>`。
+ *   保留常量占位（与 `EVO_ART_FALLBACK` 同样的处置），下版可连取用处一起删。
  */
-const WEAPON_ART_FALLBACK: Record<string, string> = {
-  // V6.46 三把机制武器 + 六条进化：**立绘待出**，先借语义最近的图占位。
-  // 气泡雷族 → 球形主体，借回声系列；网族 → 能量/控制，借电弧系列；
-  // 诱饵族 → 发光扩散，借声呐系列。
-  mine: 'echo', mine_ch: 'echo', mine_o2: 'echo_mu',
-  net: 'arc', net_el: 'arc_ov', net_cv: 'arc_st',
-  lure: 'sonar', lure_bo: 'echo_fo', lure_wl: 'sonar_rs',
-}
+const WEAPON_ART_FALLBACK: Record<string, string> = {}
 
 /**
- * 遗物的**临时立绘回退**（V6.33 引入）。
+ * 遗物的**临时立绘回退**（V6.33 引入 · **V6.77d 清空**）。
  *
- * 与 `EVO_ART_FALLBACK` 同款：新遗物机制先落地、立绘后补，先复用**语义相近**的
+ * 与 `WEAPON_ART_FALLBACK` 同款：新遗物机制先落地、立绘后补，先复用**语义相近**的
  * 已有遗物图，让 `artPaths()` 与磁盘一致、管线不报缺失，也不静默缺图。
  *
- * ⚠️ 出图后处理：把对应条目从这里删掉，并在 `items/` 放入 `item_<id>.png`
- *   （走 `tools/process_item_art.py` → `tools/sync_art.py`）。
+ * ⚠️ 出图后处理：把对应条目从这里删掉，并在 `items/` 放入 `item_<id>.png`。
+ *
+ * 📌 V6.77d：4 件机制遗物（导体缠绕 / 破血锚 / 共鸣腔 / 过载核心）立绘已出图（批 5b），本表清空。
  */
-const RELIC_ART_FALLBACK: Record<string, string> = {
-  conductor_coil: 'resonance_core',   // 都是"能量耦合"意象
-  bleeding_anchor: 'abyss_mark',      // 都是"尖锐/撕裂"意象
-  resonance_chamber: 'echo_heart',    // 同属回声家族
-  overload_core: 'gluttony',          // 都是"核心件"意象
-}
+const RELIC_ART_FALLBACK: Record<string, string> = {}

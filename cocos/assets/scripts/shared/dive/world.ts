@@ -46,7 +46,8 @@ import type {
 } from './types'
 import {
   O2, BONE_O2, PLAYER, WEAPON_DEF, STAT_CAP, NEW_STATS, RELIC_DEF, RELIC_SLOTS,
-  LAYERS, LAYER_WAVES, SEAT_ANGLES_DEG, SEAT_RING_R, SEAT_RATIO, TURRET_R, TURRET_SPIN,
+  LAYERS, LAYER_WAVES, SEAT_MOUNTS, HULL_H, SUB_D, MOUNT_BASE_R,
+  TURRET_SPIN, TURRET_OMEGA_IDLE, TURRET_OMEGA_TRACK, STREAK_MAX_LV,
   SEAT_SWAY_MAX, SEAT_SWAY_FOLLOW, SEAT_SWAY_DECAY,
   MAX_SEATS, BASE_SEATS, REROLL_BASE, REROLL_STEP, BONE, ENEMY_TEX, TEX_BASE_ROT, weaponFamily,
 } from './tables'
@@ -159,6 +160,57 @@ const ARMOR_SPD_MUL = 0.4
 const ARMOR_R = 30
 /** 护甲减伤比例。**爆炸 / 穿透无视它** —— 这是逼玩家换武器的唯一手段 */
 const ARMOR_REDUCE = 0.6
+
+/**
+ * **盘旋猎手**（V6.79）：不正面冲，**切向绕圈 + 半径收缩**（螺旋），贴身才咬。
+ *
+ * 与另外四类的区分全在**行为**：swarm/dash 直线、drift 脉冲直漂、armor 不理你巡逻，
+ * 而它**绕着来** ⇒ **直线后退对它无效**，玩家必须横向位移 / 绕桩。
+ * 区分度落在行为上、不落在颜色上 —— 这条是 V6.49 §4.1 立下的。
+ */
+/** 停止收缩的半径（px）：再近就贴脸抖动，而贴身后切向速度已足够读出"缠住" */
+const ORBIT_R_MIN = 46
+/** 径向收缩系数（× speed）。0 = 纯绕圈永不近身；1 = 直冲。0.45 = 明显在收，但第一眼仍是"绕" */
+const ORBIT_SHRINK = 0.45
+
+/**
+ * **缠索**（V6.79b）：盘旋猎手的**专属压力** —— 本作第一个"作用于玩家**操作能力**"的敌人。
+ * 此前所有敌人都只作用于玩家的**血量 / 氧量**（本作"氧气就是血条"）。
+ *
+ * 把压力轴摆开才看得出它填的格子是空的：
+ *   直接扣氧（游群 / 冲刺体 / 漂移水母）· 逼你换武器（甲壳重甲）·
+ *   改你的**位置**（鮟鱇女王张口时把你拽进去）· **改你的操作能力（空）**。
+ *
+ * ⚠️ 与鮟鱇女王必须读成两回事：**它"拽你"（改位置），索"压你"（改速度、不挪你）**。
+ *    判据：被缠期间玩家位置**不被索单独改变**，只有你自己的输入决定你往哪走。
+ *
+ * ---
+ * ★ 三条配平红线（缺一条就崩）
+ * ① **同时只有一条索** —— 一屏最多 150 敌，几只一起缠 = 玩家被钉死。
+ *    实现方式：`tetherSrc` 是**单个字段**，不可能是多条。
+ * ② **必须有免疫窗** —— 与网的 `NET_ROOT_IMMUNE` 同一条理由：没有它，刚挣开又被咬上 = 永久减速。
+ * ③ **它不在"锚住"距离上扣氧** —— 咬住半径 70 > 接触半径 `PLAYER.r + e.r` = 42
+ *    ⇒ 被索住 ≠ 被贴脸打，两条压力天然不叠加（**不需要额外写排除**，见 `updateTether` 的注释）。
+ */
+/** 咬住半径（px）。★ 必须 > `ORBIT_R_MIN`(46)，否则它永远够不着玩家 */
+const TETHER_R = 70
+/** 被缠住时的移速倍率。**只乘进 `movePlayer` 的 `spdMul`** —— 不压射速、不动氧气、不扣氧 */
+const TETHER_SLOW = 0.45
+/** 朝**背离**它的方向累计移动满这么久 ⇒ 挣断（220px/s × 0.7 ≈ 154px，等于"游出去一个身位"） */
+const BREAK_T = 0.7
+/** 挣断后的免疫窗（s）。见红线 ② */
+const TETHER_IMMUNE = 2.5
+/**
+ * 被拉开到 `TETHER_R ×` 这个倍数以外 ⇒ 自动松。
+ *
+ * ⚠️ **2.4 不是随手取的**：设计稿原定 1.6（=112px），但按 220×0.45=99px/s 往外游，
+ *    **0.42s 就会撞上这条**，于是"往外游 0.7s 挣断"那条主规则**变成死代码**。
+ *    2.4 ⇒ 168px ⇒ 需要 0.99s > 0.7s，主规则先触发；这条降级成**安全网**
+ *    （防的是"被爆炸击退把索的来源甩到很远"这类异常状态）。
+ */
+const TETHER_SLIP_MUL = 2.4
+/** "在往外游"的判定阈值：移动方向与"背离它"的余弦。0.35 ≈ 70° 以内算数 —— 贴着它转圈不算 */
+const TETHER_AWAY_DOT = 0.35
 
 /**
  * **精英**（V6.62 §5-A）：每波随机 1–2 只。
@@ -289,6 +341,29 @@ export class DiveWorld implements ShopTarget {
   /** 收益倍率：每下潜一层 +0.5 */
   mult = 1.0
   bossDown = false
+  /**
+   * 本局**击杀过的 Boss 种类**（V6.78）。
+   *
+   * 为什么不是一个布尔量：V6.62 之后有两个 Boss（L3 末 鮟鱇女王 / L5 末 深渊守望者），
+   * 而图鉴要**各点一条**。旧写法（`bossDown: boolean` + 图鉴里写死 `boss:abyss`）
+   * 让 `boss:angler` 永远解锁不了，而且**不报错** —— 图鉴屏只会一直显示剪影。
+   *
+   * `bossDown` 保留：它是"本局通关"的语义（里程碑 / 结算文案在用），
+   * 与"杀了哪几个"是两个问题，别合并。
+   */
+  readonly bossesDown = new Set<'watcher' | 'angler'>()
+
+  // ---- 缠索（V6.79b）----
+  /**
+   * 当前咬住玩家的盘旋猎手（`null` = 没有索）。
+   * ⚠️ 存**对象引用**而不是 id：`Enemy` 没有身份字段（`eid` 只是个计数器，从没写进敌人）。
+   * ★ **同时只有一条索** —— 这一个字段本身就是那条配平红线的实现。
+   */
+  tetherSrc: Enemy | null = null
+  /** 已累计的"背离移动"时长（s）。达到 `BREAK_T` 就挣断 */
+  breakT = 0
+  /** 挣断后的免疫剩余（s）。> 0 时不会被任何盘旋猎手咬住 */
+  tetherImmune = 0
   /** 深度显示值（米） */
   depthM = 0
 
@@ -395,9 +470,12 @@ export class DiveWorld implements ShopTarget {
   /** DiveScene.ts:1338-1366 */
   startRun(): void {
     this.layerIdx = 0
+    // 缠索：换局必须归零（否则上一局的索会跨局生效）
+    this.tetherSrc = null; this.breakT = 0; this.tetherImmune = 0
     this.waveInLayer = 0
     this.mult = 1.0
     this.bossDown = false
+    this.bossesDown.clear()
     this.st = NEW_STATS()
     this.st.speed += this.sub.speed
     this.st.pickup += this.sub.pickup
@@ -512,13 +590,18 @@ export class DiveWorld implements ShopTarget {
     if (r < L.driftRatio) kind = 'drift'
     else if (r < L.driftRatio + dashP) kind = 'dash'
     else if (r < L.driftRatio + dashP + L.armorRatio) kind = 'armor'
+    // ⚠️ V6.79 盘旋猎手必须插在**最后**（armor 之后）：这是一条顺序 if/else，
+    //    插在中间会把 drift / dash / armor 的 r 区间整体搬家 ⇒ 既有各带配比**静默改变**。
+    //    代价：`L.orbitRatio` 在上述三项之和已经 ≥1 的波里刷不出来（见 LayerDef 的注释）。
+    else if (r < L.driftRatio + dashP + L.armorRatio + L.orbitRatio) kind = 'orbit'
     else kind = 'swarm'
 
-    const base = kind === 'drift' ? 110 : kind === 'dash' ? 52 : kind === 'armor' ? 40 : 30
+    const base = kind === 'drift' ? 110 : kind === 'dash' ? 52 : kind === 'armor' ? 40
+      : kind === 'orbit' ? 38 : 30
     let hp = Math.round(base * hpScale)
     if (kind === 'armor') hp = Math.round(hp * ARMOR_HP_MUL)   // 血厚 6×
     const relicSpd = this.hasRelic('abyss_mark') ? 1.1 : 1
-    let spd = (kind === 'drift' ? 42 : kind === 'dash' ? 96 : 68) * relicSpd
+    let spd = (kind === 'drift' ? 42 : kind === 'dash' ? 96 : kind === 'orbit' ? 74 : 68) * relicSpd
     if (kind === 'armor') spd *= ARMOR_SPD_MUL                 // 慢 0.4×
 
     // ---- 精英标记（V6.62 §5-A）----
@@ -540,10 +623,11 @@ export class DiveWorld implements ShopTarget {
     this.enemies.push(this.mkEnemy({
       x, y,
       hp,
-      r: kind === 'drift' ? 34 : kind === 'dash' ? 25 : kind === 'armor' ? ARMOR_R : 19,
+      r: kind === 'drift' ? 34 : kind === 'dash' ? 25 : kind === 'armor' ? ARMOR_R
+        : kind === 'orbit' ? 22 : 19,
       kind,
       color: kind === 'drift' ? UI.amber : kind === 'dash' ? UI.magenta
-        : kind === 'armor' ? UI.steel : UI.jade,
+        : kind === 'armor' ? UI.steel : kind === 'orbit' ? UI.lime : UI.jade,
       speed: spd,
       tex: ENEMY_TEX[kind],
       texRot: TEX_BASE_ROT[kind] ?? 0,
@@ -710,6 +794,9 @@ export class DiveWorld implements ShopTarget {
       this.depthM = this.descFrom + (this.descTo - this.descFrom) * e
       if (k >= 1) { this.phase = 'wave'; this.startWave() }
     } else if (this.phase === 'wave') {
+      // 缠索（V6.79b）：必须**先于 `movePlayer`**（这一帧的 `spdMul` 要读 `tetherSrc`），
+      // 又必须**先于 `updateEnemies`**（那里面的盘旋猎手要读 `tetherSrc === e` 决定停不停）。
+      this.updateTether(dt)
       this.movePlayer(dt, input)
       // 转塔必须在 movePlayer 之后（座圈世界坐标依赖本帧的 px/py/aim），
       // 又必须在 autoFire 之前（开火时读的就是这一帧算好的炮口朝向）。
@@ -747,14 +834,24 @@ export class DiveWorld implements ShopTarget {
     const W = this.W, H = this.H
     const dx = clamp(input.dx, -1, 1)
     const dy = clamp(input.dy, -1, 1)
-    const spdMul = 1 + this.st.speed
-      + (this.hasRelic('current_fin') && this.noHitT >= 3 ? 0.3 : 0)
+    const spdMul = (1 + this.st.speed
+      + (this.hasRelic('current_fin') && this.noHitT >= 3 ? 0.3 : 0))
+      // ---- 缠索（V6.79b）：只压**移动速度**，不压射速、不动氧气、不扣氧 ----
+      // 这就是"一条压力只配一个解"：它的解只有一个 —— 往外游。
+      * (this.tetherSrc ? TETHER_SLOW : 1)
     if (dx || dy) {
       const l = Math.hypot(dx, dy)
       this.aim = Math.atan2(dy, dx)
       this.px += (dx / l) * PLAYER.speed * spdMul * dt
       this.py += (dy / l) * PLAYER.speed * spdMul * dt
       this.moving = true
+      // 挣断的**输入侧**：只有"明确朝背离它的方向游"才累计；
+      // 贴着它绕圈 / 原地不动都不算（`TETHER_AWAY_DOT`）。
+      if (this.tetherSrc) {
+        const ax = this.px - this.tetherSrc.x, ay = this.py - this.tetherSrc.y
+        const al = Math.hypot(ax, ay) || 1
+        if (((dx / l) * ax + (dy / l) * ay) / al > TETHER_AWAY_DOT) this.breakT += dt
+      }
     } else {
       this.moving = false
     }
@@ -899,6 +996,28 @@ export class DiveWorld implements ShopTarget {
         if (e.y < e.r) { e.y = e.r; e.dirY = Math.abs(e.dirY) }
         else if (e.y > this.H - e.r) { e.y = this.H - e.r; e.dirY = -Math.abs(e.dirY) }
         e.fx = e.dirX; e.fy = e.dirY
+      } else if (e.kind === 'orbit') {
+        // ---- 盘旋猎手（V6.79）：**切向绕圈 + 半径收缩**（螺旋），从不正面冲 ----
+        // "直线冲向玩家"是 swarm/dash 的语汇；它的语汇是**绕着来** ⇒ 直线后退对它无效。
+        if (this.tetherSrc === e) {
+          // ★ 咬住时**停止旋回**，锚在玩家身上（V6.79b）。
+          //   读作"它咬住了"，不是"它还在绕" —— 停住本身就是"它已经得手"的信号。
+          //   朝向仍指向玩家：它现在是在"拽"，不是在"绕"。
+          e.fx = nx; e.fy = ny
+        } else {
+          const ang = Math.atan2(e.y - this.py, e.x - this.px)
+          const rad = dist(this.px, this.py, e.x, e.y) || 1
+          // 切向单位向量 = 垂直于「敌 → 我」⇒ 这一项负责"绕"
+          const tanX = -Math.sin(ang), tanY = Math.cos(ang)
+          // 径向单位向量（朝我）⇒ 这一项负责"越绕越近"
+          const inX = (this.px - e.x) / rad, inY = (this.py - e.y) / rad
+          const shrink = rad > ORBIT_R_MIN ? ORBIT_SHRINK : 0
+          e.x += (tanX + inX * shrink) * e.speed * slow * dt
+          e.y += (tanY + inY * shrink) * e.speed * slow * dt
+          // ⚠️ 朝向取**切向**（不是朝我）：玩家一眼看出"它在绕，不是在冲"。
+          //    必须在上面那次 `e.fx/e.fy` 赋值**之后**覆盖，否则会退回"朝玩家"。
+          e.fx = tanX; e.fy = tanY
+        }
       } else if (e.kind === 'boss') {
         e.t += dt
         if (e.bossKind === 'angler') {
@@ -1003,6 +1122,52 @@ export class DiveWorld implements ShopTarget {
         e.y -= py * 40 * dt
       }
     }
+  }
+
+  /**
+   * **缠索**（V6.79b）。每帧一次：先推进免疫 → 校验 / 释放已有的索 → 再判断要不要新咬。
+   *
+   * 接口顺序：必须在 `movePlayer` 与 `updateEnemies` **之前**（两处都要这一帧的最新结论）。
+   *
+   * ⚠️ 关于红线 ③「它不在锚住距离上扣氧」：**这里刻意不写任何排除**。
+   *    咬住半径 `TETHER_R`(70) **大于**接触半径 `PLAYER.r + e.r`(42) ⇒
+   *    "被索住"与"被贴脸打"本来就是两段不同的距离，两条压力天然不叠加。
+   *    若在这里额外把接触伤害关掉，反而会产生一个**反向激励**：贴着它站 ⇒ 它一点氧都不扣。
+   *    ⇒ 红线 ③ 的**意图**（别把两条压力叠成一次不可挽回的失误）已经由半径差满足了。
+   */
+  private updateTether(dt: number): void {
+    if (this.tetherImmune > 0) this.tetherImmune = Math.max(0, this.tetherImmune - dt)
+
+    const s = this.tetherSrc
+    if (s) {
+      // ① 来源没了（被击杀 / 换波清场）⇒ 立刻松。**杀它是最干脆的解，也该是最被奖励的解**
+      if (!s.alive || !this.enemies.includes(s)) { this.dropTether(); return }
+      const d = dist(this.px, this.py, s.x, s.y)
+      // ② 被拉开 —— 安全网，不是主规则（见 `TETHER_SLIP_MUL` 的注释）
+      if (d > TETHER_R * TETHER_SLIP_MUL) { this.dropTether(); return }
+      // ③ 往外游够久 ⇒ 挣断（主规则）
+      if (this.breakT >= BREAK_T) { this.dropTether(); return }
+      return
+    }
+
+    // ④ 没有索：找最近的、在半径内的盘旋猎手。
+    //    ★ 免疫窗在这里生效 —— 刚挣开就被咬上 = 永久减速（同网的 `rootImmune` 那条红线）。
+    if (this.tetherImmune > 0) return
+    let best: Enemy | null = null
+    let bd = TETHER_R
+    for (const e of this.enemies) {
+      if (!e.alive || e.kind !== 'orbit') continue
+      const d = dist(this.px, this.py, e.x, e.y)
+      if (d <= bd) { bd = d; best = e }
+    }
+    if (best) { this.tetherSrc = best; this.breakT = 0 }
+  }
+
+  /** 松索并进免疫窗。**唯一的出口** —— 击杀 / 游开 / 被拉开 都走这里。 */
+  private dropTether(): void {
+    this.tetherSrc = null
+    this.breakT = 0
+    this.tetherImmune = TETHER_IMMUNE
   }
 
   /** 对玩家造成一次**一次性**打击（Boss 震击）。DiveScene.ts:1985-2002 */
@@ -1265,12 +1430,20 @@ export class DiveWorld implements ShopTarget {
     const crit = this.rng.chance(this.st.crit)
     let d = dmg * this.dmgMulNow()
     if (crit) d *= 1 + this.st.critMul
+    // ---- V6.77d 狩猎本能：对**已被控住**的目标加伤 ----
+    // ⚠️ 读的是敌人自己身上的 `slowT` / `rootT`（网族与定身雷写的），
+    //    不是"玩家有没有带控制武器" ⇒ 队友/多武器协同也算数。
+    // ⚠️ 与 `breakRoot()` 的先后：这里只**读**、不改，所以"这一击打断了定身"
+    //    的场景里，破定身的那一击**仍然吃满加伤**（先算伤害再处理控制解除）。
+    if (this.st.slowDmg > 0 && (e.slowT > 0 || e.rootT > 0)) d *= 1 + this.st.slowDmg
     // ---- V6.62 重甲护甲：减伤 60%，但**爆炸 / 穿透无视** ----
     // 这两条豁免不是"网开一面"，而是重甲存在的**全部意义**：它逼玩家在
     // 「低伤高射速」和「高伤爆炸/穿透」之间做武器选择。没有豁免 ⇒ 它只是血厚的杂兵。
     const ignoreArmor = cause === 'blast' || cause === 'pierce'
     const blocked = e.armor > 0 && !ignoreArmor
-    if (blocked) d *= (1 - e.armor)
+    // V6.77d 破甲穿透：★ 与 `pierce` **语义不同** —— `pierce` 是"完全无视"，
+    //   本卡是"把减伤按比例打折"（45% 穿透 ⇒ 60% 减伤只剩 33%）⇒ 保留重甲的存在感。
+    if (blocked) d *= (1 - e.armor * (1 - this.st.armorPen))
     e.hp -= d
     e.flash = Math.max(e.flash, 0.09)
     let nx = 0, ny = 0
@@ -1328,7 +1501,11 @@ export class DiveWorld implements ShopTarget {
     if (e.hp <= 0 && e.alive) {
       e.alive = false
       this.biomass += e.kind === 'boss' ? 20 : 1
-      if (e.kind === 'boss') this.bossDown = true
+      if (e.kind === 'boss') {
+        this.bossDown = true
+        // 图鉴按**种类**记（两个 Boss = 两条），见 `bossesDown` 的注释
+        this.bossesDown.add(e.bossKind)
+      }
       this.emit({ t: 'kill', x: e.x, y: e.y, r: e.r, color: e.color, kind: e.kind, cause })
       // ---- 连杀计数（V6.62 §5-B）----
       // ⚠️ **Boss 不计**：Boss 是一场长战，杀它本身不该算进"3 秒 8 只"的节奏里
@@ -1506,7 +1683,7 @@ export class DiveWorld implements ShopTarget {
     }
     this.weapons.push({
       id, iv: st.iv, timer: 0, dmg: st.dmg, lvl, anchor: 0,
-      ivLast: st.iv, fireFlash: 0, aimAng: this.aim,
+      ivLast: st.iv, fireFlash: 0, aimAng: this.aim, aimV: 0,
     })
   }
 
@@ -1521,14 +1698,22 @@ export class DiveWorld implements ShopTarget {
     w.timer = 0
     w.ivLast = st.iv
     w.fireFlash = 0.25
+    // ⚠️ 角速度必须归零：不归零的话残留角速度会在下一帧把角度多推一段，
+    //    读作"进化的一瞬间炮口自己跳了一下"，且不会有任何报错。
+    w.aimV = 0
   }
 
   /** 武器槽位 → 座圈座位分配表。DiveScene.ts:2477-2486 */
   mountPlan(): Array<{ ang: number; ext: boolean }> {
     const plan: Array<{ ang: number; ext: boolean }> = []
     for (let i = 0; i < this.weapons.length && i < MAX_SEATS; i++) {
+      // `ang` 现在是**由挂点反推**的自洽值（世界角），不再读`SEAT_ANGLES_DEG` ——
+      // 侧视下炮位是焊在艇身上的固定安装点，"座位朝向"只能是挂点位置推出来的，
+      // 而不是独立的一组角度（两者各自独立 = 迟早对不上，且不会报错）。
+      // 无目标时炮口回到 `aim + sway` 待机，所以实际朝向由 `slewTurretAims` 决定，不吃这里的值。
+      const m = SEAT_MOUNTS[i]
       plan.push({
-        ang: SEAT_ANGLES_DEG[i] * Math.PI / 180,
+        ang: Math.atan2(m[1] * (HULL_H / 2), m[0] * (SUB_D / 2)),
         ext: i >= BASE_SEATS,
       })
     }
@@ -1538,34 +1723,32 @@ export class DiveWorld implements ShopTarget {
   /**
    * 第 i 座塔座的世界坐标。DiveScene.ts:2489-2496
    *
-   * ⚠️ 2026-10-13 定了两轮：
-   *   ① 用户「移动的过程中武器一直在换位置也不太合适」→ 座圈**不再整体随 `aim` 旋转**；
-   *   ② 用户「完成轻微摆动」→ 改成**阻尼跟随 + 限幅 ±20°**（见 `slewSeatSway`）。
+   * 第 i 座塔座的世界坐标。DiveScene.ts:2489-2496
    *
-   *    为什么不能整体跟随 `aim`：机体是**回转体**，转动它本身在屏幕上毫无变化，
-   *    于是观感变成"炮在自己沿着船壳滑动"，而不是"潜艇转了向"；且角度完全跟随 `aim`，
-   *    玩家一转向（survivors 里每秒都在转）就整体甩一圈，非常吵。
-   *    为什么"轻微摆动"是对的：A2 层叠后"6 挺任何朝向都可见"已成目标，
-   *    炮圈只需**一点点**生命感 —— 滞后偏角当"有重量的炮塔环"读，站住即回正，不换舷。
-   *    航向提示由**艏部探照灯**（`DiveGame.drawPlayer`）与摆动共同承担。
+   * -----------------------------------------------------------------------
+   * V6.71 重写（用户原话：「座圈不对吧 按照侧视的角度不应该是上下是炮空比较合适吗
+   *   炮孔装上去的发射器要有具体感 就像真的装上去 设计一样」）
+   * -----------------------------------------------------------------------
+   * 旧写法 `x = R·cos(a)`、`y = R·sin(a)·SEAT_RATIO` 把 6 座摊在一条扁椭圆上，
+   * 在 88×56 的梭形上读作"沿船边贴了一圈盘子"。新写法直接读 `SEAT_MOUNTS` 的
+   * **归一化安装点**：**背脊 3 座 + 腹部 3 座**，沿艇身纵向排开，像真实潜艇的鱼雷舱。
    *
-   *    注意：这是**站位**层面的改动，`turretPose().ang` 的索敌转向不受影响 ——
-   *    炮管照样转过去打最近的敌人。
+   * ⚠️ **`sway` 不再位移座**（这次改动最重要的一条）：
+   *   挂点既然是"螺栓固定在艇体上的炮口"，转向时它就**必须刚性跟着机体**。
+   *   旧写法把 `sway` 加在座位角上 ⇒ 6 座炮在机体表面滑动，正是用户
+   *   「移动的过程中 武器一直在换位置也不太合适」所指的毛病。
+   *   摆动改挂在**炮口待机角**上（见 `slewTurretAims`）：座不动，炮口略微滞后。
    *
-   * ⚠️ 摆动加在这里（而非渲染层）的原因同 `SEAT_RATIO`：`seatPos()` 同时决定
-   *    「炮塔画在哪」与「子弹从哪出生」（`autoFire` 取 `turretPose`）。
+   * ⚠️ 挂点若只做在渲染层，子弹会从炮口**旁边**飞出来 —— `autoFire` 取 `turretPose`
+   *   而 `turretPose` 取 `seatPos`，所以三条链路（炮塔 / 炮口闪光 / 子弹出生点）同源。
    */
   seatPos(i: number): { x: number; y: number } | null {
-    const slot = this.mountPlan()[i]
-    if (!slot) return null
-    const a = slot.ang + this.sway               // 站位 + 炮圈摆动滞后
-    const sx = SEAT_RING_R * Math.cos(a)
-    const sy = SEAT_RING_R * Math.sin(a)
-    // 侧视投影（V6.54）：座圈在机体**水平面内**定死（含摆动），侧视相机只保留两个自由度 ——
-    //   横向（沿艇长）= 满比例 `cos`，纵向（沿艇高）= `sin × SEAT_RATIO`。
-    // 效果：±90° 两座压在机体的高边缘（"镶嵌在艇缘"），±30°/±150° 四座沿艇长铺开。
-    // 见 tables.ts SEAT_RATIO：炮位与子弹出生点共用这一处，改这里等于同时改两者。
-    return { x: this.px + sx, y: this.py + sy * SEAT_RATIO }
+    const m = SEAT_MOUNTS[i]
+    if (!m) return null
+    return {
+      x: this.px + m[0] * (SUB_D / 2),
+      y: this.py + m[1] * (HULL_H / 2),
+    }
   }
 
   /** 第 i 座在射程内最近的目标（以**塔座**为原点）。DiveScene.ts:2499-2507 */
@@ -1581,22 +1764,23 @@ export class DiveWorld implements ShopTarget {
   /**
    * 发射器独立索敌（V6.26）：每座塔从**自己座位**出发锁定最近敌人，
    * 以 TURRET_SPIN 的角速度转过去；无目标就回到艇首方向待机。
-   * DiveScene.ts:2522-2537
+ * DiveScene.ts:2522-2537
    */
   /**
-   * 炮圈摆动（2026-10-13，用户「完成轻微摆动」）。
+   * 炮口摆动（2026-10-13 用户「完成轻微摆动」；V6.71 改了作用对象）。
    *
-   * 阻尼跟随 + 限幅：每帧把航向增量的一部分**滞留给**炮圈（船向右转 → 炮圈落后 → 读作轻微左偏），
-   * 再以弹簧回中；整体限幅 ±`SEAT_SWAY_MAX`（20°）。
+   * 阻尼跟随 + 限幅：每帧把航向增量的一部分**滞留给**炮口（船向右转 → 炮口落后
+   * → 读作轻微左偏），再以弹簧回中；整体限幅 ±`SEAT_SWAY_MAX`（20°）。
    *
-   * ⚠️ 必须在 `slewTurretAims` **之前**：后者的瞄准原点取自 `seatPos()`，
-   *    炮圈先摆到位，炮管的索敌转向才对着正确的原点算。
-   * ⚠️ 与 `seatPos()` 同源 ⇒ 子弹出生点跟着摆，弹道不会与画面劈叉。
+   * ⚠️ V6.71：**不再位移炮座**，只偏炮口朝向（消费点见 `slewTurretAims` 的 `want`）。
+   *   炮座现在是 `SEAT_MOUNTS` 里焊死的安装点 —— 让它跟着摆，用户一眼就会看到
+   *   "炮在艇表面滑动"，那正是他两次驳回的读法。
+   * ⚠️ 必须在 `slewTurretAims` **之前**：后者要用 `this.sway` 算待机朝向。
    */
   slewSeatSway(dt: number): void {
     const dAim = wrapAngle(this.aim - this.prevAim)   // 本帧转向增量（绕到最短弧）
     this.prevAim = this.aim
-    this.sway -= dAim * SEAT_SWAY_FOLLOW              // 一部分转角滞留给炮圈
+    this.sway -= dAim * SEAT_SWAY_FOLLOW              // 一部分转角滞留给炮口
     this.sway -= this.sway * Math.min(1, dt * SEAT_SWAY_DECAY)  // 弹簧回中
     this.sway = clamp(this.sway, -SEAT_SWAY_MAX, SEAT_SWAY_MAX)
   }
@@ -1607,12 +1791,33 @@ export class DiveWorld implements ShopTarget {
       const st = this.seatTarget(i)
       if (!st) continue
       const p = this.seatPos(i)!
+      // 无目标 ⇒ 炮口朝艇首**加摆动偏角**（V6.71：摆动在这里落地，不再位移座）
       const want = st.tgt
         ? Math.atan2(st.tgt.y - p.y, st.tgt.x - p.x)
-        : this.aim
+        : this.aim + this.sway
       const rel = wrapAngle(want - w.aimAng)
-      const step = clamp(rel * Math.min(1, dt * 14), -TURRET_SPIN * dt, TURRET_SPIN * dt)
-      w.aimAng = wrapAngle(w.aimAng + step)
+      // ---- V6.77「丝滑转向」：临界阻尼二阶系统的**解析解**递推 ----
+      // 旧写法 `step = clamp(rel*min(1,dt*14), ±TURRET_SPIN*dt)` 是**恒速钳位**：
+      //   第一帧直接给到满速（16 rad/s ≈ 917°/s），最后一帧直降为 0 —— 速度曲线是**方波**。
+      //   开局下潜（`aim` 0 → +90°）时 0.1s 就甩完，用户读作「有点突兀」。
+      // 新写法：`ẍ + 2ω·ẋ + ω²·x = 0`（x = 残差），初值 `x0 = rel`、`v0 = aimV`，闭式解：
+      //     x(t) = (x0 + b·t)·e^(−ωt)      v(t) = (v0 − ω·b·t)·e^(−ωt)      b = v0 + ω·x0
+      //   ⇒ 本帧转过的角度 = `x0 − x(dt)`，新角速度 = `v(dt)`。
+      // ⚠️ 为什么用解析解而不是半隐式欧拉：欧拉在 `dt·ω ≳ 1` 时会过冲，而 `dt` 会被掉帧
+      //    拉大；解析解对**任意 dt** 都精确 ⇒ 帧率抖动不会让炮口越过目标。
+      // ⚠️ **待机 / 索敌两档 ω**（见 `tables.ts` 的长注释）：用户在开局看到的是待机档。
+      // ⚠️ 顺序不能反：先用**本帧初值**算 x/v，再写回。先写角度会让速度用错基准。
+      // ⚠️ `wrapAngle` 取的是**最短弧** ⇒ 170° 会走 −190° 那一侧（不是绕远路）。
+      // V6.77d 伺服转台：**待机 / 索敌两档同乘**。
+      // ⚠️ 只加"索敌档"会读不出来 —— 待机时炮口归位同样慢，而玩家在没敌人时
+      //    更常盯着机体看。两档一起加，"转台变利索了"才是完整的一句话。
+      const om = (st.tgt ? TURRET_OMEGA_TRACK : TURRET_OMEGA_IDLE) * (1 + this.st.turretSpeed)
+      const wt = om * dt
+      const b = w.aimV + om * rel
+      const ex = Math.exp(-wt)
+      const nx = (rel + b * dt) * ex
+      w.aimV = clamp((w.aimV - om * b * dt) * ex, -TURRET_SPIN, TURRET_SPIN)
+      w.aimAng = wrapAngle(w.aimAng + (rel - nx))
     }
   }
 
@@ -1647,7 +1852,16 @@ export class DiveWorld implements ShopTarget {
       const rng = (def.range + (w.lvl - 1) * 26) * (1 + this.st.range)
       const seatBoost = (plan[wi]?.ext) ? (1 + this.st.twinRate) : 1
       const pose = this.turretPose(wi)
-      const MUZ = TURRET_R * 1.05
+      // 炮口出生点 = 炮座中心沿炮管方向外推。
+      // ⚠️ V6.71 跟着炮座改造一起换了基数：`TURRET_R`（已作废）→ `MOUNT_BASE_R`。
+      //    0.85 的来历：枪族炮管末端在局部 x ≈ `EMITTER_SIZE × 0.68` ≈ 12.2px，
+      //    而底板半径 15 ⇒ 出弹点必须落在**炮管口上**、不能还在底板里面。
+      // ⚠️ V6.76 **数值刻意不动**：安装结构从"艇外悬臂台（`MOUNT_BASE_R=15`）"改成
+      //    "位图上的槽 + 插进槽里的柱脚"，转座心从 8.7px 收到 6.3px ⇒ 12.75 现在
+      //    **比旧版更靠外**（相对新转座心是 +6.4，相对炮管口 6.3+12.2=18.5 仍在其内侧）。
+      //    即"出弹点落在炮管里、且不会落在安装件后面"这条不变式**仍然成立**，
+      //    而弹道属于战斗手感 ⇒ 没有理由跟着视觉一起动（动了是行为变更，不是修正）。
+      const MUZ = MOUNT_BASE_R * 0.85
 
       const fam = weaponFamily(w.id)
       const wcol = WEAPON_DEF[w.id].color
@@ -1672,7 +1886,10 @@ export class DiveWorld implements ShopTarget {
         const oy = pose ? pose.y + Math.sin(base) * MUZ : this.py
         const pellets = w.id === 'gun_sg' ? 5 : 1
         const spread = 0.36
-        const spd = w.id === 'gun_gl' ? 640 : 780
+        // V6.77d 弹道增压：**速度与寿命同乘 / 同除** ⇒ 射程 `rng` 不变，
+        // 变的只是"子弹飞到目标要多久"（命中提前量）。下面 `life: rng / spd`
+        // 天然跟着新速度走，所以这里只需要改 `spd` 一处。
+        const spd = (w.id === 'gun_gl' ? 640 : 780) * (1 + this.st.bulletSpd)
         for (let p = 0; p < pellets; p++) {
           const a = pellets > 1
             ? base + (p / (pellets - 1) - 0.5) * spread * 2
@@ -1692,14 +1909,17 @@ export class DiveWorld implements ShopTarget {
         const oy = pose ? pose.y + Math.sin(base) * MUZ : this.py
         const pellets = w.id === 'torp_cl' ? 3 : 1
         const spread = 0.26
+        // V6.77d 弹道增压。⚠️ 鱼雷的射程是**写死的 `life: 3.0` × 速度**（不是
+        // `rng / spd`）⇒ 这里必须**显式**把寿命除回去，否则加速会直接变远。
+        const bs = 1 + this.st.bulletSpd
         for (let p = 0; p < pellets; p++) {
           const a = pellets > 1
             ? base + (p / (pellets - 1) - 0.5) * spread * 2
             : base
           this.bullets.push({
             x: ox, y: oy,
-            vx: Math.cos(a) * 300, vy: Math.sin(a) * 300,
-            life: 3.0, dmg: w.dmg, kind: 'torpedo',
+            vx: Math.cos(a) * 300 * bs, vy: Math.sin(a) * 300 * bs,
+            life: 3.0 / bs, dmg: w.dmg, kind: 'torpedo',
             hit: new Set<number>(), alive: true,
             er: w.id === 'torp_hv' ? 1.5 : 1,
           })
@@ -1713,12 +1933,15 @@ export class DiveWorld implements ShopTarget {
         // V6.29 三重鱼叉：3 叉扇形；回旋鱼叉：单叉 + 到程掉头 + 命中回氧
         const pikes = w.id === 'harp_tr' ? 3 : 1
         const spread = 0.30
+        // V6.77d 弹道增压。⚠️ `boomerAt`（回旋鱼叉的掉头时刻）是 `life0` 的一半 ⇒
+        // 必须跟着 `life0` 一起缩，否则"加速后回旋点提前/推后"，回旋半径会漂。
+        const bs = 1 + this.st.bulletSpd
         for (let p = 0; p < pikes; p++) {
           const a = pikes > 1 ? base + (p / (pikes - 1) - 0.5) * spread * 2 : base
-          const life0 = rng / 900
+          const life0 = rng / (900 * bs)
           const b: Bullet = {
             x: ox, y: oy,
-            vx: Math.cos(a) * 900, vy: Math.sin(a) * 900,
+            vx: Math.cos(a) * 900 * bs, vy: Math.sin(a) * 900 * bs,
             life: life0, dmg: w.dmg, kind: 'harpoon',
             hit: new Set<number>(), alive: true,
           }
@@ -2043,6 +2266,12 @@ export class DiveWorld implements ShopTarget {
     let m = (1 + this.st.dmg) * this.sub.dmgMul
     if (this.hasRelic('echo_heart') && this.o2 / this.o2Max < 0.3) m *= 1.5
     if (this.hasRelic('abyss_mark')) m *= 1 + 0.12 * this.layerIdx
+    // ---- V6.77d 猎杀节奏 ----
+    // ⚠️ **复用 `comboCnt`**（V6.62 骨雨那套连杀计数），不另起一个计时器 ——
+    //    两个"连杀"各自计时必然出现"骨雨刚触发、增伤却清零"这种读不出来的错位。
+    // ⚠️ 层数用 `Math.min` 钳，**不是**往 `STAT_CAP` 里塞：`st.streak` 是"每层加成"，
+    //    买第 7 张的行为必须是"加成更高"而不是"层数更多"（否则面板数值会骗人）。
+    if (this.st.streak > 0) m *= 1 + this.st.streak * Math.min(this.comboCnt, STREAK_MAX_LV)
     return m
   }
 

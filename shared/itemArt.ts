@@ -48,6 +48,22 @@ export const ITEM_ART_PATH: Record<string, string> = {
   harp_cb: 'items/item_harp_cb.png',
   echo_mu: 'items/item_echo_mu.png',
   acid_ra: 'items/item_acid_ra.png',
+  // —— V6.77d 批 5a：3 把机制武器（V6.46 实装机制、本版补立绘）——
+  // 三族的载体是新的（碟形布雷器 / 网筒抛网器 / 球囊诱饵器），没有可改造的祖先图，
+  // 所以它们是 **text-to-image 从零生成**（不是 image-to-image）。
+  // ⚠️ 六个进化形态里，`mine_ch` / `mine_o2` / `lure_bo` 三个**必须是 text-to-image**：
+  //    实测 image-to-image 下模型拒绝改变整机长宽比（连出两版 AR 都与基础图差 <2%），
+  //    而"三族剪影两两不同"是本批的主要设计约束 ⇒ 整体比例只能靠从零生成控制。
+  mine: 'items/item_mine.png',
+  net: 'items/item_net.png',
+  lure: 'items/item_lure.png',
+  // —— V6.77d 批 5a：6 条进化 ——
+  mine_ch: 'items/item_mine_ch.png',
+  mine_o2: 'items/item_mine_o2.png',
+  net_el: 'items/item_net_el.png',
+  net_cv: 'items/item_net_cv.png',
+  lure_bo: 'items/item_lure_bo.png',
+  lure_wl: 'items/item_lure_wl.png',
   // —— 遗物（独立物件，键 = RelicId，立绘不带炮台底座）——
   // 它们**不是**装在炮座上的武器，而是独立物件（器官 / 结晶 / 铭牌…），
   // 所以立绘不带炮台底座 —— 玩家一眼能分清"这是装备"和"这是挂载武器"。
@@ -59,4 +75,11 @@ export const ITEM_ART_PATH: Record<string, string> = {
   abyss_mark: 'items/item_abyss_mark.png',
   current_fin: 'items/item_current_fin.png',
   silent_plating: 'items/item_silent_plating.png',
+  // —— V6.77d 批 5b：4 件机制遗物（V6.33 实装机制、本版补立绘）——
+  // 与武器不同：**没有炮座底座**，各是一件独立物件（线圈柱 / 三爪锚 / 中空腔体 / 核心球），
+  // 形状彼此不撞，也与已有 8 件不撞（腺体 / 罗盘 / 骨骼簇 / 装甲板 / 鳍 / 铭牌 / 水晶 / 心脏）。
+  conductor_coil: 'items/item_conductor_coil.png',
+  bleeding_anchor: 'items/item_bleeding_anchor.png',
+  resonance_chamber: 'items/item_resonance_chamber.png',
+  overload_core: 'items/item_overload_core.png',
 }

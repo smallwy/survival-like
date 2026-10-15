@@ -67,16 +67,27 @@ export const WEAPON_NAME: Record<WeaponFamily, string> = {
 /**
  * 图鉴条目全表。
  *
- * 敌人只收**战斗层真实存在的 3 种移动体**（swarm/dash/drift）+ Boss 一条 ——
+ * 敌人只收**战斗层真实存在的移动体**（swarm/dash/drift/**armor**）+ 两个 Boss ——
  * 不像策划表那样罗列一堆打不到的兵种（那会让图鉴永远填不满，反而劝退）。
+ *
+ * ⚠️ **V6.78 修：全表和 `codexGains()` 曾经对不上**（V6.62 加内容时漏了这一处）。
+ *    `CODEX` 里有的条目，`codexGains()` 却永远不会产出它的 id ⇒ **永远解锁不了**，
+ *    而且**不报错**（图鉴屏只会一直显示剪影，玩家以为是"我还没遇到"）。
+ *    漏的三处：`enemy:armor`（重甲）、`boss:angler`（鮟鱇女王）、
+ *    以及 `famOf` 里没有 mine / net / lure ⇒ **三个机制型武器族全进不了图鉴**。
+ *    ★ 判据：**凡是表里有 id 的，`codexGains()` 就必须有一条路径能产出它** ——
+ *      这是一条"两张表互相对账"的静态约束，`dive_sim_smoke.js` 现在会逐个验。
  */
 export const CODEX: CodexEntry[] = [
   // ---- 敌人（DiveWorld.spawnEnemy 的 kind）----
   { id: 'enemy:swarm', cat: 'enemy', name: '游群', hint: '成群压上来的基础体，血薄量大' },
   { id: 'enemy:dash', cat: 'enemy', name: '冲刺体', hint: '先蓄力再暴冲，红色预警后要闪开' },
   { id: 'enemy:drift', cat: 'enemy', name: '漂移水母', hint: '慢、肉厚、值钱，是大目标' },
+  { id: 'enemy:armor', cat: 'enemy', name: '甲壳重甲', hint: '慢、硬、子弹打上去会被弹开，要找穿透手段' },
+  { id: 'enemy:orbit', cat: 'enemy', name: '盘旋猎手', hint: '不正面冲你 —— 绕着圈越缩越近，贴身才咬' },
   // ---- 首领 ----
   { id: 'boss:abyss', cat: 'boss', name: '深渊守望者', hint: '深渊带最后一波才现身的东西' },
+  { id: 'boss:angler', cat: 'boss', name: '鮟鱇女王', hint: '在一片黑暗里挂着一盏灯等你游过去' },
   // ---- 武器（按族）----
   ...WEAPON_FAMILIES.map((f): CodexEntry => ({
     id: 'weapon:' + f, cat: 'weapon', name: WEAPON_NAME[f], hint: '尚未在商店里见过它',
@@ -96,8 +107,16 @@ export function codexByCat(cat: CodexCat): CodexEntry[] {
 export interface CodexSnapshot {
   /** 本局刷怪计数（`DiveWorld.spawned`，按 kind 计） */
   spawned: Record<string, number>
-  /** 本局是否打完/in 场过 Boss */
-  bossDown: boolean
+  /**
+   * 本局**击杀过哪些 Boss**（`DiveWorld.bossesDown`）。
+   *
+   * ⚠️ V6.78 从 `bossDown: boolean` 改成列表：**两个 Boss 是两个图鉴条目**，
+   *    用一个布尔量表示"打过 Boss"的话，`boss:angler` 就永远解锁不了
+   *    （这正是 V6.62 加了鮟鱇女王之后图鉴没跟上的原因）。
+   *    写成 `string[]` 而不是 `'watcher' | 'angler'` 联合，是为了让本文件
+   *    不必 import `BossKind` —— 图鉴只关心"哪个 id 该被点亮"。
+   */
+  bossesDown: string[]
   /** 本局装备/拥有过的武器 id（`world.weapons.map(w => w.id)`） */
   weaponIds: string[]
   /** 本局装备过的遗物 id（`world.relics`） */
@@ -114,12 +133,23 @@ export function codexGains(snap: CodexSnapshot): Record<string, number> {
   const out: Record<string, number> = {}
   const add = (id: string, n: number) => { if (n > 0) out[id] = (out[id] ?? 0) + n }
 
-  for (const k of ['swarm', 'dash', 'drift'] as const) {
+  // ⚠️ 这几个 kind 必须与 `CODEX` 的 `enemy:*` 条目、以及 `types.ts` 的 `Kind` 对齐。
+  //    V6.78 之前漏了 'armor'（V6.62 加的第 4 类）⇒ 打了一整局重甲，图鉴上还是剪影。
+  //    ★ 每加一个 `Kind`，**这一行和 `CODEX` 两边都要加** —— 只加一边不报错，只会永远显示剪影。
+  for (const k of ['swarm', 'dash', 'drift', 'armor', 'orbit'] as const) {
     add('enemy:' + k, snap.spawned[k] ?? 0)
   }
-  if (snap.bossDown) add('boss:abyss', 1)
+  // Boss：按**种类**各记一条（两个 Boss = 两个条目，见 `CodexSnapshot.bossesDown`）
+  const BOSS_CODEX: Record<string, string> = { watcher: 'boss:abyss', angler: 'boss:angler' }
+  for (const bk of snap.bossesDown) {
+    const id = BOSS_CODEX[bk]
+    if (id) add(id, 1)
+  }
 
   // 武器：把 id 归到"族"（进化形态也是同一个族，不重复计数）
+  // ⚠️ **每加一个 `WeaponFamily` 都要在下面补三行**（基础 + 两条进化）。
+  //    V6.78 之前 mine / net / lure 三个族不在表里 ⇒ 三族共 9 把武器
+  //    **一次也进不了图鉴**（`famOf[id]` 取到 undefined，静默跳过）。
   const famOf: Record<string, WeaponFamily> = {
     gun: 'gun', gun_gl: 'gun', gun_sg: 'gun',
     torpedo: 'torpedo', torp_cl: 'torpedo', torp_hv: 'torpedo',
@@ -128,6 +158,10 @@ export function codexGains(snap: CodexSnapshot): Record<string, number> {
     harpoon: 'harpoon', harp_tr: 'harpoon', harp_cb: 'harpoon',
     echo: 'echo', echo_mu: 'echo', echo_fo: 'echo',
     acid: 'acid', acid_fd: 'acid', acid_ra: 'acid',
+    // V6.46 三个机制族（V6.78 补进图鉴）
+    mine: 'mine', mine_ch: 'mine', mine_o2: 'mine',
+    net: 'net', net_el: 'net', net_cv: 'net',
+    lure: 'lure', lure_bo: 'lure', lure_wl: 'lure',
   }
   const fams = new Set<WeaponFamily>()
   for (const id of snap.weaponIds) { const f = famOf[id]; if (f) fams.add(f) }
