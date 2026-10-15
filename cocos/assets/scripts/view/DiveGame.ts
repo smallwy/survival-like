@@ -2206,8 +2206,30 @@ export class DiveGame extends Component {
       case 'dead':
         this.finishRun()
         break
+      case 'playerHurt': {
+        // V6.80（用户：「我方收到攻击不要全屏 只需要我身上有特效」）：
+        //   全屏红带已删（见 `drawVeil`）。受击反馈**全部落在自机上**，三样：
+        //     ① 自机冲击环（短促 + 小半径 ⇒ "我被打了一下"，不是"炸了"）
+        //     ② 受击面溅射：`dirX/dirY` = **从玩家指向伤害来源** ⇒ 火花朝**反方向**溅
+        //        （"从那个方向打进来、碎片往里飞"，与 `hurtDir` 的语义对齐）
+        //     ③ 方向弧由 `drawPlayer` 每帧按 `hurtDirT` 画（持续 0.6s，比这两样长）
+        const px = this.world.px, py = this.world.py
+        const ia = Math.atan2(ev.dirY, ev.dirX)
+        this.pushShock(px, py, 40, 0.20, UI.danger, 2.4, 14, 1)
+        for (let i = 0; i < 8; i++) {
+          const a = ia + Math.PI + (Math.random() - 0.5) * 1.7
+          const sp = 100 + Math.random() * 140
+          this.sparks.push({
+            x: px, y: py, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+            life: 0.22, maxLife: 0.22, color: i < 2 ? 0xffffff : UI.danger,
+            size: 1.6 + Math.random() * 1.5, ang: a, kind: 'hit',
+          })
+        }
+        this.trimSparks()
+        break
+      }
       // 以下事件本切片不产生额外表现（相位可直接读 world 字段）：
-      //   playerHurt、dodge、wave / layerCleared
+      //   dodge、wave / layerCleared
       //   （`waveCleared` 已在上面接了「波间下探节拍」，不在这一组）
       default:
         break
@@ -2728,17 +2750,15 @@ export class DiveGame extends Component {
       this.gVeil.fillRect(vr.x, vr.y, vr.w, m)
       this.gVeil.fillRect(vr.x, vr.y + vr.h - m, vr.w, m)
     }
-    // 方向性受击暗角：受击来向那一侧先红
-    if (w.hurtDirT > 0) {
-      const k = Math.min(1, w.hurtDirT / 0.6)
-      const side = w.hurtDirX > 0 ? 1 : -1
-      for (let i = 0; i < 6; i++) {
-        const bw = (vr.w * 0.08 * (1 - (i / 7) * 0.3)) / z
-        const x = side > 0 ? vr.x + vr.w - bw * (i + 1) : vr.x + bw * i
-        this.gVeil.fill(UI.danger, 0.12 * k)
-        this.gVeil.fillRect(x, vr.y, bw, vr.h)
-      }
-    }
+    // ⛔ **全屏方向性受击红带（V6.80 删除）**
+    // 用户 2026-10-15：「我方收到攻击不要全屏 只需要我身上有特效 不要蔓延到其他敌方」。
+    //   旧版按受击来向在**整个屏幕高度**上铺 6 条红带（每条横贯 vr.h）——
+    //   它把"我挨了一下"读成了"整个画面在受击"，连画面里的敌人都被染红，
+    //   这正是用户说的"蔓延到其他敌方"。
+    //   ⇒ 判据：**受击是自机身上的事** ⇒ 来向信息改由「机身上的受击弧 +
+    //      自机冲击环 + 受击面溅射」三样承担（见 `drawPlayer` 的受击弧与
+    //      `handleEvent` 的 `playerHurt`）。屏幕层（`gVeil`）不再参与受击表达。
+    //   ⚠️ `w.hurtDirT / hurtDirX / hurtDirY` **没有变成死字段** —— 两个消费点都在上面那两处。
   }
 
   /**
@@ -3340,11 +3360,44 @@ export class DiveGame extends Component {
       this.gBack.fillCircle(b.x + s * 0.92 * ca, b.y + s * 0.92 * sa, Math.max(1.6, s * 0.18))
     }
 
-    // ---- 声呐波前 ----
+    // ---- 声呐波前（V6.80 重做）----
+    // 用户 2026-10-15：「声纳往外扩 感觉没有什么特色 参考其他游戏 做做创新 扩的圈子是不是太大了」
+    //   旧版 = 两条**完整同心圆**（一条粗低透 7px + 一条细高亮 1.6px）⇒ 读作"一个空圈在变大"：
+    //   既没有"声呐"的身份（换成任何武器都成立），又在 420px 半径上横跨整个屏幕（"太大"）。
+    // ★ 新形态 = **三重递减波前 + 声呐束纹 + 距离衰减**，三条同时解决"没特色 / 太空 / 太大"：
+    //   ① 三重波前：主前（亮）+ 两道**滞后回声**（0.83r / 0.66r，更暗更细）——
+    //      这是"脉冲在介质里拖出回响"的形状，不是"一个圈"。
+    //      ⚠️ 滞后环**共用同一个 `p.r` 做基准**（不是各扩各的）——各扩各的会读成
+    //         "三个独立武器同时开火"，那正好毁掉"这是一个脉冲"的语义。
+    //   ② 声呐束纹：沿主前均布 24 道**短径向齿**（声呐屏的刻度语汇），整组缓慢自转。
+    //      ⛔ 相位**不用 `Math.random()`** —— 同帧多道波前时随机相位会让画面抖
+    //         （与爆炸破片同一条判据，见 `blasts` 的注释）。
+    //   ③ 距离衰减：`fade = 1 − 0.72k` ⇒ **外圈自己淡掉**，玩家感知到的范围自然收回
+    //      （这是"看起来没那么大"的正确解法）。
+    //      ⛔ **绝不为好看去缩视觉半径** —— 视觉必须画在**真实判定半径**上
+    //         （`p.maxR` 就是伤害半径），画小了就是骗判定。真要变小得改 `range`，那是配平。
     for (const p of w.pulses) {
-      if (!p.alive) continue
-      this.gBack.line(0x4fe8ff, 0.16, 7); this.gBack.strokeCircle(p.x, p.y, p.r)
-      this.gBack.line(0xc8f8ff, 0.55, 1.6); this.gBack.strokeCircle(p.x, p.y, p.r)
+      if (!p.alive || p.r < 1) continue
+      const k = Math.max(0, Math.min(1, p.r / Math.max(1, p.maxR)))
+      const fade = 1 - k * 0.72
+      // ① 三重递减波前
+      for (let i = 0; i < 3; i++) {
+        const rr = p.r * (1 - i * 0.17)
+        if (rr < 1) continue
+        const a = fade * (i === 0 ? 1 : 0.46 - i * 0.12)
+        this.gBack.line(0x4fe8ff, 0.20 * a, i === 0 ? 6 : 3)
+        this.gBack.strokeCircle(p.x, p.y, rr)
+        this.gBack.line(0xc8f8ff, (i === 0 ? 0.62 : 0.28) * a, i === 0 ? 1.6 : 1.1)
+        this.gBack.strokeCircle(p.x, p.y, rr)
+      }
+      // ② 声呐束纹（整组缓慢自转；齿**不长在半径上** ⇒ 波前推进时齿不会变形）
+      this.gBack.line(0xc8f8ff, 0.34 * fade, 1.2)
+      for (let i = 0; i < 24; i++) {
+        const a2 = (i / 24) * Math.PI * 2 + this.fxT * 0.9
+        const t0 = p.r * 0.965, t1 = p.r * 1.045
+        this.gBack.strokeSeg(p.x + Math.cos(a2) * t0, p.y + Math.sin(a2) * t0,
+          p.x + Math.cos(a2) * t1, p.y + Math.sin(a2) * t1)
+      }
     }
 
     // ---- 回声标记 ----
@@ -3451,30 +3504,120 @@ export class DiveGame extends Component {
         // ④ 头部亮点（弹头必须是全屏最亮的东西之一 —— 那是"往哪打"的唯一指示）
         this.gEnt.fill(0xffffff, 0.95); this.gEnt.fillCircle(b.x + ux * 3.4, b.y + uy * 3.4, 2)
       } else if (b.kind === 'net') {
-        // 网（V6.46）：飞行中是**收拢的网束**（3 道横索 + 收口目），
-        // 张开那一瞬由 `openNet` 抛的 `burst` 事件接管（渲染层画扩张环）。
-        // ⚠️ 收拢态不能画成"一个大网" —— 那会让玩家以为它在飞行途中就有判定范围。
+        // 网（V6.46 / **V6.80 重做"抛出感"**）
+        // 用户 2026-10-15：「之前说的 丢渔网 应该是**抛出去** 捆住有一个受击特效」。
+        //   旧版飞行态 = 三道**垂直于弹道的固定横索** + 两条斜索 ⇒ 读作"一个标签牌在平移"，
+        //   有"位移"没有"抛"——因为没有**体积**、没有**角动量**、也没有**牵引**。
+        // ★ "抛出"的三条：
+        //   ① **团**：收拢的网兜本身要有体积（一个沿弹道略长的闭合兜），不是几条横线；
+        //   ② **翻卷**：网兜沿飞行方向**自转**（`b.life` 驱动）⇒ 有角动量才像被甩出去的；
+        //   ③ **牵引绳**：连着机体的那根绳**绷在后方** ⇒ 明确"这是我扔出去的"，
+        //      也顺带把"投掷者"和"投掷物"绑在一条线上。
+        //   ⚠️ 收拢态**不能画成"一张摊开的网"** —— 那会让玩家以为飞行途中就有判定范围
+        //      （判定在 `openNet` 张开那一瞬才成立，见 `world.openNet`）。
         const c = b.net === 'net_el' ? UI.violet : b.net === 'net_cv' ? UI.cyanHi : UI.jade
-        // ① 三道横索（越前越亮 = 有方向感）
-        for (let i = 0; i < 3; i++) {
-          const d = i * 5 - 5
-          this.gEnt.line(c, 0.72 - i * 0.18, 1.5)
-          this.gEnt.strokeSeg(b.x + ux * d + px2 * 5.5, b.y + uy * d + py2 * 5.5,
-            b.x + ux * d - px2 * 5.5, b.y + uy * d - py2 * 5.5)
+        const spin = b.life * 7
+        const RW2 = 6.4, RL2 = 8.6                       // 兜的半宽 / 半长
+        const q8x: number[] = [], q8y: number[] = []
+        for (let i = 0; i < 8; i++) {
+          const th = (i / 8) * Math.PI * 2 + spin
+          const lx = Math.cos(th) * RL2, ly = Math.sin(th) * RW2
+          q8x.push(b.x + ux * lx - uy * ly)
+          q8y.push(b.y + uy * lx + ux * ly)
         }
-        // ② 收口网目（两条斜索收向头部）
-        this.gEnt.line(c, 0.45, 1)
-        for (const sgn of [-1, 1]) {
-          this.gEnt.strokeSeg(b.x + ux * 4 + px2 * sgn * 5.5, b.y + uy * 4 + py2 * sgn * 5.5,
-            b.x - ux * 10, b.y - uy * 10)
+        const pouch = () => {
+          this.gEnt.moveTo(q8x[0], q8y[0])
+          for (let i = 1; i < 8; i++) this.gEnt.lineTo(q8x[i], q8y[i])
+          this.gEnt.close()
         }
-        // ③ 拖尾绳
-        this.gEnt.line(c, 0.26, 1.2)
-        this.gEnt.strokeSeg(b.x - ux * 8, b.y - uy * 8, b.x - ux * 22, b.y - uy * 22)
-        this.gEnt.fill(0xffffff, 0.9); this.gEnt.fillCircle(b.x + ux * 4, b.y + uy * 4, 2)
+        // ③ 牵引绳（先画，压在兜下面）
+        this.gEnt.line(c, 0.28, 1.2)
+        this.gEnt.strokeSeg(b.x - ux * 8, b.y - uy * 8, b.x - ux * 30, b.y - uy * 30)
+        // ① 网兜（半透填充 = 有体积）
+        this.gEnt.fill(c, 0.22); pouch(); this.gEnt.fillPath()
+        this.gEnt.line(c, 0.85, 1.5); pouch(); this.gEnt.stroke()
+        // 收口索：八条从兜缘收向中心 ⇒ 读作"被绳子收着的兜"，不是"一个圈"
+        this.gEnt.line(c, 0.42, 0.9)
+        for (let i = 0; i < 8; i++) {
+          this.gEnt.strokeSeg(b.x + (q8x[i] - b.x) * 0.85, b.y + (q8y[i] - b.y) * 0.85,
+            q8x[i], q8y[i])
+        }
+        // ② 兜口的铅坠（配重块 —— 抛出物的"头"，也是它最先下沉的地方）
+        this.gEnt.fill(shade(c, 1.25), 0.95)
+        this.gEnt.fillCircle(b.x + ux * 6, b.y + uy * 6, 2.4)
+        this.gEnt.fill(0xffffff, 0.9)
+        this.gEnt.fillCircle(b.x + ux * 6.5, b.y + uy * 6.5, 1.1)
+      } else if (b.kind === 'torpedo') {
+        // ---- 追踪鱼雷（V6.80 重做）----
+        // 用户 2026-10-15：「追踪鱼雷 红色有点突兀 而且这个三角形也不合适吧 不应该是个鱼雷状么」
+        // 两处硬伤，逐条对应：
+        //   ① **颜色**：旧版走 `UI.danger`（纯红）—— 而 `danger` 的定位是
+        //      「全场唯一纯红，只允许用在**致命预警**」（见 `theme.ts`）⇒
+        //      玩家自己的弹体染成预警色，分不清"这是危险还是我的武器"。
+        //      ⇒ 改 `UI.ember`（暖橙 · 爆破物专属色）。
+        //   ② **形状**：旧版与鱼叉共用同一套轮廓（"尖头 → 身尾 → 尾翼"）⇒
+        //      前段一路收成一个尖 ⇒ 读作一个**三角锥**（用户说的"三角形"），不是鱼雷。
+        //      ★ 鱼雷的剪影判据（= 它与子弹 / 箭的分界），三条缺一不可：
+        //        · 头**钝圆**（尖 = 子弹/箭的语汇，收了尖就一定读成"箭头"）
+        //        · 身**等宽**（上下两条平行线 ⇒ 有"桶"感；锥形是火箭，不是鱼雷）
+        //        · 尾翼**张得比身宽**（否则看不出它靠什么在水里走直线）
+        const c = UI.ember
+        const RL = 10.5                                   // 身长（中心 → 头/尾）
+        const RW = 3.2                                    // 身半径（等宽段）
+        const NX = b.x + ux * RL, NY = b.y + uy * RL      // 弹头中心
+        const TX = b.x - ux * RL, TY = b.y - uy * RL      // 弹尾中心
+        // ① 螺旋桨气泡尾迹 —— **水里跑的不是焰火**，鱼雷的尾迹是气泡
+        for (let i = 1; i <= 6; i++) {
+          const q = i / 6
+          const bx = TX - ux * i * 4.6, by = TY - uy * i * 4.6
+          const wob = Math.sin(this.fxT * 10 + i * 1.6) * (2.0 + i * 0.55)
+          this.gEnt.fill(c, 0.40 * (1 - q) + 0.06)
+          this.gEnt.fillCircle(bx + px2 * wob, by + py2 * wob, 3.0 - q * 1.7)
+        }
+        // ② 外发光晕（深色层也要看得见）
+        this.gEnt.fill(c, 0.18); this.gEnt.fillCircle(b.x, b.y, 11)
+        // ③ 弹体：**等宽圆柱**（上下两条平行线）+ 描边 + 半透实心
+        const tBody = () => {
+          this.gEnt.moveTo(NX + px2 * RW, NY + py2 * RW)
+          this.gEnt.lineTo(TX + px2 * RW, TY + py2 * RW)
+          this.gEnt.lineTo(TX - px2 * RW, TY - py2 * RW)
+          this.gEnt.lineTo(NX - px2 * RW, NY - py2 * RW)
+          this.gEnt.close()
+        }
+        neon(this.gEnt, c, () => { tBody(); this.gEnt.stroke() },
+          { width: 1.8, alpha: 1, bloom: false })
+        this.gEnt.fill(c, 0.50); tBody(); this.gEnt.fillPath()
+        // ④ **钝圆头**（实心圆）—— ★ 这一颗圆头就是"鱼雷"与"子弹 / 箭"的分界线
+        this.gEnt.fill(shade(c, 0.88), 1); this.gEnt.fillCircle(NX, NY, RW)
+        // ⑤ **后掠尾翼**（翼尖张到身的 1.85 倍宽、整个挂在**身尾之后**）—— 侧视只看得见上下两片。
+        //    ⚠️ 翼展不能太大（第一版 2.5×）：翼比身宽一倍多时，剪影被翼吃掉 ⇒ 又读成"一个箭头"。
+        //       1.85× + 翼根起点**退到身尾**（不再盖住圆柱段）⇒ 等宽身与圆头才露得出来。
+        for (const sd of [-1, 1]) {
+          this.gEnt.fill(shade(c, 0.92), 1)
+          this.gEnt.moveTo(TX + px2 * sd * RW * 0.90, TY + py2 * sd * RW * 0.90)
+          this.gEnt.lineTo(TX + px2 * sd * RW * 1.85, TY + py2 * sd * RW * 1.85)
+          this.gEnt.lineTo(TX - ux * 5.0 + px2 * sd * RW * 1.15,
+            TY - uy * 5.0 + py2 * sd * RW * 1.15)
+          this.gEnt.close(); this.gEnt.fillPath()
+        }
+        // ⑥ **战斗部引信灯**（V6.74 判据：「它带着一颗会炸的东西」）——
+        //    亮核 + 一圈随 `fxT` 呼吸的光环；环最亮那一瞬正好对应"它要炸了"。
+        //    重型鱼雷（`er > 1`）环更大，与它"炸得更大"对得上。
+        //    ⚠️ 光环半径**不能大过弹体太多** —— 1.8× 时那颗球会盖住"钝圆头"这个关键剪影，
+        //       鱼雷又退回成"一坨光"。1.45× 刚好是"头上一圈光晕"而圆头仍然读得出来。
+        const wr = 2.6 * (b.er ?? 1)
+        const beat = 0.5 + 0.5 * Math.sin(this.fxT * 9 + b.life * 3)
+        this.gEnt.fill(c, 0.30 + 0.30 * beat)
+        this.gEnt.fillCircle(NX - ux * 3, NY - uy * 3, wr * 1.45)
+        this.gEnt.line(0xffffff, 0.48 + 0.40 * beat, 1.2)
+        this.gEnt.strokeCircle(NX - ux * 3, NY - uy * 3, wr * 1.05)
+        this.gEnt.fill(0xffffff, 0.95)
+        this.gEnt.fillCircle(NX - ux * 3, NY - uy * 3, 1.6)
       } else {
-        // 鱼叉走同一套弹体轮廓，只是配色偏玉（jade）；鱼叉更快更细，观感对得上
-        const c = b.kind === 'harpoon' ? UI.jade : UI.danger
+        // 鱼叉（jade）—— **穿刺武器**，走"细长 + 有厚度"的弹体轮廓。
+        // ⚠️ 鱼叉**不画圆头 / 不画引信**（V6.74 立的判据）：鱼叉是扎进去的、没有战斗部，
+        //    给它圆头或引信，就把"扎进去"读成"炸开"，两种武器的辨识度一起丢。
+        const c = UI.jade
         // ① 气泡尾迹：横向正弦摆动，越往后越淡越小
         for (let i = 1; i <= 5; i++) {
           const bx = b.x - ux * i * 7, by = b.y - uy * i * 7
@@ -3501,21 +3644,6 @@ export class DiveGame extends Component {
           { width: 1.8, alpha: 1, bloom: false })
         // 弹体填色（暗色实心，让它有"实体"而不是线框）
         this.gEnt.fill(c, 0.55); body(); this.gEnt.fillPath()
-        // ⑤ **战斗部（爆破物）**（V6.74）：用户「发出去的爆破 要加上爆破物在远处」——
-        //    旧版鱼雷是"气泡尾迹 + 弹体 + 一个白点"，读作"一道光飞过去"，
-        //    看不到**它带着一颗会炸的东西**。做法：弹头位置给一颗**引信灯** ——
-        //    亮核 + 一圈随 `fxT` 呼吸的光环；环最亮的那一瞬正好对应"它要炸了"。
-        //    重型鱼雷（`er > 1`，爆炸半径倍率）环更大，与它"炸得更大"对得上。
-        //    ⚠️ **鱼叉不画引信**（`jade`）：鱼叉是穿刺武器、没有战斗部，
-        //       给它加引信就是把"扎进去"读成"炸开"，两种武器的辨识度会一起丢。
-        if (b.kind === 'torpedo') {
-          const wr = 2.6 * (b.er ?? 1)
-          const beat = 0.5 + 0.5 * Math.sin(this.fxT * 9 + b.life * 3)
-          this.gEnt.fill(c, 0.28 + 0.26 * beat)
-          this.gEnt.fillCircle(b.x + ux * 4, b.y + uy * 4, wr * 1.9)
-          this.gEnt.line(0xffffff, 0.5 + 0.42 * beat, 1.2)
-          this.gEnt.strokeCircle(b.x + ux * 4, b.y + uy * 4, wr * 1.35)
-        }
         // ④ 头部亮点
         this.gEnt.fill(0xffffff, 1); this.gEnt.fillCircle(b.x + ux * 4, b.y + uy * 4, 2.3)
       }
@@ -3543,10 +3671,14 @@ export class DiveGame extends Component {
       // ⚠️ 鮟鱇女王的 `charge` 是**亮诱饵**（诱捕的诱），不是守望者的"蓄力砸地"（危险的兆）。
       //    两者共用 `charge` 这个名字只是复用相位机，**表现必须分开**：
       //    守望者蓄力 → 危险红（该躲了）；鮟鱇张口 → 诱饵亮（该忍住了）。
+      // V6.80：`swarm`（数量最多的一类）也进入蓄力 —— 扑击前摇，见 `world.SWARM_LUNGE_R`
       const charging = (e.kind === 'dash' && e.phase === 'charge')
+        || (e.kind === 'swarm' && e.phase === 'charge')
         || (e.kind === 'boss' && e.bossKind !== 'angler' && e.phase === 'charge')
       // ⚠️ 本地变量不要叫 `col` —— 会遮蔽从 Gfx 导入的同名颜色构造函数。
-      const body = charging ? UI.danger : (e.flash > 0 ? 0xffffff : e.color)
+      // ⚠️ swarm **不整机泛红**：蓄力期一屏可能同时有十几只，整机变红会让画面糊成一片红点。
+      const body = (charging && e.kind !== 'swarm')
+        ? UI.danger : (e.flash > 0 ? 0xffffff : e.color)
 
       // ---- V6.73 冲刺前摇（用户实机反馈：「冲刺前的应该有个动作特效吧」）----
       // 旧表现只有一个**静止的红色圆环** —— 鱼在 0.5s 蓄力期一动不动，
@@ -3557,7 +3689,9 @@ export class DiveGame extends Component {
       let wx = 0, wy = 0                       // 蓄力位移（渲染层专用）
       let cp = 0                               // 蓄力进度 0→1（预警圈动画用）
       if (charging) {
-        const dur = e.kind === 'boss' ? 1.2 : 0.5
+        // V6.80：swarm 的蓄力更短（0.30s）—— 它的扑击是"贴脸前的短促一窜"，
+        //   不是 dash 那种"远处起手、长距离冲刺"。
+        const dur = e.kind === 'boss' ? 1.2 : e.kind === 'swarm' ? 0.30 : 0.5
         cp = Math.max(0, Math.min(1, e.t / dur))
         const back = e.r * 0.34 * Math.min(1, cp / 0.6)      // 前 60% 把"弹簧"压满
         const tr = cp > 0.55 ? Math.sin(e.t * 44) * e.r * 0.055 * ((cp - 0.55) / 0.45) : 0
@@ -3666,24 +3800,44 @@ export class DiveGame extends Component {
       //   末段白色内环咬合 + 冲刺方向箭标高频闪 —— 三件事一起说"它要从这里冲出来了"。
       if (charging && e.kind !== 'boss') {
         const cxr = e.x + wx, cyr = e.y + wy
-        this.gEnt.line(UI.danger, 0.25 + 0.5 * cp, 2)
-        this.gEnt.strokeCircle(cxr, cyr, e.r * (2.2 - 1.0 * cp))
-        if (cp > 0.6) {
-          const q = (cp - 0.6) / 0.4
-          this.gEnt.line(0xffffff, 0.15 + q * 0.45, 1.2)
-          this.gEnt.strokeCircle(cxr, cyr, e.r * (0.95 - 0.30 * q))
-        }
-        if (cp > 0.3 && Math.sin(e.t * 34) > -0.5) {
-          // 冲刺方向箭标：短杆 + 两翼 —— "它要从这里冲出去"（蓄力早期不画，避免常亮噪声）
-          const d0x = cxr + e.dirX * e.r * 1.25, d0y = cyr + e.dirY * e.r * 1.25
-          const d1x = cxr + e.dirX * e.r * 1.95, d1y = cyr + e.dirY * e.r * 1.95
-          const px = -e.dirY, py = e.dirX
-          this.gEnt.line(UI.danger, 0.45 + 0.45 * cp, 2)
-          this.gEnt.strokeSeg(d0x, d0y, d1x, d1y)
-          this.gEnt.strokeSeg(d1x, d1y,
-            d1x - (e.dirX * 0.35 + px * 0.28) * e.r, d1y - (e.dirY * 0.35 + py * 0.28) * e.r)
-          this.gEnt.strokeSeg(d1x, d1y,
-            d1x - (e.dirX * 0.35 - px * 0.28) * e.r, d1y - (e.dirY * 0.35 - py * 0.28) * e.r)
+        if (e.kind === 'swarm') {
+          // ---- 游群扑击前摇（V6.80，**轻量版**）----
+          // 用户 2026-10-15：「鱼准备撞击我方的时候 有一个前摇冲刺动作最好」。
+          // 后拉 + 颤抖由上面的 `wx/wy` 提供（与 dash 共用一套，"弹簧压缩"的语汇一致）；
+          // 这里只补两样，且**刻意做轻**：
+          //   ⛔ **不画整圈预警环** —— swarm 一屏可达数十只，人手一圈就是满屏红环，
+          //      正是用户刚在精英标记上报过的"自己画的圈"那一类（铁规 14）。
+          //   ✓ **后侧收势弧**（背向冲刺方向的 1.8rad 短弧）—— "它在往回缩"；
+          //   ✓ **细箭杆**（更长更细的杆，无两翼）—— 说得出"要从这里窜出去"就够。
+          const ba = Math.atan2(e.dirY, e.dirX) + Math.PI
+          this.gEnt.line(UI.danger, 0.30 + 0.45 * cp, 2)
+          this.gEnt.arc(cxr, cyr, e.r * (1.55 - 0.35 * cp), ba - 0.9, ba + 0.9); this.gEnt.stroke()
+          if (cp > 0.35 && Math.sin(e.t * 34) > -0.5) {
+            const d0x = cxr + e.dirX * e.r * 1.15, d0y = cyr + e.dirY * e.r * 1.15
+            const d1x = cxr + e.dirX * e.r * 1.90, d1y = cyr + e.dirY * e.r * 1.90
+            this.gEnt.line(UI.danger, 0.40 + 0.45 * cp, 1.6)
+            this.gEnt.strokeSeg(d0x, d0y, d1x, d1y)
+          }
+        } else {
+          this.gEnt.line(UI.danger, 0.25 + 0.5 * cp, 2)
+          this.gEnt.strokeCircle(cxr, cyr, e.r * (2.2 - 1.0 * cp))
+          if (cp > 0.6) {
+            const q = (cp - 0.6) / 0.4
+            this.gEnt.line(0xffffff, 0.15 + q * 0.45, 1.2)
+            this.gEnt.strokeCircle(cxr, cyr, e.r * (0.95 - 0.30 * q))
+          }
+          if (cp > 0.3 && Math.sin(e.t * 34) > -0.5) {
+            // 冲刺方向箭标：短杆 + 两翼 —— "它要从这里冲出去"（蓄力早期不画，避免常亮噪声）
+            const d0x = cxr + e.dirX * e.r * 1.25, d0y = cyr + e.dirY * e.r * 1.25
+            const d1x = cxr + e.dirX * e.r * 1.95, d1y = cyr + e.dirY * e.r * 1.95
+            const px = -e.dirY, py = e.dirX
+            this.gEnt.line(UI.danger, 0.45 + 0.45 * cp, 2)
+            this.gEnt.strokeSeg(d0x, d0y, d1x, d1y)
+            this.gEnt.strokeSeg(d1x, d1y,
+              d1x - (e.dirX * 0.35 + px * 0.28) * e.r, d1y - (e.dirY * 0.35 + py * 0.28) * e.r)
+            this.gEnt.strokeSeg(d1x, d1y,
+              d1x - (e.dirX * 0.35 - px * 0.28) * e.r, d1y - (e.dirY * 0.35 - py * 0.28) * e.r)
+          }
         }
       }
 
@@ -3721,25 +3875,82 @@ export class DiveGame extends Component {
         }
       }
       if (e.rootT > 0) {
-        // ---- 定身（V6.62）----
-        // 语汇必须与减速（上面的**断续**弧环）**一眼可分**：
-        //   减速 = 被缠住、还能动 ⇒ 断续（松）；
-        //   定身 = **完全不动** ⇒ 收紧的**实环** + 一道「禁止」斜杠。
-        // ⚠️ 不靠颜色区分（深海会把亮度压掉），靠**形状**。
-        // ⚠️ V6.70：环**本身**按 3Hz 轻微脉动（±4%）。定身语义是"被钉住"，
-        //    所以脉动要**小而慢**（与减速的 6Hz 大抖动正好相反 —— 一个在挣扎、一个在锁死）。
-        const rr = e.r * 1.3 * (1 + Math.sin(w.t * 3.1 + e.x * 0.05) * 0.04)
-        this.gEnt.line(UI.cyanHi, 0.92, 2.2)
-        this.gEnt.strokeCircle(e.x, e.y, rr)
-        this.gEnt.line(UI.danger, 0.88, 2)
-        this.gEnt.strokeSeg(e.x - rr * 0.72, e.y + rr * 0.72, e.x + rr * 0.72, e.y - rr * 0.72)
+        // ---- **被网困住**（V6.80 重做）
+        // 用户 2026-10-15：「之前说的 丢渔网 应该是抛出去 **捆住**有一个受击特效」。
+        // ★ 关键事实：`rootT` **只由网族写入**（`world.applyNet` —— `net` / `net_el` / `net_cv`），
+        //   所以这里可以放心画"网"本身，而不只是画一个通用的"定身"符号。
+        //   旧版是"实环 + 禁止斜杠"：它说得出"你被定住了"，却说不出**是被什么定住的** ——
+        //   而玩家前一秒刚扔出去一张网，他期待看到的是"网缠在它身上"。
+        // ★ 三条语汇，缺一条就退回"一个圈"：
+        //   ① **缠绕的绳圈**：沿**体轴**排布的三道**椭圆**环（垂直于体轴 ⇒ 有"缠"的方向感；
+        //      同心正圆没有方向，读作"套在它外面的一圈"）；
+        //   ② **纵向收口索**：把三道绳圈串起来的索 ⇒ 有交叉才读作"网"，孤立三个环不是网；
+        //   ③ **收紧的白闪**：只在被网住最初 0.25s（"捆住"的那一下 = 用户要的**受击特效**），
+        //      外加挣扎抖动（**动的是网、不是鱼** —— 与"定身 = 完全不动"不矛盾）。
+        // ⚠️ 必须与「缠索」（玩家侧负面状态，`w.tetherSrc`）一眼分开：
+        //   那边是"索 + 向外拽的短须"，这边是"横向绳圈"。
+        const bfm = Math.hypot(e.fx, e.fy)
+        const bux = bfm > 0.5 ? e.fx / bfm : 1
+        const buy = bfm > 0.5 ? e.fy / bfm : 0
+        const bpx = -buy, bpy = bux                       // 垂直于体轴 = 绳圈的长轴
+        const left = Math.max(0, Math.min(1, e.rootT / 1.2))
+        const pull = 1 - left                             // 0 → 1（越往后越紧）
+        const wob = Math.sin(w.t * 9 + e.x * 0.05) * e.r * 0.06 * left
+        // ① 三道缠绕绳圈（椭圆：长轴垂直体轴、短轴沿体轴）
+        for (let i = -1; i <= 1; i++) {
+          const ccx = e.x + bux * i * e.r * 0.55 + wob
+          const ccy = e.y + buy * i * e.r * 0.55
+          const a2 = e.r * (0.92 - pull * 0.16)            // 长轴
+          const b2 = e.r * 0.30                            // 短轴（沿体轴 ⇒ 被"勒"进去）
+          this.gEnt.line(UI.cyanHi, 0.84, 1.9)
+          for (let k = 0; k <= 18; k++) {
+            const th = (k / 18) * Math.PI * 2
+            const ox = Math.cos(th) * a2, oy = Math.sin(th) * b2
+            const qx = ccx + bpx * ox + bux * oy
+            const qy = ccy + bpy * ox + buy * oy
+            if (k === 0) this.gEnt.moveTo(qx, qy); else this.gEnt.lineTo(qx, qy)
+          }
+          this.gEnt.close(); this.gEnt.stroke()
+        }
+        // ② 纵向收口索（两条，把三道圈串起来）
+        this.gEnt.line(UI.jade, 0.58, 1.2)
+        for (const sx of [-1, 1]) {
+          this.gEnt.strokeSeg(
+            e.x + bpx * sx * e.r * 0.84 - bux * e.r * 0.62 + wob,
+            e.y + bpy * sx * e.r * 0.84 - buy * e.r * 0.62,
+            e.x + bpx * sx * e.r * 0.84 + bux * e.r * 0.62 + wob,
+            e.y + bpy * sx * e.r * 0.84 + buy * e.r * 0.62)
+        }
+        // ③ 捆住那一下的收紧张力闪（只在前 0.25s）
+        if (e.rootT > 0.95) {
+          const q = (e.rootT - 0.95) / 0.25
+          this.gEnt.line(0xffffff, 0.80 * q, 2.6)
+          this.gEnt.strokeCircle(e.x + wob, e.y, e.r * (1.7 - 0.5 * q))
+        }
       }
       if (e.elite) {
         // ---- 精英（V6.62 §5-A）----
-        // 脉冲光晕。**刻意复用鱼骨的"发光 = 值得"读法** —— 玩家不用学新符号就知道该先打它。
+        // V6.80 重构（用户 2026-10-15：「个别身上有黄色的圆圈是什么意思 很突兀」）：
+        //   ⛔ 旧版是一个 **r×1.8 的琥珀色闭合空圈**。两个问题叠在一起：
+        //     ① **空圈没有含义** —— 用户根本读不出它是什么（"很突兀"的直接来源）；
+        //     ② 闭合亮环 = **UI 框的语汇**（铁规 14）—— 一群有贴图的鱼里，
+        //        那条线框圈是"画上去的"，不是鱼身上的东西。
+        //   ★ 改法：把"值得打"的读法落回**鱼自己在发光**（与鱼骨的"发光 = 值得"同源）——
+        //     分层低透明填充（体表辉光）+ 两颗沿体表绕游的光点。
+        //   ⛔ **不画任何闭合线**：一有轮廓就退化成"一个圈"，这正是要拆掉的东西。
         const pulse = 0.5 + 0.5 * Math.sin(w.t * 3.4 + e.x * 0.01)
-        this.gEnt.line(UI.amber, 0.40 + 0.36 * pulse, 2)
-        this.gEnt.strokeCircle(e.x, e.y, e.r * 1.8 + pulse * 3.5)
+        this.gEnt.fill(UI.amber, 0.05 + 0.045 * pulse)
+        this.gEnt.fillCircle(e.x, e.y, e.r * 2.05)
+        this.gEnt.fill(UI.amber, 0.08 + 0.07 * pulse)
+        this.gEnt.fillCircle(e.x, e.y, e.r * 1.45)
+        this.gEnt.fill(UI.amber, 0.14 + 0.10 * pulse)
+        this.gEnt.fillCircle(e.x, e.y, e.r * 0.98)
+        for (let k = 0; k < 2; k++) {
+          const a = w.t * 1.9 + k * Math.PI
+          this.gEnt.fill(UI.amber, 0.55 + 0.35 * pulse)
+          this.gEnt.fillCircle(e.x + Math.cos(a) * e.r * 1.30,
+            e.y + Math.sin(a) * e.r * 1.05, 1.9)
+        }
       }
       // ---- 鮟鱇女王：诱饵灯（V6.62 §4.2）----
       // 它是"诱捕"这个压力的**唯一可见载体**：光在亮 = 它准备咬 = 你该往外游。
@@ -4052,10 +4263,24 @@ export class DiveGame extends Component {
       g.fill(UI.cyanHi, 0.11 * mzL); hull(1.0, 0, 0); g.fillPath()
     }
 
-    // 受击反馈：整机泛红（矢量机体没有"红描边"，改整机压色）
+    // 受击反馈：① 整机泛红（矢量机体没有"红描边"，改整机压色）
     if (w.hurtFlash > 0) {
       g.fill(UI.danger, 0.30 * Math.min(1, w.hurtFlash / 0.2))
       hull(1.0, 0, 0); g.fillPath()
+    }
+    // ② **机身上的受击弧**（V6.80）—— 全屏红带被删之后（见 `drawVeil`），来向落在机体上。
+    //    判据：**受击是自机身上的事** ⇒ 方向也画在我身上，屏幕层不参与。
+    //    ⚠️ 形状**只覆盖来向 ~145°，不是闭合环** —— 闭合环是"UI 框"的语汇（铁规 14）。
+    //    ⚠️ 半径 `SUB_D * 0.52 ≈ 45.8` **略在剪影（88×56 ⇒ 半宽 44）之外 1.8px**：
+    //       受击弧要"贴着船壳外面亮一下"才是被击中的边，压在船身上会读成船体花屏。
+    if (w.hurtDirT > 0) {
+      const hk = Math.min(1, w.hurtDirT / 0.6)
+      const ha = Math.atan2(w.hurtDirY, w.hurtDirX)      // 玩家 → 伤害来源
+      const hr = SUB_D * 0.52
+      g.line(UI.danger, 0.62 * hk, 2.6)
+      g.arc(w.px, w.py, hr, ha - 1.25, ha + 1.25); g.stroke()
+      g.line(0xffffff, 0.34 * hk, 1.2)
+      g.arc(w.px, w.py, hr * 0.84, ha - 0.95, ha + 0.95); g.stroke()
     }
   }
 
@@ -4916,51 +5141,69 @@ export class DiveGame extends Component {
         continue
       }
 
-      // ---- V6.74 电弧：用户「链式发射弧 看上去是一根线出去 太low了」----
-      // 旧写法是同一组 `pts` 描两遍（粗紫 + 细白）⇒ 无论怎么调宽度都还是"一条线"。
-      // 雷电之所以是雷电，靠的是**四层宽度梯度 + 分叉 + 端点爆闪 + 电荷跑动**：
-      //   ① 四层同心描边（辉光 9px → 中层 4.6 → 主弧 2.1 → 白核 1）
-      //      —— 宽度梯度造出"电离空气"的体积，单层无论多粗都只是根管子；
-      //   ② 沿折线每隔一段甩出的**短分叉**，相位由 `fxT` 驱动 ⇒ 每帧抖动 = "噼啪"；
-      //   ③ 两端爆闪（起点小、**终点大**）：终点是命中点，"从哪打到哪"必须一眼看见；
-      //   ④ 一颗亮点沿弧线跑（电荷在导线里走）。
-      // ⚠️ 分叉/亮点**只插值 `pts`**，不碰模拟层 —— 电弧的命中判定与外观无关。
+      // ---- **闪电链**（V6.80；用户：「电弧 施法特效也太简单粗暴了 可以做成闪电链
+      //      被击中的敌方 在一定范围内可以被传导」）----
+      // 演进：V6.29 两遍描边 → V6.74 四层宽度梯度 + 分叉（"像雷电"了）→ **本版：链**。
+      //  V6.74 把**一根弧**画好了，但 `pts` 是"玩家 → 敌1 → 敌2 → …"的折线，
+      //  两段之间是**直线** ⇒ 读到的是"一根线拐了个弯"，读不出"电**跳**到了下一只身上"。
+      //  ⚠️ **传导机制早已存在**（`world.fireArc`：链 2+lvl 跳、跳距 190、`arc_ov` +4 不衰减）——
+      //     本次**一个字都没改模拟层**，改的纯粹是"这一串跳跃长什么样"。
+      // ★ 链的三条判据，缺一条就退回"一根线"：
+      //   ① **每一跳 = 独立的一条闪电路径**：段内插值 + 垂直抖动（`fxT` 驱动）⇒ 每帧噼啪；
+      //      ⚠️ 抖动包络取 `sin(πt)` ⇒ **两端为 0**，必须钉死在敌人身上，
+      //        否则看起来"电没打中"。中间鼓、两头收，这才是两点之间的放电。
+      //   ② **逐跳衰减**：第 n 跳更细更暗 ⇒ "传导有损耗"，也让"跳到了第几只"可读。
+      //   ③ **落点爆闪 + 缠绕弧**：每只被跳中的敌人身上 3 段短弧 + 亮核 ⇒
+      //      "它**中电了**"，而不是"有根线从它身上穿过"。
+      // ⚠️ 全部只插值 `pts`，不碰模拟层（命中判定与外观无关，同 V6.74）。
       const n = pts.length
-      this.gFront.line(c, 0.13 * k, 9); this.gFront.strokePolyline(pts)
-      this.gFront.line(c, 0.34 * k, 4.6); this.gFront.strokePolyline(pts)
-      this.gFront.line(c, 0.95 * k, 2.1); this.gFront.strokePolyline(pts)
-      this.gFront.line(0xffffff, 0.85 * k, 1); this.gFront.strokePolyline(pts)
-      // ② 分叉
-      for (let i = 1; i < n - 1; i += 2) {
-        const pa = pts[i - 1], q = pts[i], pb = pts[i + 1]
-        const dx = pb.x - pa.x, dy = pb.y - pa.y
+      const jitSeg = (seg: number) => {
+        const a = pts[seg], b2 = pts[seg + 1]
+        const dx = b2.x - a.x, dy = b2.y - a.y
         const L = Math.hypot(dx, dy) || 1
-        const ux = dx / L, uy = dy / L
-        const jig = Math.sin(this.fxT * 37 + i * 2.1)
-        const bl = (5 + i * 1.1) * (1 - 0.4 * Math.abs(jig))
-        const sg = jig > 0 ? 1 : -1
-        this.gFront.line(c, 0.55 * k, 1.4)
-        this.gFront.strokeSeg(q.x, q.y,
-          q.x - uy * bl * sg + ux * bl * 0.4,
-          q.y + ux * bl * sg + uy * bl * 0.4)
+        const nx2 = -dy / L, ny2 = dx / L
+        const out: Array<{ x: number; y: number }> = []
+        for (let i = 0; i <= 6; i++) {
+          const t = i / 6
+          const env = Math.sin(Math.PI * t)
+          const off = Math.sin(this.fxT * 41 + seg * 1.7 + i * 2.3) * (7 + 3 * seg) * env
+          out.push({ x: a.x + dx * t + nx2 * off, y: a.y + dy * t + ny2 * off })
+        }
+        return out
       }
-      // ③ 端点爆闪（0 = 起点 / 1 = 终点）
-      const ends: Array<[number, number, number]> = [
-        [pts[0].x, pts[0].y, 0.55],
-        [pts[n - 1].x, pts[n - 1].y, 1],
-      ]
-      const pulse = 1 + 0.25 * Math.sin(this.fxT * 46)
-      for (const [ex, ey, es] of ends) {
-        this.gFront.fill(c, 0.22 * k); this.gFront.fillCircle(ex, ey, 13 * es * pulse)
-        this.gFront.fill(c, 0.5 * k); this.gFront.fillCircle(ex, ey, 6 * es)
-        this.gFront.fill(0xffffff, 0.9 * k); this.gFront.fillCircle(ex, ey, 2.6 * es)
-        this.gFront.line(c, 0.7 * k, 1.4)
-        for (const [ax, ay] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
-          this.gFront.strokeSeg(ex + ax * 5 * es, ey + ay * 5 * es,
-            ex + ax * 12 * es, ey + ay * 12 * es)
+      for (let seg = 0; seg < n - 1; seg++) {
+        const segPts = jitSeg(seg)
+        const dec = 1 / (1 + seg * 0.42)
+        this.gFront.line(c, 0.13 * k * dec, 9 * dec); this.gFront.strokePolyline(segPts)
+        this.gFront.line(c, 0.34 * k * dec, 4.6 * dec); this.gFront.strokePolyline(segPts)
+        this.gFront.line(c, 0.95 * k * dec, 2.1 * dec); this.gFront.strokePolyline(segPts)
+        this.gFront.line(0xffffff, 0.85 * k * dec, Math.max(0.7, dec))
+        this.gFront.strokePolyline(segPts)
+      }
+      // ③ 端点：起点（我自己）小闪 + 四向短芒；**落点**（被跳中的敌人）爆闪 + 缠绕弧
+      for (let i = 0; i < n; i++) {
+        const q = pts[i]
+        const dec = 1 / (1 + i * 0.34)
+        const pu = 1 + 0.25 * Math.sin(this.fxT * 46 + i)
+        if (i === 0) {
+          this.gFront.fill(0xffffff, 0.9 * k); this.gFront.fillCircle(q.x, q.y, 2.6)
+          this.gFront.line(c, 0.7 * k, 1.4)
+          for (const [ax, ay] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+            this.gFront.strokeSeg(q.x + ax * 5, q.y + ay * 5, q.x + ax * 12, q.y + ay * 12)
+          }
+          continue
+        }
+        // ★ 落点 = "它中电了"的全部证据
+        this.gFront.fill(c, 0.24 * k * dec); this.gFront.fillCircle(q.x, q.y, 13 * pu * dec)
+        this.gFront.fill(c, 0.50 * k * dec); this.gFront.fillCircle(q.x, q.y, 6 * pu * dec)
+        this.gFront.fill(0xffffff, 0.90 * k * dec); this.gFront.fillCircle(q.x, q.y, 2.6 * dec)
+        this.gFront.line(c, 0.75 * k * dec, 1.7)
+        for (let j = 0; j < 3; j++) {
+          const a0 = this.fxT * 6.5 + i * 1.3 + j * (Math.PI * 2 / 3)
+          this.gFront.arc(q.x, q.y, 12 * pu * dec, a0, a0 + 1.15); this.gFront.stroke()
         }
       }
-      // ④ 电荷沿弧线跑
+      // ④ 电荷沿**整条链**跑（"电在导线里走"）
       const prog = (this.fxT * 1.7) % 1
       const fi = prog * (n - 1)
       const i0 = Math.floor(fi), i1 = Math.min(n - 1, i0 + 1)

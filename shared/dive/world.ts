@@ -247,6 +247,33 @@ const ANGLER_BITE_DMG = 26
 const ANGLER_PULL = 130
 
 /**
+ * **游群的扑击前摇**（V6.80）。
+ * 用户 2026-10-15：「鱼准备撞击我方的时候 有一个前摇冲刺动作最好」。
+ *
+ * 现状：只有 `dash`（冲刺体）有前摇（`chase → charge 0.5s → dash 460px/s → rest`）。
+ *   而 `swarm` 是**数量最多**的一类，却一路直冲、**零兆** ——
+ *   玩家被撞了也不知道"刚才那条鱼是要撞我"，挨打读起来像"莫名掉氧"。
+ *   这里给 swarm 补一个**轻量**的扑击循环（与 dash 同构，但更短、更近、有冷却）。
+ *
+ * ★ 三条克制（不克制的后果写在每条后面）：
+ *   ① **只在贴脸前触发**（`SWARM_LUNGE_R = 130`）—— 触发距离一大，会变成
+ *      "一屏鱼集体停在半路发呆"。
+ *   ② **有冷却**（`SWARM_REST_T = 1.2`）—— 没有冷却，一群鱼会反复原地抽搐，
+ *      比原来的直冲**更**难看。
+ *   ③ **蓄力不位移，但冲刺速度照乘 `slow`**（同 `dash`）—— 否则
+ *      "网住了但一个扑击就窜到脸上"，控场武器当场白给（`dash` 分支里那条注释同理）。
+ *
+ * ⚠️ 蓄力期**冻结位移**是刻意的：**"停下 = 要冲了"** 是这一整套前摇唯一的读法；
+ *    把位移写进蓄力，玩家的闪避窗口就没了，前摇也退回成装饰。
+ */
+const SWARM_LUNGE_R = 130
+const SWARM_CHARGE_T = 0.30
+/** 扑击速度倍率（× `e.speed`）。必须 > 1，否则"顿一下再同样速度"读不出是扑击 */
+const SWARM_DASH_MUL = 1.75
+const SWARM_DASH_T = 0.26
+const SWARM_REST_T = 1.2
+
+/**
  * 鮟鱇女王的**几何参数**，导出给渲染层画预警圈。
  * ⚠️ 只导出几何（半径），**不导出伤害 / 时长** —— 那些是玩法数值，
  *    留在本文件里，避免视图层读到数值后做出与模拟不一致的表现。
@@ -969,8 +996,33 @@ export class DiveWorld implements ShopTarget {
       }
 
       if (e.kind === 'swarm') {
-        e.x += nx * e.speed * slow * dt
-        e.y += ny * e.speed * slow * dt
+        // ---- 游群：**扑击前摇**（V6.80；配平红线见 `SWARM_LUNGE_R` 的注释）----
+        // 与 `dash` 同构（chase → charge → dash → rest），但更短、更近、有冷却。
+        e.t += dt
+        if (e.phase === 'chase') {
+          e.x += nx * e.speed * slow * dt
+          e.y += ny * e.speed * slow * dt
+          // ⚠️ 只在**没被硬控**时起手：定身中还起手 = "被网住了照样扑"，与网的语义打架。
+          //    （减速**不**拦截 —— 慢归慢，它仍该有扑击意图。）
+          if (da < SWARM_LUNGE_R && e.rootT <= 0) {
+            e.phase = 'charge'; e.t = 0
+            e.dirX = nx; e.dirY = ny      // ★ 起手瞬间**锁死方向**：前摇存在的意义就是"我冲这里"
+          }
+        } else if (e.phase === 'charge') {
+          // 蓄力：**原地不动**（"停下 = 要冲了"）；朝向仍指着玩家（它在瞄）——
+          // `e.fx/e.fy` 已在上方统一写过，这里不动它。
+          if (e.t >= SWARM_CHARGE_T) { e.phase = 'dash'; e.t = 0 }
+        } else if (e.phase === 'dash') {
+          e.x += e.dirX * e.speed * SWARM_DASH_MUL * slow * dt
+          e.y += e.dirY * e.speed * SWARM_DASH_MUL * slow * dt
+          e.fx = e.dirX; e.fy = e.dirY   // 冲刺时朝**冲刺方向**（同 dash，V6.55）
+          if (e.t >= SWARM_DASH_T) { e.phase = 'rest'; e.t = 0 }
+        } else {
+          // 冷却期**照常追**（不是站着不动）—— 否则"顿一下"会读成"卡住了"
+          e.x += nx * e.speed * slow * dt
+          e.y += ny * e.speed * slow * dt
+          if (e.t >= SWARM_REST_T) { e.phase = 'chase'; e.t = 0 }
+        }
       } else if (e.kind === 'drift') {
         // 水母：脉冲式漂移（一鼓一缩）
         const pulse = 0.6 + 0.4 * Math.sin(this.t * 2.2 + e.x * 0.01)

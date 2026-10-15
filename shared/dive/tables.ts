@@ -316,33 +316,55 @@ export const PLAYER = {
 
 // ---------------------------------------------------------------------------
 // 器械定义表（V6.3 / V6.17 进化 / V6.18 三基础）DiveScene.ts:236-271
+//
+// ★★ **V6.80 射速重定标**（用户 2026-10-15：「脉冲机关枪和其他的发射器的施法速度
+//    是不是太快了 你评估下」）：
+//
+//   病根不是基础射速，是**射速复利** —— `ivLast` 上有 4 个乘数叠在同一轴：
+//       等级(÷1.48 @5级) × 双联座(1+twinRate) × 高压供能(1+rate) × 过载核心(÷1.25)
+//   ⇒ `gun_gl` 成型后实测 **≈74 发/秒**（屏幕上是一条不间断的光带，看不见单发）。
+//
+//   口径（用户拍板 = **抬基础 + 等比补伤害**）：
+//     · 只动**基础款 iv < 1.0s** 的族（gun / sonar / arc / harpoon / mine）——
+//       它们的"快"是设计问题；`torpedo`(1.5) / `echo`(1.5) / `acid`(1.4) /
+//       `net`(1.1) / `lure`(2.4) 本来就慢，**一律不动**。
+//     · 整族 **iv ×1.36**，**dmg 按同一比例补偿** ⇒ **DPS 逐条不变**，
+//       只是"每发更大更稀"。★ 这条是硬约束：DPS 一动，击杀速度就动，
+//       **P0 收支曲线**（全捡 1.28×→0.98× / 常规 0.83×→0.64×）跟着动。
+//     · `gun_gl` 是离群值（基础 19.2 发/秒）⇒ 单独多压一档到 **0.08**（×1.54），
+//       dmg 同步按 ×1.54 补。
+//   ⚠️ 本口径**没有**给复利设上限 —— 成型后仍会比 1 级快得多（复利保留是刻意的：
+//      那是养成手感的一部分）。若实机仍嫌密，再谈"封顶"（见 `docs/武器与战斗表现问题归纳_V6.80.md` §2 方案 A）。
 // ---------------------------------------------------------------------------
 export const WEAPON_DEF: Record<WeaponId, {
   name: string; desc: string
   iv: number; dmg: number; range: number; color: number
 }> = {
-  sonar:   { name: '声呐共振',   desc: '环形波前 · 群体伤害', iv: 0.42, dmg: 12, range: 420, color: UI.cyanHi },
-  gun:     { name: '脉冲机关枪', desc: '高频连射 · 单体',     iv: 0.11, dmg: 7,  range: 520, color: UI.amber },
-  torpedo: { name: '追踪鱼雷',   desc: '低频追踪 · 范围爆炸', iv: 1.50, dmg: 30, range: 620, color: UI.danger },
-  arc:     { name: '链式电弧',   desc: '瞬发连锁 · 多目标',   iv: 0.90, dmg: 16, range: 460, color: UI.violet },
+  sonar:   { name: '声呐共振',   desc: '环形波前 · 群体伤害', iv: 0.57, dmg: 16.3, range: 420, color: UI.cyanHi },
+  gun:     { name: '脉冲机关枪', desc: '高频连射 · 单体',     iv: 0.15, dmg: 9.5,  range: 520, color: UI.amber },
+  // ★ V6.80：`torpedo` 族颜色 `danger` → `ember`。
+  //   `danger` 的定位是「全场唯一纯红，只允许用在致命预警」（见 `theme.ts`）——
+  //   玩家自己的弹体染预警色 ⇒ 分不清"这是危险还是我的武器"（用户：「红色有点突兀」）。
+  torpedo: { name: '追踪鱼雷',   desc: '低频追踪 · 范围爆炸', iv: 1.50, dmg: 30, range: 620, color: UI.ember },
+  arc:     { name: '链式电弧',   desc: '瞬发连锁 · 多目标',   iv: 1.22, dmg: 21.8, range: 460, color: UI.violet },
 
-  gun_gl:   { name: '加特林',   desc: '射速翻倍 · 射程腰斩', iv: 0.052, dmg: 6,  range: 260, color: UI.amber },
-  gun_sg:   { name: '霰弹散射', desc: '一次 5 弹扇形 · 近距', iv: 0.44, dmg: 5,  range: 250, color: UI.amber },
-  torp_cl:  { name: '集束鱼雷', desc: '一次 3 枚 · 覆盖面',  iv: 1.75, dmg: 15, range: 620, color: UI.danger },
-  torp_hv:  { name: '重型鱼雷', desc: '单发重击 · 爆炸更大', iv: 2.40, dmg: 70, range: 660, color: UI.danger },
-  arc_ov:   { name: '过载电弧', desc: '跳跃 +4 · 不衰减',    iv: 1.05, dmg: 15, range: 500, color: UI.violet },
-  arc_st:   { name: '定点雷暴', desc: '一次电击全部目标',    iv: 2.30, dmg: 12, range: 430, color: UI.violet },
-  sonar_rs: { name: '共振炮',   desc: '命中后向邻近弹射',   iv: 0.55, dmg: 9,  range: 420, color: UI.cyanHi },
-  sonar_fc: { name: '定向聚焦', desc: '短距强波 · 高伤',    iv: 0.62, dmg: 30, range: 250, color: UI.cyanHi },
+  gun_gl:   { name: '加特林',   desc: '射速翻倍 · 射程腰斩', iv: 0.080, dmg: 9.2,  range: 260, color: UI.amber },
+  gun_sg:   { name: '霰弹散射', desc: '一次 5 弹扇形 · 近距', iv: 0.60, dmg: 6.8,  range: 250, color: UI.amber },
+  torp_cl:  { name: '集束鱼雷', desc: '一次 3 枚 · 覆盖面',  iv: 1.75, dmg: 15, range: 620, color: UI.ember },
+  torp_hv:  { name: '重型鱼雷', desc: '单发重击 · 爆炸更大', iv: 2.40, dmg: 70, range: 660, color: UI.ember },
+  arc_ov:   { name: '过载电弧', desc: '跳跃 +4 · 不衰减',    iv: 1.43, dmg: 20.4, range: 500, color: UI.violet },
+  arc_st:   { name: '定点雷暴', desc: '一次电击全部目标',    iv: 3.13, dmg: 16.3, range: 430, color: UI.violet },
+  sonar_rs: { name: '共振炮',   desc: '命中后向邻近弹射',   iv: 0.75, dmg: 12.2, range: 420, color: UI.cyanHi },
+  sonar_fc: { name: '定向聚焦', desc: '短距强波 · 高伤',    iv: 0.84, dmg: 40.8, range: 250, color: UI.cyanHi },
 
-  harpoon: { name: '穿透鱼叉', desc: '直线穿透 · 命中拉拽', iv: 0.75, dmg: 20, range: 520, color: UI.jade },
+  harpoon: { name: '穿透鱼叉', desc: '直线穿透 · 命中拉拽', iv: 1.02, dmg: 27.2, range: 520, color: UI.jade },
   echo:    { name: '回声炮',   desc: '延迟爆发 · 需预判',   iv: 1.50, dmg: 40, range: 480, color: UI.magenta },
   acid:    { name: '酸液喷射', desc: '地面持续伤害区',      iv: 1.40, dmg: 6,  range: 380, color: UI.jadeHi },
 
   // V6.29 三基础武器的进化（各 2 分支）。配平口径与 gun_gl / torp_hv 一致：
   // **用射速/单体伤害交换机制或覆盖面**，价一律 66~74。
-  harp_tr: { name: '三重鱼叉', desc: '一次 3 叉扇形 · 群体拉拽', iv: 0.90, dmg: 14, range: 480, color: UI.jade },
-  harp_cb: { name: '回旋鱼叉', desc: '到程掉头 · 二次穿刺回氧', iv: 0.95, dmg: 17, range: 560, color: UI.jade },
+  harp_tr: { name: '三重鱼叉', desc: '一次 3 叉扇形 · 群体拉拽', iv: 1.22, dmg: 19.0, range: 480, color: UI.jade },
+  harp_cb: { name: '回旋鱼叉', desc: '到程掉头 · 二次穿刺回氧', iv: 1.29, dmg: 23.1, range: 560, color: UI.jade },
   echo_mu: { name: '多重回声', desc: '三点延时爆炸 · 群爆回氧', iv: 1.60, dmg: 26, range: 440, color: UI.magenta },
   echo_fo: { name: '聚焦回声', desc: '大半径延时爆发 · 高伤',   iv: 2.20, dmg: 90, range: 520, color: UI.magenta },
   acid_fd: { name: '持久酸池', desc: '更大更久 · 池内省氧',     iv: 1.40, dmg: 6,  range: 380, color: UI.jadeHi },
@@ -351,9 +373,12 @@ export const WEAPON_DEF: Record<WeaponId, {
   // ---- V6.46 机制型武器（计划书 §5.2 点名、一直没做的那批）----
   // ⚠️ `range` 对陷阱族**没有意义**：气泡雷落在自己脚下，不索敌。写 0 是给
   //    UI 一个诚实的信号（索敌距离显示为"自机"），不是偷懒。
-  mine:    { name: '气泡雷',   desc: '原地布雷 · 需预判走位', iv: 0.55, dmg: 18, range: 0, color: UI.cyanHi },
-  mine_ch: { name: '连锁雷',   desc: '引爆邻近地雷 · 连环',   iv: 0.55, dmg: 15, range: 0, color: UI.cyanHi },
-  mine_o2: { name: '氧气雷',   desc: '爆炸回氧 · 伤害腰斩',   iv: 0.55, dmg: 11, range: 0, color: UI.jadeHi },
+  // ⚠️ V6.80：陷阱族 `iv` 是**布雷速率**（0.55 → 1.8 颗/秒 = 铺满屏），同样按 ×1.36 压到 0.75。
+  mine:    { name: '气泡雷',   desc: '原地布雷 · 需预判走位', iv: 0.75, dmg: 24.5, range: 0, color: UI.cyanHi },
+  mine_ch: { name: '连锁雷',   desc: '引爆邻近地雷 · 连环',   iv: 0.75, dmg: 20.4, range: 0, color: UI.cyanHi },
+  mine_o2: { name: '氧气雷',   desc: '爆炸回氧 · 伤害腰斩',   iv: 0.75, dmg: 15.0, range: 0, color: UI.jadeHi },
+  // ⚠️ 控场族（net / lure）**不动**：它们本来就慢（1.10 / 2.40），
+  //    而且 `iv` 在这里控制的是**控场频率**不是 DPS —— 加长 = 纯削弱，不属于本口径。
   net:     { name: '网发射器', desc: '减速 50% · 伤害极低',   iv: 1.10, dmg: 8,  range: 400, color: UI.jade },
   net_el:  { name: '电网',     desc: '减速加深 · 附带灼烧',   iv: 1.10, dmg: 6,  range: 400, color: UI.violet },
   net_cv:  { name: '驯化网',   desc: '策反敌人互斗 4s',       iv: 1.10, dmg: 4,  range: 400, color: UI.cyanHi },
