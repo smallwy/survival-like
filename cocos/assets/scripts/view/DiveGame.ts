@@ -415,6 +415,38 @@ const ATM_FISH_ALPHA: ReadonlyArray<readonly [number, number]> = [
   [0.30, 0.48],   // L5 巨影（要"实"，压迫感全靠它）
 ]
 
+/**
+ * **远景鱼群的「远层」**（V6.81）。用户："每个场景底图都有冻结的鱼一样 是静态的 感觉很假"。
+ *
+ * ---------------------------------------------------------------------------
+ * 为什么加（不是"多画一层"，是"接管一层"）
+ * ---------------------------------------------------------------------------
+ *   背景图里烘焙的鱼是**死的**：V6.70 的 `stepBgDrift()` 只能让整张图平移，
+ *   于是**一群鱼以完全相同的速度和方向滑过去** —— 位图里的鱼不能摆尾、不能分层，
+ *   无论图怎么动，读到的都是"照片在平移"。⇒ 背景图的鱼已全部去掉
+ *   （`tools/defish_env.py`），**鱼只剩这一个来源**，所以：
+ *     · 它必须比原来更耐看（近层＋远层 = 有纵深，不是一张平铺的贴纸）；
+ *     · 它必须老实会动（摆尾相位逐条错开 + 与 `scrollV` 同一个速度场）。
+ *
+ * ⚠️ 四条系数都**小于 1**，且方向一致 —— 远 = 小 / 淡 / 慢，这是唯一的深度线索。
+ * ⛔ 别把 `alphaMul` 调上去"让鱼更清楚"：远景鱼抢眼 = 玩家分不清哪个能打
+ *    （敌人定位铁律：远景鱼**不可瞄准、不碰撞**，视觉上也必须明显更弱）。
+ */
+const FAR_FISH = {
+  /** 条数 = 近层 × 0.6 */
+  ratio: 0.6,
+  /** 尺寸 = 近层 × 0.45（L1 近层 26px ⇒ 远层 ~12px） */
+  sizeMul: 0.45,
+  /** 速度 = 近层 × 0.35（越远越慢） */
+  spdMul: 0.35,
+  /** 不透明度 = 近层 × 0.5 */
+  alphaMul: 0.5,
+  /** 更大的团（远层密集成点会读作"屏幕脏了"，见 `buildSchools` 的注释） */
+  perCluster: 8,
+  /** 团更散 */
+  spread: 78,
+}
+
 // ===========================================================================
 // 光的主权转移（V6.51 §4，2026-10-14 落 V6.59）
 // ===========================================================================
@@ -635,6 +667,20 @@ const SCAN_DUR = 0.6
  *    而对面的鱼已经冲过来了。2.0 留 0.1s 余量。
  */
 const XFADE_DUR = 2.0
+/**
+ * 换带 crossfade 的**垂直轻推幅度**（px，V6.81）。
+ *
+ * 用户："不同层之间的衔接没有做好"。原来两张图只是**原地交叉淡入**（旧图在上淡出），
+ * 过渡期读作"两张照片叠在一起"的双影。改成**垂直推移**：新图从下方进入、旧图向上移出
+ * —— 方向与"我在往下沉 ⇒ 东西向上掠过"（`SCROLL_BASE` 的符号约定）**一致**，
+ * 于是它读作"我沉进了新的一层"，而不是"图层交叉淡入"。
+ *
+ * ⚠️ **必须 < 纵向出血**：`BG_BLEED` 1.07 下纵向各多 ≈72px，而 `stepBgDrift` 还占 ±16
+ *    ⇒ 40 + 16 = 56 < 72，安全。⛔ 调大这个数要同时核 `BG_BLEED`（超了就是屏幕上下露黑边）。
+ * ⛔ **不能推到半屏**（那要 ~350px）：现有图纵向只有 ~145px 的余量，
+ *    真要做"整屏推入"必须新出 1536×1180 的无缝图（V6.56 §3 已记）。
+ */
+const XFADE_PUSH = 40
 /** 水压环时长（s）。V6.52 §3.4：3 圈从屏幕中心外扩 */
 const RING_DUR = 0.9
 
@@ -1666,9 +1712,21 @@ export class DiveGame extends Component {
     const t = this.bgDriftT
     const x = this.W / 2 + Math.sin(t / 31) * 26
     const y = this.H / 2 + Math.sin(t / 47 + 1.7) * 16
-    this.bgNode.node.setPosition(x, y)
-    // 旧图（crossfade 用）必须**同步跟着漂**，否则过渡那 0.9s 里两张图会相对滑动
-    if (this.bgNodeOld.node.active) this.bgNodeOld.node.setPosition(x, y)
+
+    // V6.81 换带「垂直轻推」：新图从下方进入（-PUSH → 0），旧图向上移出（0 → +PUSH）。
+    // ⚠️ 节点 y 是**上为正**（`syncSub` 里 `ny = H - simY` 是同一套坐标），
+    //    所以"从下方来"是 **负** 偏移 —— 写反了它就从上方掉下来，且不报错。
+    let dyNew = 0
+    let dyOld = 0
+    if (this.xfadeT >= 0) {
+      const k = Math.min(1, this.xfadeT / XFADE_DUR)
+      dyNew = (1 - k) * -XFADE_PUSH
+      dyOld = k * XFADE_PUSH
+    }
+
+    this.bgNode.node.setPosition(x, y + dyNew)
+    // 旧图（crossfade 用）必须**同步跟着漂**，否则过渡那 2s 里两张图会相对滑动
+    if (this.bgNodeOld.node.active) this.bgNodeOld.node.setPosition(x, y + dyOld)
   }
 
   /**
@@ -3132,16 +3190,33 @@ export class DiveGame extends Component {
     const [aLo, aHi] = ATM_FISH_ALPHA[layerIdx] ?? [0.28, 0.48]
     this.schools.length = 0
 
-    // 巨影（深渊）要慢：体型越大越慢，否则读作"一条大鱼在冲刺"
-    const big = eco.schoolSize > 2
     // ⚠️ **必须成团，不能均匀撒满**（2026-10-14）：旧版 `x`/`y` 各自独立随机
     //    ⇒ 屏幕上是一层**均匀的点**，读作"雪花 / 星星 / 屏幕脏了"，**不是鱼群**。
     //    真实的鱼群是"几团密集 + 大片空白"。**同样 46 条鱼，成团之后才第一次
     //    读得出"一群鱼"** —— 用户报的"背景的白色"有一半是这一条（另一半是漏 clear）。
-    const perCluster = big ? 1 : 6
-    const clusters = Math.max(1, Math.round(eco.school / perCluster))
-    const spread = 62
+    const big = eco.schoolSize > 2
+    const sizeBase = 26 * eco.schoolSize
 
+    // 近层（V6.53 原有口径）：团密（6 条/团），速度 12~32；深渊巨影慢（6~12）
+    this.pushSchool(eco.school, big ? 1 : 6, 62, sizeBase,
+      big ? 6 : 12, big ? 12 : 32, aLo, aHi)
+    // 远层（V6.81）：小 / 淡 / 慢，补"画面里有生物"且**全部会动**
+    this.pushSchool(eco.school * FAR_FISH.ratio, FAR_FISH.perCluster, FAR_FISH.spread,
+      sizeBase * FAR_FISH.sizeMul,
+      (big ? 6 : 12) * FAR_FISH.spdMul, (big ? 12 : 32) * FAR_FISH.spdMul,
+      aLo * FAR_FISH.alphaMul, aHi * FAR_FISH.alphaMul)
+  }
+
+  /**
+   * 远景鱼群的**一层**（近层 / 远层共用）。
+   *
+   * 为什么抽成函数而不是复制一段：两层的生成规则**完全相同**，只有系数不同
+   * —— 复制一份之后，改近层（比如"同团同速"的抖动范围）必然忘记远层，
+   * 而这类漂移**不报错**，只会让远层慢慢变成"另一种鱼"。
+   */
+  private pushSchool(cnt: number, perCluster: number, spread: number, size0: number,
+                     spdLo: number, spdHi: number, aLo: number, aHi: number): void {
+    const clusters = Math.max(1, Math.round(cnt / perCluster))
     for (let c = 0; c < clusters; c++) {
       // 团心留 40px 边距：整团贴在屏幕边上会读作"被裁掉了"
       const cx0 = 40 + Math.random() * (this.W - 80)
@@ -3149,8 +3224,7 @@ export class DiveGame extends Component {
       // **同团同向**：一群鱼朝同一个方向游才叫群；每条各自随机 = 一锅乱炖
       const dir = Math.random() < 0.5 ? -1 : 1
       // **同团同速**（±12% 抖动）：速度差太大会把团拉成长条，几秒后就散掉
-      const spd = big ? 6 + Math.random() * 6 : 12 + Math.random() * 20
-      const size0 = 26 * eco.schoolSize
+      const spd = spdLo + Math.random() * (spdHi - spdLo)
 
       for (let i = 0; i < perCluster; i++) {
         // 三角分布（两次均匀求和）≈ 团心密、边缘疏 —— 这**就是**"群"的形状

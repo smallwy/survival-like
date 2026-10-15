@@ -88,6 +88,22 @@ export const FS = {
 } as const
 
 /**
+ * **换带压条的几何**（V6.81，实机 px）。
+ *
+ * 为什么是"上 1/5"：HUD 布局里
+ *   · 氧气条      y  28~42（顶部居中 x 360~690）
+ *   · 波次/倒计时  y  22~125（x 760~900）
+ *   · 鱼情雷达    圆 x 1106~1282 / y 110~286
+ *   · **战场**    y 150~380 / x 60~1050（自机 + 鱼群）
+ * ⇒ `y 150~242 / x 24~1080` 与上面三块**零重叠**，且只吃掉战场最上面的一条。
+ * ⛔ 旧版入场卡在**屏幕正中**（`H/2`），正好糊在自机上 —— 这是本次改动的直接动因。
+ */
+const BAND_X0 = 24
+const BAND_X1 = 1080
+const BAND_Y = 150
+const BAND_H = 92
+
+/**
  * 估算一段文字的像素宽（CJK ≈ 字号，ASCII ≈ 0.6×字号）。
  *
  * 用来做卡面文案的**截断**。为什么不用 Label 的真实宽度：`put()` 是池化的、
@@ -193,6 +209,15 @@ export class Hud {
   private depthShown = -1
   /** 上一帧的 `w.t`，用来推 dt。`-1` = 尚未初始化 */
   private lastT = -1
+  /**
+   * 本轮换带卡**见到过的 `layerCardT` 最大值**（V6.81）。
+   *
+   * 存在的理由：压条的滑入进度是 `已过时间 = 初值 − layerCardT`，而"初值"写在
+   * `world.ts`（2.6）。在这里再写一个 2.6 就是**第二份副本** —— 那边改了这里不报错，
+   * 只会让滑入时长静默错位。改成"记住峰值"就只依赖 `layerCardT` 自己。
+   * `layerCardT` 归零时清 0，下一带重新记。
+   */
+  private cardPeak = 0
   /** 全屏底色的外扩量（见 pageFill）：每帧按实际可视区刷新 */
   private padW = 8
   private padH = 8
@@ -923,13 +948,73 @@ export class Hud {
       this.center(W / 2, 62, 'O₂ 告急', Math.round(16 + beat * 4), TXT.amber)
     }
 
-    // ===== 层入场卡 =====
-    if (w.layerCardT > 0 && L.mech) {
-      const a = Math.min(1, w.layerCardT / 0.6)
-      g.fill(MENU.page, 0.72 * a)
-      g.fillRect(W / 2 - 260, H / 2 - 70, 520, 140)
-      this.center(W / 2, H / 2 - 34, `${L.name} · ${L.mech}`, 24, TXT.cyber)
-      this.center(W / 2, H / 2 + 4, L.tip, 15, TXT.dim)
+    // ===== ⑩ 换带压条（V6.81）=====
+    // 用户：「不同层之间的衔接没有做好 文字描述需要有UI概念图 给人一种兴奋感的提示吧」
+    //
+    // 旧版是 `520×140` 的实心板放在**屏幕正中**，两个问题：
+    //   ① 中央 y150~380 整块是战场（自机 + 鱼群）⇒ 卡片正糊在自机上；
+    //   ② 门控是 `w.layerCardT > 0 && L.mech` ⇒ **L1（没有机制）完全不显示**，
+    //      开局第一带没有任何"进入"的仪式感。
+    // 现在搬到上 1/5 的**压条**：不碰战场，且 L1 也出。
+    //
+    // ★ 兴奋感来自四处（都是"能读到的量"，不是形容词）：
+    //   ① **深度区间**（`1,000 – 4,000 m`）—— 数字，不是名字；
+    //   ② **氧耗倍率**（`×1.80`）—— "这一层更难"的唯一显式信号（与左上面板**同一个
+    //      `layerO2()`**，⛔ 不另算一份，否则两处会漂）；
+    //   ③ **端头竖条取该带 tint 提亮 38%** —— 与左侧深度计**同一套色**（不用学两套配色）；
+    //   ④ **入场高光**从左扫到右 —— 读作"扫描完成，新一层已确认"。
+    //
+    // ⚠️ `layerCardT` 从 2.6 倒数（`world.ts:521/2460`）。这里**不复制那个 2.6**，
+    //   而是用 `cardPeak` 记住本轮见到过的最大值 ⇒ 只依赖 `layerCardT` 本身，
+    //   将来它改成 3.0 这条压条的滑入时长**自动跟着变**（写死 2.6 的话会静默错位）。
+    if (w.layerCardT > 0) {
+      if (w.layerCardT > this.cardPeak) this.cardPeak = w.layerCardT
+      const el = this.cardPeak - w.layerCardT             // 已过时间
+      const kIn = clamp01(el / 0.25)
+      const tf = 1 - (1 - kIn) * (1 - kIn) * (1 - kIn)    // 滑入·缓出
+      const a = clamp01(Math.min(kIn, w.layerCardT / 0.40))
+      const by0 = BAND_Y - (1 - tf) * BAND_H
+      const by1 = by0 + BAND_H
+      const edge = lerpColor(L.tint, 0xffffff, 0.38)
+      // `Graphics` 收 0xRRGGBB（number），`Label` 收 '#rrggbb'（string）——
+      // 同一个色要两份表示。⛔ 别在两处各写一个字面量，那样改一处必然漏一处。
+      const edgeCss = `#${edge.toString(16).padStart(6, '0')}`
+
+      g.fill(MENU.page, 0.78 * a)
+      g.fillRect(BAND_X0, by0, BAND_X1 - BAND_X0, BAND_H)
+      g.line(UI.line, 0.85 * a, 1)
+      g.strokeSeg(BAND_X0, by0, BAND_X1, by0)
+      g.strokeSeg(BAND_X0, by1, BAND_X1, by1)
+      g.fill(edge, a)
+      g.fillRect(BAND_X0, by0, 3, BAND_H)
+      g.fillRect(BAND_X1 - 3, by0, 3, BAND_H)
+
+      // 入场高光：一条 2px 竖线从左扫到右（0.30s，压在滑入之后）
+      const hk = clamp01((el - 0.25) / 0.30)
+      if (hk > 0 && hk < 1) {
+        g.fill(UI.cyanHi, (1 - hk) * 0.85 * a)
+        g.fillRect(BAND_X1 - (BAND_X1 - BAND_X0) * hk, by0, 2, BAND_H)
+      }
+
+      // ---- 主行：层号 + 带名 + 副名 / 深度区间（右）----
+      const tx = BAND_X0 + 22
+      const ty = by0 + 14
+      this.text(tx, ty, `L${w.layerIdx + 1}`, FS.huge, edgeCss)
+      this.text(tx + 42, ty, L.name, FS.huge, TXT.cyber)
+      this.text(tx + 42 + L.name.length * FS.huge + 12, ty + 12, L.sub, FS.micro, TXT.mute)
+      this.text(BAND_X1 - 22, ty + 4,
+        `${L.depthTop.toLocaleString()} – ${L.depthBot.toLocaleString()} m`, FS.big,
+        TXT.amber, true)
+
+      // ---- 次行：机制 + tip（截断防溢出）/ 氧耗（右）----
+      const sy = by0 + 54
+      if (L.mech) this.text(tx, sy, `◆ ${L.mech}`, FS.lead, TXT.amber)
+      this.text(tx + (L.mech ? 76 : 0), sy + 2, fitText(L.tip, FS.body, 690), FS.body, TXT.dim)
+      const o2f = layerO2(w.layerIdx, w.st.o2Bonus, w.st.regen)
+      this.text(BAND_X1 - 22, sy + 1,
+        `氧耗 ×${o2f.drain.toFixed(2)} · 静止 ${Math.round(o2f.sec)}s`, FS.body, TXT.amber, true)
+    } else {
+      this.cardPeak = 0
     }
   }
 
