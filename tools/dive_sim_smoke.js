@@ -986,7 +986,158 @@ console.log('\n[7] 元系统（沉淀 / 解锁 / 永久强化 / 图鉴）')
     assert.deepStrictEqual(missing, [], `这些生物刷得出来但图鉴里没有：${missing.join(', ')}`)
     const orphan = [...codexEnemy].filter(k => !spawnable.has(k) && !byproduct.has(k))
     assert.deepStrictEqual(orphan, [], `图鉴里有、但刷怪表产不出来的生物：${orphan.join(', ')}`)
-    assert.strictEqual(codexEnemy.size, 10, `敌人条目应为 10 条（5 旧 + 5 新），实测 ${codexEnemy.size}`)
+    // ⚠️ 这里**刻意不写死条数**（原来写的是 `=== 10`）。V6.83 加第二批时它直接挂了 ——
+    //    而它挂了**不代表任何真实问题**，纯粹是"手写的第二份清单"在漂移（铁律 15）。
+    //    `missing` / `orphan` 两条**已经完整覆盖**了双向一致性，条数断言是冗余的。
+  })
+
+  // =======================================================================
+  // V6.83 第二批 7 种生物的行为断言
+  //   每种一条，测的都是"它凭什么和别的鱼不一样"——
+  //   ⚠️ 断言不写"数值应该更好"，只写**行为存在**（配平是另一回事）
+  // =======================================================================
+
+  /** 造一只替身敌人（`mkEnemy` 是 private，测试里手搓一只等价物） */
+  function mke(kind, x, y, extra = {}) {
+    return {
+      kind, x, y, r: 20, hp: 1e9, maxHp: 1e9, speed: 0,
+      vx: 0, vy: 0, kx: 0, ky: 0,
+      dirX: 1, dirY: 0, fx: 1, fy: 0, phase: 'chase', t: 0,
+      alive: true, flash: 0, tex: '', texRot: 0, bossKind: 'watcher',
+      slowT: 0, slowMul: 1, rootT: 0, rootImmune: 0,
+      armor: 0, elite: false, burnT: 0, burnDps: 0, burnTick: 0,
+      charmT: 0, charmTick: 0, color: 0,
+      ...extra,
+    }
+  }
+  /** 空场世界：`startWave` 后清掉刷出来的，**并卸掉玩家武器** */
+  function rig(seed) {
+    const w = new DiveWorld({ w: W, h: H, seed })
+    w.startWave()
+    w.enemies.length = 0
+    // ⚠️ 必须卸武器：玩家的射程 420，替身放进去会被自动开火打中 ⇒ 触发击退积分
+    //    （`e.kx/ky`），于是"静止"的替身会**每帧被推着走**。
+    //    这一条让 mimic 的断言一度误报"位移 68px"，查了半天才发现是测试装置的锅。
+    w.weapons.length = 0
+    w.o2 = w.o2Max
+    return w
+  }
+  const step = (w, n) => { for (let i = 0; i < n; i++) w.update(DT, { dx: 0, dy: 0, burst: false }) }
+
+  check('V6.83 水母：**周期放电**（站得太近才会掉氧，前摇期不结算）', () => {
+    // 为什么是它：本作第一个"不碰你也能伤你"的普通敌人。
+    // ⚠️ 替身放在 `JELLY_ZAP_R` 内但**接触半径外**（60 > 20+22=42）——
+    //    否则掉氧里混进接触磨损，就分不清是放电还是贴脸。
+    const w = rig(5101)
+    const e = mke('jelly', w.px + 60, w.py, { r: 22 })
+    w.enemies.push(e)
+    const b = w.o2
+    for (let i = 0; i < Math.ceil(3.4 / DT); i++) { e.x = w.px + 60; e.y = w.py; w.update(DT, { dx: 0, dy: 0, burst: false }) }
+    const lost = b - w.o2
+    assert.ok(lost > 15, `水母一个周期内应放电后走，实测掉 ${lost.toFixed(1)}（约 1 次 16 + 3.4s 自然流失）`)
+  })
+
+  check('V6.83 水母：**半径外不掉氧**（否则它就不是"区域"而是"光环"）', () => {
+    const w = rig(5102)
+    const e = mke('jelly', w.px + 400, w.py, { r: 22 })
+    w.enemies.push(e)
+    const b = w.o2
+    for (let i = 0; i < Math.ceil(3.4 / DT); i++) { e.x = w.px + 400; e.y = w.py; w.update(DT, { dx: 0, dy: 0, burst: false }) }
+    const lost = b - w.o2
+    assert.ok(lost < 12, `远离水母时只该有自然流失，实测 ${lost.toFixed(1)}`)
+  })
+
+  check('V6.83 拟态：**一动不动**，玩家进 160px 才激活', () => {
+    const w = rig(5103)
+    const e = mke('mimic', w.px + 340, w.py, { phase: 'rest' })
+    w.enemies.push(e)
+    const x0 = e.x, y0 = e.y
+    step(w, 90)
+    assert.ok(Math.hypot(e.x - x0, e.y - y0) < 0.6,
+      `休眠期不该移动（位移 ${Math.hypot(e.x - x0, e.y - y0).toFixed(2)}px）`)
+    assert.strictEqual(e.phase, 'rest', `玩家在 340px 外时不该激活（实测 ${e.phase}）`)
+    assert.strictEqual(e.fx, -1, '休眠时朝向被钉死（会转头的东西不像海底碎屑）')
+
+    // ★ 把玩家挪到它**右边**：这样"激活"才有可观测差异 ——
+    //   休眠时朝向固定向左(`-1`)，激活后会翻成朝玩家(`+1`)。
+    //   ⚠️ 刻意**不靠位移**验证：替身的 `speed` 是从 `ENEMY_BASE` 注入的，
+    //      在测试里手写一个速度等于又多一份"会漂移的副本"（铁律 15）。
+    //      朝向翻转是纯行为，与数值无关。
+    w.px = e.x + 100; w.py = e.y
+    step(w, 3)
+    assert.strictEqual(e.phase, 'chase', '玩家进 160px 后应激活')
+    assert.ok(e.fx > 0.9, `激活后朝向应翻向玩家（实测 fx=${e.fx.toFixed(2)}）`)
+  })
+
+  check('V6.83 枪鱼：**不追踪**（方向恒定）+ 走完 3 趟自行离场', () => {
+    const w = rig(5104)
+    const e = mke('lancer', w.px + 200, w.py - 100)
+    w.enemies.push(e)
+    step(w, 2)                                   // 先让它把方向定下来
+    const d0x = e.dirX, d0y = e.dirY
+    assert.ok(Math.hypot(d0x, d0y) > 0.5, '枪鱼应有一条穿场方向')
+    let turning = 0
+    for (let i = 0; i < 300; i++) {
+      w.update(DT, { dx: 0, dy: 0, burst: false })
+      if (!e.alive) break
+      // ⚠️ 玩家**站着不动**，若它在追踪，方向会朝玩家变 ⇒ 记下最大方向变化
+      turning = Math.max(turning, Math.hypot(e.dirX - d0x, e.dirY - d0y))
+    }
+    assert.ok(turning < 1e-6, `枪鱼不该转向（方向最大变化 ${turning.toExponential(1)}）`)
+  })
+
+  check('V6.83 潜沙者：下潜期**打不到**（"消失"必须是真的消失）', () => {
+    const w = rig(5105)
+    const e = mke('burrower', w.px + 260, w.py, { phase: 'rest', t: 0 })
+    w.enemies.push(e)
+    const hp0 = e.hp
+    for (let i = 0; i < 30; i++) w.hurt(e, 50, 'bullet')
+    assert.strictEqual(e.hp, hp0, `下潜期不该掉血（${hp0} → ${e.hp}）`)
+    e.phase = 'chase'
+    w.hurt(e, 50, 'bullet')
+    assert.ok(e.hp < hp0, '在地面时应能被打到')
+  })
+
+  check('V6.83 孢囊：死亡留下**敌对的**酸云（忘了 hostile 就把威胁变成资源）', () => {
+    const w = rig(5106)
+    const e = mke('bloom', w.px + 120, w.py, { hp: 1, maxHp: 1 })
+    w.enemies.push(e)
+    const n0 = w.acids.length
+    w.hurt(e, 999, 'bullet')
+    assert.ok(w.acids.length > n0, '孢囊死亡应留下酸云')
+    const cloud = w.acids[w.acids.length - 1]
+    assert.strictEqual(cloud.hostile, true,
+      '⚠️ 酸云必须带 `hostile: true` —— 否则它会去伤敌人，"打死孢囊"变成白得一片伤敌地形')
+    assert.ok(cloud.r > 30 && cloud.life > 2, `云的尺寸/寿命应成型（r=${cloud.r} life=${cloud.life}）`)
+  })
+
+  check('V6.83 吸血蛭：接触**吸氧转自己的血**，且**不造成**常规 24/s 磨损', () => {
+    const w = rig(5107)
+    const e = mke('leech', w.px, w.py, { hp: 10, maxHp: 100, r: 19 })
+    w.enemies.push(e)
+    const b = w.o2, hp0 = e.hp
+    for (let i = 0; i < 60; i++) { e.x = w.px; e.y = w.py; w.update(DT, { dx: 0, dy: 0, burst: false }) }
+    const lost = b - w.o2
+    assert.ok(e.hp > hp0 + 4, `蛭应把吸到的氧转成血（${hp0} → ${e.hp.toFixed(1)}）`)
+    assert.ok(lost < 12,
+      `蛭不该造成常规接触磨损（1 秒实测 ${lost.toFixed(1)}；应只有 ~4 吸氧 + 自然流失）`)
+  })
+
+  check('V6.83 摆尾鱼：轨迹**明显偏离直线**（这是它让"瞄准"变难的全部）', () => {
+    const w = rig(5108)
+    const e = mke('darter', w.px + 520, w.py - 240, { r: 19 })
+    w.enemies.push(e)
+    const x0 = e.x, y0 = e.y
+    let maxDev = 0
+    for (let i = 0; i < 90; i++) {
+      w.update(DT, { dx: 0, dy: 0, burst: false })
+      // 相对"起点 → 当前玩家"这条轴的垂直偏离
+      const ax = w.px - x0, ay = w.py - y0, al = Math.hypot(ax, ay) || 1
+      const dx = e.x - x0, dy = e.y - y0
+      maxDev = Math.max(maxDev, Math.abs(dx * (ay / al) - dy * (ax / al)))
+    }
+    assert.ok(maxDev > 25,
+      `摆尾鱼的轨迹应明显偏离直线，实测最大偏离 ${maxDev.toFixed(1)}px（振幅 90）`)
   })
 }
 

@@ -314,6 +314,90 @@ const HERDER_SPD_MUL = 1.35
  */
 const HERDER_TARGETS: Kind[] = ['swarm', 'shard', 'splitter']
 
+// ---------------------------------------------------------------------------
+// V6.83 第二批（7 种，全部零新子系统）
+//   同一张 20 种总表：`docs/生物谱系_20种_V6.82.md` §3
+//   ⚠️ 层位**不完全按规格**：`mimic` / `bloom` 从 L4–L5 下放到 L3 —— 见 `tables.ts`
+//      的 LAYERS 注释（L4 到达率 8% / L5 是 0%，放那儿等于没做）。
+// ---------------------------------------------------------------------------
+
+/** 水母：缓慢漂移 + 周期放电 */
+const JELLY_HP = 60
+const JELLY_SPD = 30
+const JELLY_R = 22
+/** 放电周期（s）与其中的**前摇**时长：`charge` 那 1.6s 是它能被躲开的全部理由 */
+const JELLY_CYCLE = 2.6
+const JELLY_WINDUP = 1.6
+/** 放电半径（px）与伤害。半径略大于玩家体积 ⇒ 站着不动必吃 */
+const JELLY_ZAP_R = 70
+const JELLY_ZAP_DMG = 16
+
+/** 拟态：静止伪装，进 `MIMIC_ARM_R` 才激活 */
+const MIMIC_HP = 58
+const MIMIC_SPD = 120
+const MIMIC_R = 21
+/**
+ * 激活半径。160 的依据：玩家移速 220 ⇒ 全速掠过只需 0.73s，
+ * **不冲刺来得及、贴脸才发现就晚了** —— 它要惩罚的是"没注意地上的碎屑"，
+ * 不是"没看见一只鱼在追你"。（撞上 `dash` 的 240 蓄力距离也不会互相盖住：
+ * 那个是"已经在追你"，这个是"你还没发现它"。）
+ */
+const MIMIC_ARM_R = 160
+
+/** 枪鱼：屏外直线穿场，**不追踪**（与 dash 的"追你"是两套压力语汇） */
+const LANCER_HP = 40
+const LANCER_SPD = 300
+const LANCER_R = 18
+/** 最多穿几趟（对称来回）。3 趟 = 左右左，够形成"等它走完再过去"的节奏 */
+const LANCER_PASSES = 3
+
+/** 潜沙者：下潜 → 冒出 → 突进 */
+const BURROW_HP = 66
+const BURROW_SPD = 90
+const BURROW_R = 22
+/** 一个循环里三段的时长（s） */
+const BURROW_DIVE_T = 1.2
+const BURROW_EMERGE_T = 0.45
+const BURROW_DASH_T = 0.8
+/** 冒出时离玩家的距离（px）—— 太近读不出"它钻出来了"，太远又够不着 */
+const BURROW_EMERGE_DIST = 150
+/**
+ * 一个完整循环 3.5s = 地面 1.05 + 下潜 1.2 + 冒出 0.45 + 突进 0.8。
+ * ⚠️ 四个数**必须正好相加**，否则循环会漂（`t` 是分段重置的，不靠总时长兜）。
+ */
+const BURROW_SURFACE_T = 1.05
+/**
+ * 突进速度倍率（× 基础 90 = **198 px/s**）。
+ * 取 198 的依据：**必须低于玩家 220** —— 否则"钻到你脚下再突进"是无解的一次判定，
+ * 玩家做什么都没用；只要略慢于玩家，"冒出来 → 横移"就是一个可执行的解。
+ */
+const BURROW_DASH_MUL = 2.2
+
+/** 孢囊：慢速靠近，**死亡留下酸云** */
+const BLOOM_HP = 80
+const BLOOM_SPD = 46
+const BLOOM_R = 24
+const BLOOM_CLOUD_R = 46
+const BLOOM_CLOUD_T = 3.0
+const BLOOM_CLOUD_DPS = 6
+
+/** 吸血蛭：接触把玩家的氧转成自己的血，**不造成常规接触伤害** */
+const LEECH_HP = 50
+const LEECH_SPD = 76
+const LEECH_R = 19
+/** 每秒吸多少氧（`LEECH_HEAL_PER_O2` 是"每 1 氧换几滴血"） */
+const LEECH_DRAIN = 4
+const LEECH_HEAL_PER_O2 = 2
+
+/** 摆尾鱼：接近时正弦横摆 */
+const DARTER_HP = 42
+const DARTER_SPD = 104
+const DARTER_R = 19
+/** 横摆振幅（px）与频率（Hz）。90px 的依据：接触半径才 39 ⇒ 摆动幅度必须是它的 2 倍以上，
+ *  "瞄着它打"才会明显打空；再大（>140）就变成"绕着圈飞"，读不出是摆动 */
+const DARTER_AMP = 90
+const DARTER_HZ = 2.2
+
 /**
  * **先规格，后出图**的落点（本专家的工作方式）：
  * 五种的**形状语汇**（给插画岗的交接）。
@@ -372,6 +456,14 @@ const ENEMY_BASE: Record<Kind, { hp: number; spd: number; r: number; color: numb
   brood:    { hp: BROOD_HP,     spd: BROOD_SPD,    r: BROOD_R,    color: UI.lime },
   kamikaze: { hp: KAMI_HP,      spd: KAMI_SPD,     r: KAMI_R,     color: UI.magenta },
   herder:   { hp: HERDER_HP,    spd: HERDER_SPD,   r: HERDER_R,   color: UI.jade },
+  // ---- V6.83 第二批（色按语义归族，**不新开槽**；区分靠剪影 + 行为）----
+  jelly:    { hp: JELLY_HP,     spd: JELLY_SPD,    r: JELLY_R,    color: UI.lime },
+  mimic:    { hp: MIMIC_HP,     spd: MIMIC_SPD,    r: MIMIC_R,    color: UI.steel },
+  lancer:   { hp: LANCER_HP,    spd: LANCER_SPD,   r: LANCER_R,   color: UI.magenta },
+  burrower: { hp: BURROW_HP,    spd: BURROW_SPD,   r: BURROW_R,   color: UI.jade },
+  bloom:    { hp: BLOOM_HP,     spd: BLOOM_SPD,    r: BLOOM_R,    color: UI.lime },
+  leech:    { hp: LEECH_HP,     spd: LEECH_SPD,    r: LEECH_R,    color: UI.magenta },
+  darter:   { hp: DARTER_HP,    spd: DARTER_SPD,   r: DARTER_R,   color: UI.jade },
   boss:     { hp: 900,          spd: 46,  r: 52,       color: UI.violet },
 }
 
@@ -838,6 +930,13 @@ export class DiveWorld implements ShopTarget {
       shieldCut: kind === 'bulwark' ? BULWARK_CUT : undefined,
       // 孵卵囊：出生后先给 `BROOD_FIRST_DELAY` 的缓冲再开产
       hatch: kind === 'brood' ? BROOD_FIRST_DELAY : undefined,
+      // ---- V6.83 第二批 ----
+      // 拟态：出生即**休眠**（完全静止 + 不动朝向）。"地上有一块碎屑"是它的全部伪装，
+      //   所以它连 `fx` 都不该动 —— 一条会左右转头的东西不会被认为是石头。
+      phase: kind === 'mimic' ? 'rest' : 'chase',
+      // 枪鱼：趟数从 0 起。⚠️ 它**不能借 `t`**（`t` 在四段里被反复重置），
+      //   见 `Enemy.passes` 的注释。
+      passes: kind === 'lancer' ? 0 : undefined,
     }))
     this.eid++
     this.spawned[kind] = (this.spawned[kind] ?? 0) + 1
@@ -1423,6 +1522,132 @@ export class DiveWorld implements ShopTarget {
           t.y += (uy2 / ul) * t.speed * (HERDER_SPD_MUL - 1) * slow * dt
         }
         e.phase = 'chase'
+      } else if (e.kind === 'jelly') {
+        // ---- 水母（V6.83）：缓慢漂移 + **周期放电** ----
+        // 本作第一个"不碰你也能伤你"的普通敌人。压力语汇 = **一片会定时放电的区域**
+        // ⇒ 玩家学会读前摇（体表环亮）、然后绕开或先点掉，而不是靠走位躲接触。
+        e.x += nx * e.speed * slow * dt
+        e.y += ny * e.speed * slow * dt
+        e.t += dt
+        if (e.t >= JELLY_CYCLE) {
+          e.t = 0
+          // ★ 放电走 `damagePlayer()` —— 它是一次**爆发**（不是持续磨损），
+          //   所以**应该**吃闪避与无敌帧，与接触伤害刻意相反（见 `tables.ts` 的对照）。
+          const jd = dist(e.x, e.y, this.px, this.py) || 1
+          this.emit({ t: 'blast', x: e.x, y: e.y, r: JELLY_ZAP_R })
+          if (jd < JELLY_ZAP_R + PLAYER.r) {
+            this.damagePlayer(JELLY_ZAP_DMG, (this.px - e.x) / jd, (this.py - e.y) / jd)
+          }
+        }
+        // 前摇 = 周期的最后 `JELLY_WINDUP` 秒（渲染层按 `charge` 画体表环）。
+        // ⚠️ 用的是"剩余时间"而不是另开一个计时器 —— 少一个会漂的状态。
+        e.phase = e.t >= JELLY_CYCLE - JELLY_WINDUP ? 'charge' : 'chase'
+      } else if (e.kind === 'mimic') {
+        // ---- 拟态（V6.83）：静止伪装 → 进 160px 才高速扑上 ----
+        // 它的"静止"是**有信息量的**：满屏都在动，只有它不动 —— 那本身就是信号。
+        // 它收的是**注意力税**，不是操作税（撞上 `dash` 的 240 蓄力也不重叠：
+        // 那个是"已经在追你"，这个是"你还没发现它"）。
+        if (e.phase === 'rest') {
+          // 休眠：连朝向都不更新 —— 会转头的东西不会被当成海底碎屑
+          e.fx = -1; e.fy = 0
+          if (da < MIMIC_ARM_R) { e.phase = 'chase'; e.t = 0 }
+        } else {
+          e.x += nx * e.speed * slow * dt
+          e.y += ny * e.speed * slow * dt
+        }
+      } else if (e.kind === 'lancer') {
+        // ---- 枪鱼（V6.83）：屏外直线**穿场**，不追踪 ----
+        // 与 `dash` 的唯一差别就是"追不追"，但解法完全不同：
+        //   dash 要"横移躲开"，它要**读出那条线、然后站到线外**（一次决策 vs 一次反应）。
+        if (e.passes === undefined) e.passes = 0
+        if (e.dirX === 0 && e.dirY === 0) {
+          // 首次：定成一条穿过全场的直线（从当前点指向构图对侧）
+          const tx = this.W - e.x, ty = this.H - e.y
+          const tl = Math.hypot(tx, ty) || 1
+          e.dirX = tx / tl; e.dirY = ty / tl
+        }
+        // ⚠️ **必须覆盖**上面那句 `e.fx = nx`（那是"朝目标"，而它不追人）。
+        //    否则渲染层会把一条直线穿场的鱼画成"扭头追你"，语汇就错了。
+        e.fx = e.dirX; e.fy = e.dirY
+        e.x += e.dirX * e.speed * slow * dt
+        e.y += e.dirY * e.speed * slow * dt
+        // 出界 ⇒ 从**对称的另一侧**再来一趟；够 `LANCER_PASSES` 趟就撤
+        if (e.x < -60 || e.x > this.W + 60 || e.y < -60 || e.y > this.H + 60) {
+          e.passes++
+          if (e.passes >= LANCER_PASSES) {
+            // ⚠️ 直接 `alive = false`，**不走 `tryKill`** —— 它不是被打死的，
+            //    不该掉骨 / 回氧 / 计连杀（同自爆螺不白送收益的道理）。
+            e.alive = false
+          } else {
+            e.x = this.W - e.x
+            e.y = this.H - e.y
+          }
+        }
+      } else if (e.kind === 'burrower') {
+        // ---- 潜沙者（V6.83）：下潜（不可选中）→ 在你附近冒出 → 突进 ----
+        // 压力语汇 = **"它去哪儿了"**。全场都在场，只有它会消失。
+        // ⚠️ 下潜期间**必须真的打不到**（见 `hurt()` 的相位判定）——
+        //    否则"消失"只剩视觉，玩家照打不误，威胁归零。
+        // 三段复用 `phase` 的四个值（语义刚好吻合，**不新增枚举**）：
+        //   `chase` 地面游走 · `rest` 下潜（不动）· `charge` 冒出预警 · `dash` 突进
+        e.t += dt
+        if (e.phase === 'chase') {
+          e.x += nx * e.speed * slow * dt
+          e.y += ny * e.speed * slow * dt
+          if (e.t >= BURROW_SURFACE_T) { e.phase = 'rest'; e.t = 0 }
+        } else if (e.phase === 'rest') {
+          if (e.t >= BURROW_DIVE_T) {
+            // 冒出：落在玩家周围一圈上（**不是脚下** —— 脚下 = 无解）
+            const a = this.rng.next() * Math.PI * 2
+            e.x = clamp(this.px + Math.cos(a) * BURROW_EMERGE_DIST, 30, this.W - 30)
+            e.y = clamp(this.py + Math.sin(a) * BURROW_EMERGE_DIST, 30, this.H - 30)
+            e.phase = 'charge'; e.t = 0
+          }
+        } else if (e.phase === 'charge') {
+          // 冒出预警：停在原地（"钻出来了"那一下必须可读）
+          if (e.t >= BURROW_EMERGE_T) {
+            e.phase = 'dash'; e.t = 0
+            // 突进方向在**这一刻锁定**，中途不再转向 —— 会拐弯的突进就又变回"追你"了
+            e.dirX = nx; e.dirY = ny
+          }
+        } else {
+          e.x += e.dirX * e.speed * BURROW_DASH_MUL * slow * dt
+          e.y += e.dirY * e.speed * BURROW_DASH_MUL * slow * dt
+          e.fx = e.dirX; e.fy = e.dirY
+          if (e.t >= BURROW_DASH_T) { e.phase = 'chase'; e.t = 0 }
+        }
+      } else if (e.kind === 'bloom') {
+        // ---- 孢囊（V6.83）：缓慢靠近，**死亡留下酸云** ----
+        // 它的威胁不是它自己，而是**它死在哪儿**：玩家被迫在"打掉它"和
+        // "别在必经通道上打掉它"之间做选择。酸云复用 `acids` 池
+        // （与酸液武器的地面池同一种东西 ⇒ 玩家不用学新符号）。
+        // 埋云的落点在 `tryKill()` —— 只有那里知道"它是被打死的"。
+        e.x += nx * e.speed * slow * dt
+        e.y += ny * e.speed * slow * dt
+        e.phase = 'chase'
+      } else if (e.kind === 'leech') {
+        // ---- 吸血蛭（V6.83）：接触时把玩家的氧转成自己的血 ----
+        // 它是唯一"放着不管会越长越硬"的敌人 ⇒ 逼玩家分出火力去点它。
+        // 吸氧 / 回血都在**接触判定那一处**结算（只有那里知道"贴上了"），这里只管走。
+        // ⚠️ 它**不造成常规接触伤害** —— 见接触分支的 `continue`。
+        e.x += nx * e.speed * slow * dt
+        e.y += ny * e.speed * slow * dt
+        e.phase = 'chase'
+      } else if (e.kind === 'darter') {
+        // ---- 摆尾鱼（V6.83）：接近时**正弦横摆** ----
+        // 其它敌人都是直线压上，只有它的轨迹是波 —— 它让"瞄准"本身变难。
+        // ⚠️ 摆动的垂直方向取**当帧的"敌→玩家"法线**（不是世界轴）：
+        //    用世界轴的话，玩家只要换个站位就能让摆动变成"迎面上下晃"，反而更好打。
+        // ★★ 这里写的是**位置**的正弦，取相邻两帧之差当位移。
+        //    写成"横向速度 = AMP·sin(ωt)"是个隐蔽的量纲错 —— 那样位置振幅只有
+        //    `AMP/ω = 90/13.8 ≈ 6.5px`（比设计值小 14 倍），而且**看起来也在摆**，
+        //    只有量出来才发现幅度不对。
+        e.t += dt
+        const om = Math.PI * 2 * DARTER_HZ
+        const sw = (Math.sin(e.t * om) - Math.sin((e.t - dt) * om)) * DARTER_AMP
+        e.x += nx * e.speed * slow * dt - ny * sw
+        e.y += ny * e.speed * slow * dt + nx * sw
+        e.fx = nx; e.fy = ny
       } else if (e.kind === 'boss') {
         e.t += dt
         if (e.bossKind === 'angler') {
@@ -1509,6 +1734,22 @@ export class DiveWorld implements ShopTarget {
       // 接触伤害：氧气就是血条。贴着不放 = 24 氧/秒
       const d = dist(e.x, e.y, this.px, this.py) || 1
       if (d < e.r + PLAYER.r) {
+        // ★ 吸血蛭（V6.83）：**不造成常规接触伤害**，改成"吸玩家的氧 → 回自己的血"。
+        //   对玩家的净损失反而更大（氧照掉，而且它越吸越硬），但它**不触发受击闪白**：
+        //   这是刻意的 —— 要读作"它在吸我"而不是"我在挨打"（两套视觉语汇）。
+        //   ⚠️ `noHitT` 仍然归零：它确实在造成损失，不能算"无伤"
+        //      （否则"无伤"类遗物会在蛭堆里白嫖）。
+        if (e.kind === 'leech') {
+          const suck = LEECH_DRAIN * dt
+          this.o2 -= suck
+          e.hp = Math.min(e.maxHp, e.hp + suck * LEECH_HEAL_PER_O2)
+          this.noHitT = 0
+          // 弹开只有常规的一半：它必须**贴得住**才有意义
+          e.x -= ((this.px - e.x) / d) * 20 * dt
+          e.y -= ((this.py - e.y) / d) * 20 * dt
+          if (this.o2 <= 0) { this.o2 = 0; this.showResult(false); return }
+          continue
+        }
         // 刺鳐的撞击伤害（节流 0.25s）
         if (this.sub.ram > 0 && this.ramT <= 0) {
           this.ramT = 0.25
@@ -1809,6 +2050,16 @@ export class DiveWorld implements ShopTarget {
       a.tick -= dt
       if (a.tick <= 0) {
         a.tick = 0.35
+        if (a.hostile) {
+          // ★ 敌人的酸云（V6.83 `bloom`）：只在**玩家站在里面**时结算。
+          //   走 `damagePlayer` —— 它是一次**范围爆发**（同水母放电），
+          //   该吃闪避与无敌帧（与接触磨损刻意相反）。
+          const ad = dist(a.x, a.y, this.px, this.py)
+          if (ad < a.r + PLAYER.r) {
+            this.damagePlayer(a.dmg, (this.px - a.x) / (ad || 1), (this.py - a.y) / (ad || 1))
+          }
+          continue
+        }
         for (const e of this.enemies) {
           if (!e.alive) continue
           if (dist(a.x, a.y, e.x, e.y) < a.r + e.r) {
@@ -1832,6 +2083,12 @@ export class DiveWorld implements ShopTarget {
    *   渲染层按它选打击/击杀特效的形状。缺省 `'bullet'` ⇒ 老调用点一行都不用改。
    */
   hurt(e: Enemy, dmg: number, cause: DamageCause = 'bullet'): void {
+    // ★ 潜沙者下潜期**完全免伤**（V6.83）。
+    //   这条是它"消失"这个行为的**全部意义** —— 打不到才算真的消失；
+    //   否则它就只是一条半透明的鱼，玩家照打不误，压力归零。
+    //   ⚠️ 放在最前面（连 `crit` 都不掷）：没有"打中了但不疼"这种中间态，
+    //      要么这一击不存在，要么照常结算。
+    if (e.kind === 'burrower' && e.phase === 'rest') return
     const crit = this.rng.chance(this.st.crit)
     let d = dmg * this.dmgMulNow()
     if (crit) d *= 1 + this.st.critMul
@@ -1961,6 +2218,18 @@ export class DiveWorld implements ShopTarget {
             spread: 14,
           })
         }
+      }
+      // ---- V6.83 孢囊：**死亡的处才是威胁** ----
+      // 它的压力不在活着的时候（走得很慢），而在"你不得不在某处把它打掉"。
+      // ⇒ 云埋在这具尸体下，玩家下一步就得绕开这里 —— 一张**随战斗动态生成的地形**。
+      // ⚠️ `hostile: true`：这是**敌人留下的**云。忘了它就变成"打死它反而白得一片
+      //    伤敌地形"，威胁瞬间反转成资源（这正是"复用现有池"最容易踩的坑）。
+      if (e.kind === 'bloom') {
+        this.acids.push({
+          x: e.x, y: e.y, r: BLOOM_CLOUD_R,
+          life: BLOOM_CLOUD_T, tick: 0, dmg: BLOOM_CLOUD_DPS,
+          hostile: true,
+        })
       }
       // ⚠️ 自爆螺**不走这里**（它自爆时直接 `e.alive = false`，不过在 `tryKill` 里兜一下
       //    也没问题：如果它先被打死，那就该享受正常击杀收益 —— "抢在它炸之前打掉"

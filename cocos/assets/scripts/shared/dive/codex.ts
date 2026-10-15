@@ -105,6 +105,14 @@ export const CODEX: CodexEntry[] = [
   { id: 'enemy:brood', cat: 'enemy', name: '孵卵囊', hint: '它不动，但一直在生 —— 不点掉它，场上就不会少鱼' },
   { id: 'enemy:kamikaze', cat: 'enemy', name: '自爆螺', hint: '贴近就鼓起来 —— 那是在倒计时，不是它在喘气' },
   { id: 'enemy:herder', cat: 'enemy', name: '牧群者', hint: '它不咬你，它让别的鱼更快 —— 先杀它' },
+  // ---- V6.83 第二批（同一张 20 种总表，见 `docs/生物谱系_20种_V6.82.md` §3）----
+  { id: 'enemy:jelly', cat: 'enemy', name: '浮游水母', hint: '不碰你也能伤你 —— 体表环亮起时离它远点' },
+  { id: 'enemy:mimic', cat: 'enemy', name: '拟态碎屑', hint: '地上那块不动的"石头" —— 走近了它才动' },
+  { id: 'enemy:lancer', cat: 'enemy', name: '枪鱼', hint: '它只走直线，而且来回三趟 —— 站到那条线外面就行' },
+  { id: 'enemy:burrower', cat: 'enemy', name: '潜沙者', hint: '钻下去的时候打不到它；冒出来的位置在你附近一圈' },
+  { id: 'enemy:bloom', cat: 'enemy', name: '孢囊', hint: '它会死，但死在哪儿——那片酸雾会留三秒' },
+  { id: 'enemy:leech', cat: 'enemy', name: '吸血蛭', hint: '它贴着你吸氧、还越吸越硬 —— 别晾着它' },
+  { id: 'enemy:darter', cat: 'enemy', name: '摆尾鱼', hint: '它的路线是波浪，别瞄它现在的位置' },
   // ---- 首领 ----
   { id: 'boss:abyss', cat: 'boss', name: '深渊守望者', hint: '深渊带最后一波才现身的东西' },
   { id: 'boss:angler', cat: 'boss', name: '鮟鱇女王', hint: '在一片黑暗里挂着一盏灯等你游过去' },

@@ -129,6 +129,62 @@
       "dst_bytes": 26112
     },
     {
+      "src": "fish/jelly.png",
+      "dst": "fish/jelly.png",
+      "transform": "copy",
+      "src_sha256": "7b5e39f56d44f1d911037a4374044b495f11130a8b158ba78cad49615c48a2bf",
+      "dst_sha256": "7b5e39f56d44f1d911037a4374044b495f11130a8b158ba78cad49615c48a2bf",
+      "dst_bytes": 26183
+    },
+    {
+      "src": "fish/mimic.png",
+      "dst": "fish/mimic.png",
+      "transform": "copy",
+      "src_sha256": "682ff77e4506d6d07003e05d875a6e7e032fff9fd90d4d2e041db7cdbc50acac",
+      "dst_sha256": "682ff77e4506d6d07003e05d875a6e7e032fff9fd90d4d2e041db7cdbc50acac",
+      "dst_bytes": 26855
+    },
+    {
+      "src": "fish/lancer.png",
+      "dst": "fish/lancer.png",
+      "transform": "copy",
+      "src_sha256": "893008aa99599ae4f8b4b9345ddfb86c40d92af7a1b4189c6f5e54fd1aadee42",
+      "dst_sha256": "893008aa99599ae4f8b4b9345ddfb86c40d92af7a1b4189c6f5e54fd1aadee42",
+      "dst_bytes": 19685
+    },
+    {
+      "src": "fish/burrower.png",
+      "dst": "fish/burrower.png",
+      "transform": "copy",
+      "src_sha256": "11dfcb0baff63751c124eb7fd17b5eee81434b1eaa39dcb75ca82be81d0b9cb3",
+      "dst_sha256": "11dfcb0baff63751c124eb7fd17b5eee81434b1eaa39dcb75ca82be81d0b9cb3",
+      "dst_bytes": 28139
+    },
+    {
+      "src": "fish/bloom.png",
+      "dst": "fish/bloom.png",
+      "transform": "copy",
+      "src_sha256": "237e92f7a2c7ca8d75a515633e9eeef7815ad021529b538899076957e6d03d40",
+      "dst_sha256": "237e92f7a2c7ca8d75a515633e9eeef7815ad021529b538899076957e6d03d40",
+      "dst_bytes": 38625
+    },
+    {
+      "src": "fish/leech.png",
+      "dst": "fish/leech.png",
+      "transform": "copy",
+      "src_sha256": "043615f81f2563ca588d9d50477027f690d905702e436f6a8f0feeed59dd7fd6",
+      "dst_sha256": "043615f81f2563ca588d9d50477027f690d905702e436f6a8f0feeed59dd7fd6",
+      "dst_bytes": 35155
+    },
+    {
+      "src": "fish/darter.png",
+      "dst": "fish/darter.png",
+      "transform": "copy",
+      "src_sha256": "2afa91af3359a7cec0289e0cbe1f82920011fe70e8d58e0ccbb6199c0eb517fc",
+      "dst_sha256": "2afa91af3359a7cec0289e0cbe1f82920011fe70e8d58e0ccbb6199c0eb517fc",
+      "dst_bytes": 27310
+    },
+    {
       "src": "sub/sub_lumen.png",
       "dst": "sub/sub_lumen.png",
       "transform": "copy",

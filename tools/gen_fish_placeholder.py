@@ -199,6 +199,175 @@ def draw_herder(im=None):
     return _save(im, h, 'herder')
 
 
+# ---------------------------------------------------------------------------
+# V6.83 第二批七种
+#   ★ 判据同 V6.82：**形状只负责"一眼读出这是什么行为"**，不负责"像不像某种鱼"。
+#     所以每一种的重点都是"**哪个部位在说话**"（长吻 / 吸盘 / 垂须 / 分节甲 …）。
+#   ★ 色仍按语义归族（lime 软体 / steel 甲壳 / magenta 危险 / jade 常见），
+#     三种 `lime` 之间的区分**全靠剪影** —— 这正是"色是语义槽，种类靠形状"的验收点。
+# ---------------------------------------------------------------------------
+def draw_jelly(im=None):
+    """浮游水母：钟形伞盖 + 下方五条垂须（"不碰你也能伤你"）"""
+    h = 340
+    im = _canvas(h)
+    dr = ImageDraw.Draw(im)
+    cx, cy = W * SS / 2, h * SS / 2
+    Rx, Ry = 168 * SS, 118 * SS
+    # 伞盖：上半圆 + 下缘一条平线（水母钟形 —— 下方是平的，须从那里垂下来）
+    dr.pieslice([cx - Rx, cy - Ry, cx + Rx, cy + Ry], 180, 360, fill=_mix(LIME, 0.58) + (BODY_A,))
+    dr.arc([cx - Rx, cy - Ry, cx + Rx, cy + Ry], 180, 360, fill=LIME + (255,), width=7 * SS)
+    dr.line([(cx - Rx, cy), (cx + Rx, cy)], fill=LIME + (255,), width=7 * SS)
+    # 垂须：长短交错（下缘是它和"半球形"唯一的区别所在）
+    for i, dx in enumerate((-108, -54, 0, 54, 108)):
+        x0 = cx + dx * SS
+        ln = (116 if i % 2 == 0 else 88) * SS
+        pts = [(x0, cy)]
+        for k in range(1, 4):
+            pts.append((x0 + (18 if k % 2 else -18) * SS, cy + ln * k / 3))
+        dr.line(pts, fill=LIME + (200,), width=6 * SS, joint='curve')
+    # 充能环：体表一圈微亮（"它在攒电"的静态提示，动态里由 `phase='charge'` 加强）
+    dr.arc([cx - Rx * 0.72, cy - Ry * 0.80, cx + Rx * 0.72, cy + Ry * 0.80],
+           205, 335, fill=(0xff, 0xff, 0xff, 170), width=5 * SS)
+    return _save(im, h, 'jelly')
+
+
+def draw_mimic(im=None):
+    """拟态碎屑：**不规则多角块，无眼无鳍** —— 伪装本身就是它的形状"""
+    h = 300
+    im = _canvas(h)
+    dr = ImageDraw.Draw(im)
+    cx, cy = W * SS / 2, h * SS / 2
+    # ⚠️ 刻意**不对称** —— 对称的形状会被读作"生物"，那就露馅了
+    pts = [(cx - 168 * SS, cy + 24 * SS), (cx - 122 * SS, cy - 74 * SS),
+           (cx - 30 * SS, cy - 116 * SS), (cx + 74 * SS, cy - 88 * SS),
+           (cx + 156 * SS, cy - 14 * SS), (cx + 118 * SS, cy + 78 * SS),
+           (cx + 6 * SS, cy + 112 * SS), (cx - 96 * SS, cy + 88 * SS)]
+    dr.polygon(pts, fill=_mix(STEEL, 0.72) + (BODY_A,))
+    dr.line(pts + [pts[0]], fill=_mix(STEEL, 0.28) + (255,), width=6 * SS, joint='curve')
+    # 碎裂纹：内部几条折线（读作"岩石"而不是"一团色块"）
+    for a, b, c in (((-112, -40), (-30, 4), (52, -34)),
+                    ((-88, 62), (-6, 22), (86, 58)),
+                    ((-30, 4), (-6, 22), (0, 0))):
+        dr.line([(cx + a[0] * SS, cy + a[1] * SS), (cx + b[0] * SS, cy + b[1] * SS),
+                 (cx + c[0] * SS, cy + c[1] * SS)], fill=INK + (190,), width=5 * SS, joint='curve')
+    return _save(im, h, 'mimic')
+
+
+def draw_lancer(im=None):
+    """枪鱼：极细长纺锤 + **前端一根长吻** + 大尾鳍（"它只走直线"）"""
+    h = 250
+    im = _canvas(h)
+    dr = ImageDraw.Draw(im)
+    cx, cy = W * SS / 2, h * SS / 2
+    L, Hh = 430 * SS, 62 * SS
+    _spindle(dr, cx + 20 * SS, cy, L, Hh, _mix(MAGENTA, 0.60), MAGENTA, 6 * SS)
+    # 长吻：从头部往前收窄成尖 —— **枪**的语汇（同 V6.79「前端收敛成尖 = 箭头」的反用：
+    #   这里确实要它读作"一根刺"）
+    dr.polygon([(cx - L / 2 + 10 * SS, cy - 15 * SS), (cx - L / 2 - 112 * SS, cy),
+                (cx - L / 2 + 10 * SS, cy + 15 * SS)],
+               fill=_mix(MAGENTA, 0.32) + (240,), outline=MAGENTA + (255,))
+    # 大尾鳍：高速穿场的推进面
+    dr.polygon([(cx + L / 2 + 10 * SS, cy), (cx + L / 2 + 74 * SS, cy - 58 * SS),
+                (cx + L / 2 + 74 * SS, cy + 58 * SS)],
+               fill=_mix(MAGENTA, 0.50) + (205,), outline=MAGENTA + (255,))
+    _eye(dr, cx - L * 0.24, cy - 8 * SS, MAGENTA, 11 * SS)
+    return _save(im, h, 'lancer')
+
+
+def draw_burrower(im=None):
+    """潜沙者：粗短纺锤 + **背部分节甲** + 前端一对铲颚（"它会钻下去"）"""
+    h = 300
+    im = _canvas(h)
+    dr = ImageDraw.Draw(im)
+    cx, cy = W * SS / 2, h * SS / 2
+    L, Hh = 330 * SS, 100 * SS
+    _spindle(dr, cx, cy, L, Hh, _mix(JADE, 0.62), JADE, 7 * SS)
+    # 分节：四道**竖弧**（甲壳的读法；横线会被读作"被切成段"）
+    for i in range(4):
+        x = cx - L * 0.30 + i * L * 0.20
+        dr.arc([x - 26 * SS, cy - Hh * 0.86, x + 26 * SS, cy + Hh * 0.86],
+               270, 90, fill=INK + (200,), width=6 * SS)
+    # 铲颚：前端上下两片（掘沙的器官）
+    for sy in (-1, 1):
+        dr.polygon([(cx - L / 2 + 6 * SS, cy + sy * 20 * SS),
+                    (cx - L / 2 - 76 * SS, cy + sy * 44 * SS),
+                    (cx - L / 2 + 6 * SS, cy + sy * 54 * SS)],
+                   fill=_mix(JADE, 0.40) + (225,), outline=JADE + (255,))
+    _eye(dr, cx - L * 0.22, cy - 26 * SS, JADE, 12 * SS)
+    return _save(im, h, 'burrower')
+
+
+def draw_bloom(im=None):
+    """孢囊：球体 + **顶部喷口** + 底部根须（"死了会留下一片"）"""
+    h = 330
+    im = _canvas(h)
+    dr = ImageDraw.Draw(im)
+    cx, cy = W * SS / 2, h * SS / 2
+    R = 132 * SS
+    _blob(dr, [cx - R, cy - R, cx + R, cy + R], _mix(LIME, 0.50), LIME, 7 * SS)
+    # 内部孢子团：三个偏心亮球（"里面装满东西，快撑不住了"）
+    for dx, dy, rr in ((-38, -24, 34), (30, -6, 26), (-8, 42, 30)):
+        dr.ellipse([cx + (dx - rr) * SS, cy + (dy - rr) * SS,
+                    cx + (dx + rr) * SS, cy + (dy + rr) * SS],
+                   fill=LIME + (95,), outline=_mix(LIME, 0.20) + (190,), width=4 * SS)
+    # 顶喷口：一段朝上的短颈 + 开口（唯一指出"往哪儿排"的结构）
+    dr.rounded_rectangle([cx - 26 * SS, cy - R - 54 * SS, cx + 26 * SS, cy - R + 16 * SS],
+                         radius=12 * SS, fill=_mix(LIME, 0.36) + (240,),
+                         outline=LIME + (255,), width=6 * SS)
+    # 根须：底部四条短须（"扎在那里" ⇒ 与会漂的 brood 分开）
+    for dx in (-74, -26, 26, 74):
+        x0 = cx + dx * SS
+        dr.line([(x0, cy + R * 0.86), (x0 + (14 if dx > 0 else -14) * SS, cy + R + 52 * SS)],
+                fill=LIME + (185,), width=5 * SS)
+    return _save(im, h, 'bloom')
+
+
+def draw_leech(im=None):
+    """吸血蛭：长条蠕虫 + **环形分节** + 前端同心圆**吸盘**（"它在吸我"）"""
+    h = 250
+    im = _canvas(h)
+    dr = ImageDraw.Draw(im)
+    cx, cy = W * SS / 2, h * SS / 2
+    L, Hh = 400 * SS, 70 * SS
+    _spindle(dr, cx + 16 * SS, cy, L, Hh, _mix(MAGENTA, 0.66), MAGENTA, 6 * SS)
+    # 环形分节：七道竖弧（蠕虫的读法；横线会读作"鳞片"）
+    for i in range(7):
+        x = cx - L * 0.34 + i * L * 0.11
+        dr.arc([x - 22 * SS, cy - Hh * 0.92, x + 22 * SS, cy + Hh * 0.92],
+               270, 90, fill=_mix(MAGENTA, 0.12) + (200,), width=6 * SS)
+    # 吸盘：前端**同心圆环** —— 全作唯一的这个形状，一眼认出"那是嘴"
+    sx = cx - L / 2 + 4 * SS
+    for rr, wd in ((42, 7), (26, 6)):
+        dr.ellipse([sx - rr * SS, cy - rr * SS, sx + rr * SS, cy + rr * SS],
+                   outline=MAGENTA + (215,), width=wd * SS)
+    dr.ellipse([sx - 9 * SS, cy - 9 * SS, sx + 9 * SS, cy + 9 * SS], fill=(0xff, 0xff, 0xff, 205))
+    return _save(im, h, 'leech')
+
+
+def draw_darter(im=None):
+    """摆尾鱼：细长鱼 + **分叉大尾鳍** + 体侧波纹（"它的路线是波浪"）"""
+    h = 260
+    im = _canvas(h)
+    dr = ImageDraw.Draw(im)
+    cx, cy = W * SS / 2, h * SS / 2
+    L, Hh = 340 * SS, 66 * SS
+    _spindle(dr, cx - 10 * SS, cy, L, Hh, _mix(JADE, 0.60), JADE, 6 * SS)
+    # 分叉大尾鳍：摆动的动力面 —— 尾鳍越大越读得出"它在扑腾"
+    tx = cx - 10 * SS + L / 2
+    for sy in (-1, 1):
+        dr.polygon([(tx - 6 * SS, cy), (tx + 86 * SS, cy + sy * 92 * SS),
+                    (tx + 14 * SS, cy + sy * 16 * SS)],
+                   fill=_mix(JADE, 0.48) + (215,), outline=JADE + (255,))
+    # 体侧波纹：三道波浪线（横摆的静态提示）
+    for y0 in (-30, 0, 30):
+        pts = []
+        for k in range(9):
+            pts.append((cx - L * 0.34 + k * L * 0.085, cy + y0 * SS + (10 if k % 2 else -10) * SS))
+        dr.line(pts, fill=_mix(JADE, 0.10) + (150,), width=4 * SS, joint='curve')
+    _eye(dr, cx - L * 0.26, cy - 8 * SS, JADE, 12 * SS)
+    return _save(im, h, 'darter')
+
+
 def _eye(dr, x, y, color, r):
     dr.ellipse([x - r, y - r, x + r, y + r], fill=INK + (240,), outline=color + (255,), width=4 * SS)
     r2 = r * 0.45
@@ -212,6 +381,14 @@ DRAWERS = [
     ('brood', draw_brood),
     ('kamikaze', draw_kamikaze),
     ('herder', draw_herder),
+    # V6.83 第二批
+    ('jelly', draw_jelly),
+    ('mimic', draw_mimic),
+    ('lancer', draw_lancer),
+    ('burrower', draw_burrower),
+    ('bloom', draw_bloom),
+    ('leech', draw_leech),
+    ('darter', draw_darter),
 ]
 
 

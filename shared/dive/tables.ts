@@ -651,7 +651,7 @@ export const LAYERS: LayerDef[] = [
     //   ⚠️ 孵卵囊也放 L2：它的到达率是 **92%**，而 L4/L5 只有 8% / 0%
     //      （见 `tools/census_enemies.js` 的整局普查）。只写在深层的生物
     //      = 玩家大概率遇不到 —— V6.79 盘旋猎手已经栽过一次，见交接文档 §8。
-    mix: { splitter: 0.08, kamikaze: 0.07, brood: 0.05 } },
+    mix: { splitter: 0.08, kamikaze: 0.07, brood: 0.05, jelly: 0.05, darter: 0.05 } },
   // L3 午夜带：**涌流**
   { name: '午夜带', sub: 'MIDNIGHT', mech: '涌流', tip: '它们从同一个方向压上来 —— 退路只有一条',
     o2Max: 85,  drain: 1.80, dropCap: 110, toll: 25, vis: 0.68, depthTop: 1000,  depthBot: 4000,
@@ -659,20 +659,29 @@ export const LAYERS: LayerDef[] = [
     // V6.82 第一批：裂体 + 盾鳐（要绕后）+ 孵卵囊（要优先点掉）+ 自爆螺 + 牧群者。
     //   ⚠️ 牧群者**必须出现在 L3**：它原本只在 L4/L5，而普查显示 L4 只有 8% 到达、
     //      L5 是 0% ⇒ 平均每局只遇到 **0.2 只**，等于没做。加进 L3（到达率 42%）后才可见。
-    mix: { splitter: 0.06, bulwark: 0.06, brood: 0.06, kamikaze: 0.05, herder: 0.04 } },
+    // V6.83 第二批：`mimic` 与 `bloom` **从规格里的 L4–L5 下放到 L3** ——
+    //   L4 到达率 8%、L5 是 0%（`census_enemies.js`），放那儿等于没做（V6.79 同坑）。
+    //   `lancer` / `burrower` / `leech` 同理：**先落在一个 ≥40% 的层**，深层只是加厚。
+    mix: { splitter: 0.06, bulwark: 0.06, brood: 0.06, kamikaze: 0.05, herder: 0.04,
+           lancer: 0.05, burrower: 0.05, leech: 0.05, jelly: 0.03, darter: 0.03,
+           mimic: 0.04, bloom: 0.04 } },
   // L4 热泉带：**热泉**
   { name: '热泉带', sub: 'HYDROTHERMAL', mech: '热泉', tip: '上升的热流会顶开你 —— 停不住',
     o2Max: 70,  drain: 2.40, dropCap: 135, toll: 30, vis: 0.60, depthTop: 4000,  depthBot: 6000,
     ventPush: 190, current: 0, pressure: 0,   surge: false, tint: 0x7a3a16, motes: 90,  hpMul: 2.40, cntMul: 1.80, dashMul: 1.2, driftRatio: 0.15, armorRatio: 0.11, orbitRatio: 0.08,
     // V6.82 第一批：盾鳐（绕后）+ 孵卵囊（点杀）+ 牧群者（先杀 buff 源）+ 裂体。
-    mix: { splitter: 0.05, bulwark: 0.07, brood: 0.05, herder: 0.06 } },
+    mix: { splitter: 0.05, bulwark: 0.07, brood: 0.05, herder: 0.06,
+           lancer: 0.05, burrower: 0.05, bloom: 0.06, leech: 0.05, mimic: 0.05,
+           jelly: 0.03, darter: 0.03 } },
   // L5 深渊带：**压力**
   { name: '深渊带', sub: 'THE ABYSS', mech: '压力', tip: '每过一波，舱体再压掉一截氧气上限',
     o2Max: 60,  drain: 3.00, dropCap: 160, toll: 0,  vis: 0.46, depthTop: 6000,  depthBot: 11000,
     ventPush: 0,  current: 0,  pressure: 0.06, surge: false, tint: 0x1a1740, motes: 110, hpMul: 3.20, cntMul: 2.10, dashMul: 1.3, driftRatio: 0.22, armorRatio: 0.14, orbitRatio: 0.14,
     // V6.82 第一批：盾鳐 + 孵卵囊 + 牧群者。**不给 self-destruct**：L5 已经是压死人的层，
     //   再叠自爆就是"数值死刑"（参见 §3.4 的 2026-10-11 修正），压力应该来自上限与速率。
-    mix: { bulwark: 0.08, brood: 0.06, herder: 0.08 } },
+    mix: { bulwark: 0.08, brood: 0.06, herder: 0.08,
+           mimic: 0.06, lancer: 0.05, burrower: 0.06, bloom: 0.06, leech: 0.05,
+           darter: 0.04 } },
 ]
 
 /**
@@ -786,6 +795,14 @@ export const TEX_BASE_ROT: Partial<Record<Kind, number>> = {
   brood: Math.PI,
   kamikaze: Math.PI,
   herder: Math.PI,
+  // ---- V6.83 第二批新生物：素材同规，全部头朝左 ----
+  jelly: Math.PI,
+  mimic: Math.PI,
+  lancer: Math.PI,
+  burrower: Math.PI,
+  bloom: Math.PI,
+  leech: Math.PI,
+  darter: Math.PI,
 }
 
 /** 敌人贴图 key（渲染层按它取资源）。DiveScene.ts:1486 / 1572 */
@@ -802,6 +819,14 @@ export const ENEMY_TEX: Record<Kind, string> = {
   brood: 'f_brood',
   kamikaze: 'f_kamikaze',
   herder: 'f_herder',
+  // ---- V6.83 第二批（同一张 20 种总表）----
+  jelly: 'f_jelly',
+  mimic: 'f_mimic',
+  lancer: 'f_lancer',
+  burrower: 'f_burrower',
+  bloom: 'f_bloom',
+  leech: 'f_leech',
+  darter: 'f_darter',
   boss: 'f_dash',
 }
 

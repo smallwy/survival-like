@@ -23,7 +23,7 @@ if (!buildDir) {
 }
 const N = Number(process.argv[3] ?? 12)
 
-const { DiveWorld, LAYERS } = require(path.join(path.resolve(buildDir), 'dive', 'index.js'))
+const { DiveWorld, LAYERS, ENEMY_TEX, CODEX_BYPRODUCT_KINDS } = require(path.join(path.resolve(buildDir), 'dive', 'index.js'))
 
 const W = 1304
 const H = 749
@@ -47,8 +47,17 @@ function input(world, i) {
   return { dx, dy, burst: false }
 }
 
-const KINDS = ['swarm', 'dash', 'drift', 'armor', 'orbit',
-  'splitter', 'shard', 'bulwark', 'brood', 'kamikaze', 'herder', 'boss']
+/**
+ * ⚠️ 这里**从 `ENEMY_TEX` 反推**，不手写清单。
+ *
+ * V6.83 加第二批 7 种生物时，这个数组还是手写的 12 项 —— 于是那 7 种在
+ * 每层构成里**整整消失了一轮**：`spawnWeights` 明明抽出来了，脚本却因为
+ * 不在自己的清单里而**没统计**，跑出来像是"加了没生效"。
+ * 这与 V6.79/V6.82 栽的是同一个坑（铁律 15：手写的第二份清单必然漂移）。
+ */
+const KINDS = Object.keys(ENEMY_TEX)
+/** 派生体（有怪无鉴）也算进"看得见"，它们是有意不进图鉴的 */
+const DERIVED = new Set(CODEX_BYPRODUCT_KINDS)
 
 const perLayer = []          // perLayer[li][kind]
 const reached = []           // 有多少局**进过**这一层
@@ -127,14 +136,17 @@ for (let li = 0; li < 5; li++) {
   console.log(`  ${LN[li]}  共 ${tot} 只\n      ${parts.join(' · ') || '（没到过这层）'}`)
 }
 
-console.log('\n【新生物总览】这一版加的五种，玩家实际遇到多少')
-const NEW = ['splitter', 'bulwark', 'brood', 'kamikaze', 'herder']
+console.log('\n【全部生物总览】按"平均每局遇到几只"排序 —— 从少到多')
+console.log('  （★ 不写死"哪些是新的"：排序本身就能一眼指出谁看不见，且**永远不会漏**）')
 const grand = perLayer.reduce((a, m) => { for (const k of KINDS) a[k] = (a[k] ?? 0) + (m[k] ?? 0); return a }, {})
 const all = Object.values(grand).reduce((a, b) => a + b, 0) || 1
-for (const k of NEW) {
-  const per = (grand[k] ?? 0) / N
-  const flag = per < 1 ? '  ⚠️ 平均每局不到 1 只 —— 玩家大概率看不到' : ''
-  console.log(`  ${k.padEnd(9)} 合计 ${String(grand[k] ?? 0).padStart(4)}  平均每局 ${per.toFixed(1)} 只  占全场 ${((grand[k] ?? 0) / all * 100).toFixed(1)}%${flag}`)
+const rows = KINDS.filter(k => k !== 'boss').map(k => ({ k, per: (grand[k] ?? 0) / N }))
+rows.sort((a, b) => a.per - b.per)
+for (const r of rows) {
+  const tag = DERIVED.has(r.k) ? '（派生体）' : ''
+  const flag = r.per < 1 ? '  ⚠️ 平均每局不到 1 只 —— 玩家大概率看不到' : ''
+  console.log(`  ${r.k.padEnd(9)}${tag.padEnd(6)} 合计 ${String(grand[r.k] ?? 0).padStart(4)}  ` +
+    `平均每局 ${r.per.toFixed(1)} 只  占全场 ${((grand[r.k] ?? 0) / all * 100).toFixed(1)}%${flag}`)
 }
 console.log(`\n  幼体（shard·副产品）峰值同屏：${peakShard} 只（出现在 L${peakShardAt + 1}）`)
 console.log(`  ⇒ 回答的是"分裂 / 产卵有没有滚起来"；它不进图鉴也不进上面的占比表。`)
