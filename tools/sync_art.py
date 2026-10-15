@@ -83,6 +83,14 @@ _ASSET_RULES: list[tuple[str, str, str]] = [
     # V6.79 第 5 类「盘旋猎手」。同一条硬约束：**ENEMY_TEX 加了 key，这里就欠一行**，
     #   漏了会在验证阶段直接红（`artKeys` 从 ENEMY_TEX 推导、闸门要求 key 落盘）。
     ("fish/orbit.png", "fish/orbit.png", "copy"),
+    # V6.82 第一批新生物（6 张：5 种真生物 + 1 个副产品幼体）。
+    #   同一条硬约束 —— 这里是从 `ENEMY_TEX` 逐行抄下来的，少了哪一行闸门就红。
+    ("fish/splitter.png", "fish/splitter.png", "copy"),
+    ("fish/shard.png", "fish/shard.png", "copy"),
+    ("fish/bulwark.png", "fish/bulwark.png", "copy"),
+    ("fish/brood.png", "fish/brood.png", "copy"),
+    ("fish/kamikaze.png", "fish/kamikaze.png", "copy"),
+    ("fish/herder.png", "fish/herder.png", "copy"),
     # ---- 潜航器机体（正俯视；SUB_ART_PATH 指向其中三张）----
     ("sub/sub_lumen.png", "sub/sub_lumen.png", "copy"),
     ("sub/sub_raia.png", "sub/sub_raia.png", "copy"),

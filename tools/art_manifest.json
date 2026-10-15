@@ -81,6 +81,54 @@
       "dst_bytes": 50794
     },
     {
+      "src": "fish/splitter.png",
+      "dst": "fish/splitter.png",
+      "transform": "copy",
+      "src_sha256": "39a480590c866aac458138c16a429f4ccfd185bc601a78e760cded780ebb64a1",
+      "dst_sha256": "39a480590c866aac458138c16a429f4ccfd185bc601a78e760cded780ebb64a1",
+      "dst_bytes": 26232
+    },
+    {
+      "src": "fish/shard.png",
+      "dst": "fish/shard.png",
+      "transform": "copy",
+      "src_sha256": "b3c5d8158f78bdd385a467bf8a19686324ec08d3a07d74890885c804e30811f8",
+      "dst_sha256": "b3c5d8158f78bdd385a467bf8a19686324ec08d3a07d74890885c804e30811f8",
+      "dst_bytes": 14393
+    },
+    {
+      "src": "fish/bulwark.png",
+      "dst": "fish/bulwark.png",
+      "transform": "copy",
+      "src_sha256": "54b5a560ea603d6e546110c3d4636cb2c6e4af542eaf06bf6f57fa37f6efeb59",
+      "dst_sha256": "54b5a560ea603d6e546110c3d4636cb2c6e4af542eaf06bf6f57fa37f6efeb59",
+      "dst_bytes": 21444
+    },
+    {
+      "src": "fish/brood.png",
+      "dst": "fish/brood.png",
+      "transform": "copy",
+      "src_sha256": "f985f3e8d7ff0ba52caeb7b00108feba27902b910d464e74ce346e5bd2f8f3b4",
+      "dst_sha256": "f985f3e8d7ff0ba52caeb7b00108feba27902b910d464e74ce346e5bd2f8f3b4",
+      "dst_bytes": 39238
+    },
+    {
+      "src": "fish/kamikaze.png",
+      "dst": "fish/kamikaze.png",
+      "transform": "copy",
+      "src_sha256": "1b19a55bbf6f03d24d6e559da0b82cd059e8ebaf6faf1fda0c120845468375c0",
+      "dst_sha256": "1b19a55bbf6f03d24d6e559da0b82cd059e8ebaf6faf1fda0c120845468375c0",
+      "dst_bytes": 43681
+    },
+    {
+      "src": "fish/herder.png",
+      "dst": "fish/herder.png",
+      "transform": "copy",
+      "src_sha256": "39286a919aaa8531df9311ca80dcac7e4814d101d5b117462470889b4a5ed7e9",
+      "dst_sha256": "39286a919aaa8531df9311ca80dcac7e4814d101d5b117462470889b4a5ed7e9",
+      "dst_bytes": 26112
+    },
+    {
       "src": "sub/sub_lumen.png",
       "dst": "sub/sub_lumen.png",
       "transform": "copy",

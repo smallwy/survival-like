@@ -20,7 +20,19 @@
  * 而**爆炸 / 穿透类伤害无视护甲**。没有护甲的重甲只是"血厚的杂兵"。
  * ⚠️ 区分度来自**行为**（它不追你），不是外形 —— 外形只是给玩家一个"该换武器"的提醒。
  */
-export type Kind = 'swarm' | 'dash' | 'drift' | 'armor' | 'orbit' | 'boss'
+export type Kind =
+  | 'swarm' | 'dash' | 'drift' | 'armor' | 'orbit'
+  // ---- V6.82 第一批新生物（计划书 §5.4「20 种生物图鉴」）----
+  | 'splitter'   // 裂体：血空时裂成 2 只幼体
+  | 'shard'      // 幼体：**副产品**，不进图鉴（见 codex.ts 的 CODEX_BYPRODUCT_KINDS）
+  | 'bulwark'    // 盾鳐：正面 120° 减伤 80%，侧后无防护
+  | 'brood'      // 孵卵囊：几乎不动，周期吐幼体
+  | 'kamikaze'   // 自爆螺：贴脸 → 前摇 → 自爆
+  | 'herder'     // 牧群者：不追你，给周围小怪提速并把它们推向你
+  | 'boss'
+
+/** 可刷怪的 `Kind`（去掉 Boss）。`LayerDef.mix` 的键类型 */
+export type EnemyKind = Exclude<Kind, 'boss'>
 
 export interface Enemy {
   x: number; y: number
@@ -125,6 +137,25 @@ export interface Enemy {
   charmT: number
   /** 内讧攻击节流（s）。咬到同类就掉血，但不能每帧咬 */
   charmTick: number
+
+  // ---- V6.82 第一批新生物的三个状态字段（全可选，多数敌人不用）----
+  /**
+   * **正面盾的半角（弧度）**。`undefined` / 0 = 无盾。
+   *
+   * 命中判定：弹道**来向**与"敌 → 玩家"轴夹角 ≤ `shieldArc` ⇒ 走 `shieldCut` 减伤。
+   * 与 `armor`（全向减伤、且**不索敌**）的差别是**方向性 + 它会主动追你**
+   * ⇒ 玩家不能用"站桩输出"解决，必须**绕到侧后**或改用爆炸 / 穿透。
+   */
+  shieldArc?: number
+  /** 正面盾的减伤比例（0.8 = 减 80%）。只在 `shieldArc` 有效时读 */
+  shieldCut?: number
+  /**
+   * **自爆引信（s）**。`> 0` = 已经贴近并进入前摇，倒计时归零即自爆（kamikaze）。
+   * 前摇期间**停住不动**（"停下 = 要炸了"），与 dash 的 charge 同一套预警语汇。
+   */
+  fuse?: number
+  /** **产卵计时（s）**，归零则吐出一只幼体并重置（brood）。也用 `phase` 做"临产"闪烁 */
+  hatch?: number
 }
 
 /**
@@ -401,10 +432,24 @@ export interface LayerDef {
    * **盘旋猎手占比**（V6.79）。0 = 该带不刷盘旋猎手。
    * 与 `driftRatio` / `armorRatio` 同一套"占比"语义，在 `spawnEnemy` 里**最后**判定。
    * ⚠️ L1 必须为 0 —— 教学层不给机制（与 `driftRatio` 同规）。
-   * ⚠️ 硬约束：`driftRatio + dashRatio×dashMul + armorRatio + orbitRatio ≤ 1`
-   *    （判定是一条顺序 `if/else`，超了后面的桶永远刷不出来，**且不报错**）。
+   * ⚠️ 硬约束：`driftRatio + dashRatio×dashMul + armorRatio + orbitRatio + Σmix ≤ 1`
+   *    （超了后面的桶永远刷不出来，**且不报错**）。
+   *    ★ **V6.82 起这条硬约束由 `spawnWeights()` 接管**：改成**归一化加权抽样** ——
+   *      Σ ≤ 1 时行为与旧的顺序 if/else **逐位一致**；Σ > 1 时从"先到先得（尾部饿死）"
+   *      变成"按权重按比例"，修掉 L5 后段 `armor` / `orbit` 刷不出来的既有坑。
    */
   orbitRatio: number
+  /**
+   * **V6.82 新增生物的占比表**（键 = `EnemyKind`）。
+   *
+   * ⚠️ 为什么不在 `LayerDef` 上再开 6 个 `xxxRatio` 字段：每加一种生物就要动
+   *    类型定义 + 5 行层配置 + `spawnEnemy` 的判定链，而 `spawnEnemy` 里那条
+   *    顺序 `if/else` 已经长到"插错位置就静默改配比"（V6.79 的教训）。
+   *    收成一张表 ⇒ **加生物只改这一处 + `ENEMY_TEX`**。
+   * ⚠️ `swarm` 不在这张表里 —— 它是**残差**（权重 `max(0, 1 − Σ其他)`），
+   *    与旧口径一致：不加新生物时，各带配比与 V6.79 完全相同。
+   */
+  mix?: Partial<Record<EnemyKind, number>>
 }
 
 /** 一波的形状：数量 / 冲刺占比 / 血倍率 / 时长 */

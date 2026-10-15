@@ -31,6 +31,8 @@ const {
   settleProgress, evalUnlocks, perkLevel, perkBonus, buyPerk, canBuyPerk, filterPool, codexGains,
   CODEX, CARD_POOL, STAT_CARD, NEW_STATS,
   TURRET_SPIN, TURRET_OMEGA_IDLE, TURRET_OMEGA_TRACK, STREAK_MAX_LV,
+  // V6.82 新生物
+  LAYERS, LAYER_WAVES, spawnWeights, SWARM_MIN, CODEX_BYPRODUCT_KINDS, ENEMY_TEX,
 } = require(path.join(path.resolve(buildDir), 'dive', 'index.js'))
 
 const W = 1304
@@ -725,6 +727,266 @@ console.log('\n[7] 元系统（沉淀 / 解锁 / 永久强化 / 图鉴）')
     assert.ok(b.v > a.v * 1.4, `弹速应显著变快（${a.v.toFixed(0)} → ${b.v.toFixed(0)}）`)
     assert.ok(Math.abs(b.range / a.range - 1) < 0.02,
       `射程必须不变（实测 ${a.range.toFixed(0)} → ${b.range.toFixed(0)}）`)
+  })
+
+  // =========================================================================
+  // V6.82 第一批新生物（计划书 §5.4「20 种生物图鉴」）
+  // =========================================================================
+  check('V6.82 刷怪配比：换算法**不引入配比漂移**', () => {
+    // 旧写法 = "swarm 拿残差 1−Σ，其余按原始值分"。
+    // 换算法要守住的是两条：
+    //   ① **没有 `mix` 的层**（L1）：占比与旧公式**逐位一致** ⇒ 证明替换本身零漂移；
+    //   ② **所有层**：基础四类（drift / dash / armor / orbit）**彼此之间的比例不变**
+    //      （只有 swarm 的份额被新生物挤小 —— 那是刻意的，见 `LayerDef.mix` 的注释）。
+    let exact = 0
+    LAYERS.forEach((L, li) => {
+      LAYER_WAVES[li].forEach((wv, wi) => {
+        const raw = {
+          drift: L.driftRatio,
+          dash: wv.dashRatio * L.dashMul,
+          armor: L.armorRatio,
+          orbit: L.orbitRatio,
+        }
+        const wl = spawnWeights(L, wv)
+        const tot = wl.reduce((a, [, v]) => a + v, 0)
+        const got = Object.fromEntries(wl.map(([k, v]) => [k, v / tot]))
+        // ② 基础四类之间的比例
+        const base = Object.entries(raw).filter(([, v]) => v > 1e-9)
+        for (const [k1, v1] of base) {
+          for (const [k2, v2] of base) {
+            if (v1 <= 1e-9 || v2 <= 1e-9) continue
+            const ratio = got[k1] / got[k2]
+            assert.ok(Math.abs(ratio - v1 / v2) < 1e-9,
+              `L${li + 1} 第 ${wi + 1} 波：${k1}/${k2} 的相对比例被改了（${ratio.toFixed(4)} ≠ ${(v1 / v2).toFixed(4)}）`)
+          }
+        }
+        // ① 无 mix 的层：连 swarm 都要一模一样
+        if (!L.mix) {
+          const sum = Object.values(raw).reduce((a, b) => a + b, 0)
+          assert.ok(Math.abs((got.swarm ?? 0) - (1 - sum)) < 1e-9,
+            `L${li + 1} 第 ${wi + 1} 波（无 mix）：swarm 占比 ${(got.swarm ?? 0).toFixed(4)} ≠ ${(1 - sum).toFixed(4)}`)
+          exact++
+        }
+      })
+    })
+    assert.ok(exact >= 4, `只有 ${exact} 个"无 mix 层"的样本被逐位校验，太少`)
+  })
+
+  check('V6.82 刷怪配比：**新生物真的挤掉了份额，而不是没生效**', () => {
+    // 反向断言：如果哪天 `mix` 被漏读（比如 `spawnWeights` 忘了遍历它），
+    // 上面的"比例不变"仍然全绿 —— 必须有这一条盯着。
+    LAYERS.forEach((L, li) => {
+      if (!L.mix) return
+      const wv = LAYER_WAVES[li][0]
+      const wl = Object.fromEntries(spawnWeights(L, wv))
+      let sumOthers = 0
+      for (const k of Object.keys(wl)) if (k !== 'swarm') sumOthers += wl[k]
+      for (const [k, v] of Object.entries(L.mix)) {
+        assert.ok((wl[k] ?? 0) > 0, `L${li + 1} 的 mix 项 ${k} 没进权重表（mix 被漏读了）`)
+        assert.ok(Math.abs((wl[k] ?? 0) - v) < 1e-9, `L${li + 1} 的 ${k} 权重 ≠ mix 里写的（${wl[k]} ≠ ${v}）`)
+      }
+      assert.ok(Math.abs(wl.swarm - Math.max(SWARM_MIN, 1 - sumOthers)) < 1e-9,
+        `L${li + 1} 的 swarm 权重应为 max(${SWARM_MIN}, 1−Σ其他=${(1 - sumOthers).toFixed(4)})，实测 ${wl.swarm}`)
+    })
+  })
+
+  check('V6.82 刷怪配比：**饱和层不再让尾部饿死**（L5 修掉旧坑）', () => {
+    // 旧写法在 L5 全程 Σ其他 > 1 ⇒ armor / orbit 出现率恒为 0（V6.79 记过）。
+    const li = LAYERS.length - 1
+    for (const wv of LAYER_WAVES[li]) {
+      const wl = Object.fromEntries(spawnWeights(LAYERS[li], wv))
+      for (const k of ['swarm', 'drift', 'dash', 'armor', 'orbit', 'bulwark', 'brood', 'herder']) {
+        assert.ok((wl[k] ?? 0) > 0, `L${li + 1} 的 ${k} 权重为 0（尾部被饿死）`)
+      }
+    }
+  })
+
+  check('V6.82 新生物：该出现的层刷得出，**L1 一个都不给**', () => {
+    const sample = (layerIdx, n) => {
+      const w = new DiveWorld({ w: W, h: H, seed: 7 })
+      w.layerIdx = layerIdx
+      const seen = {}
+      for (let i = 0; i < n; i++) {
+        w.spawnEnemy({ x: 900, y: 375 })
+        const e = w.enemies[w.enemies.length - 1]
+        seen[e.kind] = (seen[e.kind] ?? 0) + 1
+      }
+      return seen
+    }
+    const NEW = ['splitter', 'bulwark', 'brood', 'kamikaze', 'herder']
+    // L1：**`mix` 是空的** ⇒ 五种新生物一个都不许出现（教学层不给"新招"）。
+    // ⚠️ 不能把 drift / armor / orbit 一起断言掉：L1 的 `orbitRatio` 是 **0.06**
+    //    （V6.79c 为了"可发现性"特意开的 —— 盘旋猎手只改"怎么躲"，不教新系统）。
+    const l1 = sample(0, 3000)
+    for (const k of NEW) {
+      assert.ok(!l1[k], `L1 不该刷出 ${k}（L1 没有 mix：教学层不给新机制）`)
+    }
+    // 每一层：凡该层 `mix` 里写了的，跑 3000 次必须一次不落地出现过
+    const all = {}
+    LAYERS.forEach((L, li) => {
+      const seen = sample(li, 3000)
+      for (const [k, v] of Object.entries(L.mix ?? {})) {
+        assert.ok(seen[k] > 0, `L${li + 1} 的 mix 里有 ${k}（权重 ${v}），但 3000 次一次都没刷出来`)
+        all[k] = (all[k] ?? 0) + seen[k]
+      }
+    })
+    for (const k of NEW) assert.ok(all[k] > 0, `五种新生物里 ${k} 在任何层都刷不出来`)
+  })
+
+  check('V6.82 裂体：**血空时裂成 2 只幼体**（排到帧末落地）', () => {
+    const w = new DiveWorld({ w: W, h: H, seed: 21 })
+    w.layerIdx = 2
+    let sp = null
+    for (let i = 0; i < 3000 && !sp; i++) {
+      w.spawnEnemy({ x: 300, y: 200 })
+      const e = w.enemies[w.enemies.length - 1]
+      if (e.kind === 'splitter') sp = e
+    }
+    assert.ok(sp, 'L3 刷不出裂体')
+    w.enemies.length = 0
+    w.enemies.push(sp)
+    const before = w.enemies.length
+    w.hurt(sp, 1e9)                                   // 一发打死
+    assert.ok(!sp.alive, '裂体没被打死')
+    assert.strictEqual(w.enemies.filter(e => e.kind === 'shard').length, 0,
+      '分裂不该在 hurt() 里直接落地（那会在遍历中途改数组）')
+    w.update(DT, { dx: 0, dy: 0, burst: false })      // 帧末 flushShards 在 update() 里
+    const shards = w.enemies.filter(e => e.kind === 'shard')
+    assert.strictEqual(shards.length, 2, `应裂出 2 只幼体，实测 ${shards.length}`)
+    assert.ok(shards.every(e => e.hp > 0 && e.speed > sp.speed),
+      '幼体应当"更小更快"（速度高于本体）')
+    assert.ok(before === 1)
+  })
+
+  check('V6.82 盾鳐：**正面砍 80%，侧后打满**（方向性免疫）', () => {
+    const mk = () => {
+      const w = new DiveWorld({ w: W, h: H, seed: 5 })
+      w.layerIdx = 3
+      w.st.crit = 0                                   // 去掉暴击随机，只看方向
+      let bw = null
+      for (let i = 0; i < 3000 && !bw; i++) {
+        w.spawnEnemy({ x: 600, y: 375 })
+        const e = w.enemies[w.enemies.length - 1]
+        if (e.kind === 'bulwark') bw = e
+      }
+      assert.ok(bw, 'L4 刷不出盾鳐')
+      w.enemies.length = 0
+      w.enemies.push(bw)
+      bw.dirX = 1; bw.dirY = 0                        // 盾朝右（+x）
+      bw.hp = bw.maxHp = 1e9                          // 只测伤害，不测死
+      return { w, bw }
+    }
+    const hitFrom = (sign) => {
+      const { w, bw } = mk()
+      w.px = bw.x + sign * 200; w.py = bw.y           // sign=+1 ⇒ 在它正面；−1 ⇒ 在它背后
+      const h0 = bw.hp
+      w.hurt(bw, 100)
+      return h0 - bw.hp
+    }
+    const front = hitFrom(1)
+    const back = hitFrom(-1)
+    assert.ok(front < back * 0.35, `正面应被砍掉约 80%（正面 ${front.toFixed(1)} vs 背面 ${back.toFixed(1)}）`)
+    // ⚠️ 用**比值**判，不用绝对值：`hurt()` 里的 `dmgMulNow()` 是浮动的
+    //    （低氧增伤 / 遗物），绝对值会随世界状态漂移 ⇒ 断言会变成"时而红时而绿"。
+    assert.ok(Math.abs(front / back - 0.2) < 0.02, `正面/背面伤害比应为 0.2（实测 ${(front / back).toFixed(3)}）`)
+    // ★ 爆炸无视方向（与重甲的"爆炸/穿透豁免"同规）—— 这是"换武器"的出路
+    const { w, bw } = mk()
+    w.px = bw.x + 200; w.py = bw.y
+    const h0 = bw.hp
+    w.hurt(bw, 100, 'blast')
+    const blast = h0 - bw.hp
+    assert.ok(Math.abs(blast / back - 1) < 1e-6, `爆炸必须无视方向盾（实测 ${blast.toFixed(1)} vs 背面 ${back.toFixed(1)}）`)
+  })
+
+  check('V6.82 孵卵囊：**静止且持续产幼体**，但总幼体有上限（防滚雪球）', () => {
+    const w = new DiveWorld({ w: W, h: H, seed: 33 })
+    w.layerIdx = 2
+    let br = null
+    for (let i = 0; i < 3000 && !br; i++) {
+      w.spawnEnemy({ x: 300, y: 200 })
+      const e = w.enemies[w.enemies.length - 1]
+      if (e.kind === 'brood') br = e
+    }
+    assert.ok(br, 'L3 刷不出孵卵囊')
+    w.enemies.length = 0
+    w.enemies.push(br)
+    br.hp = br.maxHp = 1e9
+    const x0 = br.x, y0 = br.y
+    for (let i = 0; i < 60 * 20; i++) w.updateEnemies(DT)   // 20 秒
+    const shards = w.enemies.filter(e => e.kind === 'shard').length
+    assert.ok(shards > 0, '20 秒里一次都没产卵')
+    assert.ok(shards <= 26 + 1, `幼体数 ${shards} 超过上限（滚雪球没被拦住）`)
+    const moved = Math.hypot(br.x - x0, br.y - y0)
+    assert.ok(moved < 300, `孵卵囊应当"几乎不动"，实测位移 ${moved.toFixed(0)}px`)
+  })
+
+  check('V6.82 自爆螺：贴近 → 前摇 → **自爆并清掉自己**（且不白送掉落）', () => {
+    const w = new DiveWorld({ w: W, h: H, seed: 41 })
+    w.layerIdx = 1
+    w.st.dodge = 0
+    let km = null
+    for (let i = 0; i < 3000 && !km; i++) {
+      w.spawnEnemy({ x: w.px + 30, y: w.py })
+      const e = w.enemies[w.enemies.length - 1]
+      if (e.kind === 'kamikaze') km = e
+    }
+    assert.ok(km, 'L2 刷不出自爆螺')
+    w.enemies.length = 0
+    w.enemies.push(km)
+    km.hp = km.maxHp = 1e9                              // 别让它先被打死，只测自爆
+    const o2a = w.o2, bonesA = w.bones.length
+    let armed = false
+    for (let i = 0; i < 60 * 5 && km.alive; i++) {
+      w.updateEnemies(DT)
+      if (km.fuse > 0) armed = true
+    }
+    assert.ok(armed, '没有进入"引信"前摇 —— 那就不会有预警窗')
+    assert.ok(!km.alive, '5 秒内没有自爆')
+    assert.ok(w.o2 < o2a, `自爆没打到玩家（o2 ${o2a.toFixed(1)} → ${w.o2.toFixed(1)}）`)
+    assert.strictEqual(w.bones.length, bonesA, '自爆不该掉骨（配平红线③：不许把"让它炸"变成刷收益）')
+  })
+
+  check('V6.82 牧群者：**它自己不追你，但让附近的小怪更快**', () => {
+    const walk = (withHerder) => {
+      const w = new DiveWorld({ w: W, h: H, seed: 55 })
+      w.layerIdx = 3
+      let sw = null, hd = null
+      for (let i = 0; i < 4000 && (!sw || !hd); i++) {
+        w.spawnEnemy({ x: 900, y: 375 })
+        const e = w.enemies[w.enemies.length - 1]
+        if (e.kind === 'swarm' && !sw) sw = e
+        if (e.kind === 'herder' && !hd) hd = e
+      }
+      assert.ok(sw && hd, 'L4 刷不出游群 / 牧群者')
+      w.enemies.length = 0
+      sw.x = w.px + 400; sw.y = w.py
+      w.enemies.push(sw)
+      if (withHerder) { hd.x = w.px + 430; hd.y = w.py; hd.hp = hd.maxHp = 1e9; w.enemies.push(hd) }
+      const x0 = sw.x, y0 = sw.y
+      for (let i = 0; i < 60; i++) w.updateEnemies(DT)
+      return Math.hypot(sw.x - x0, sw.y - y0)
+    }
+    const plain = walk(false)
+    const buffed = walk(true)
+    assert.ok(buffed > plain * 1.15,
+      `牧群者没给小怪提速（无 ${plain.toFixed(1)}px vs 有 ${buffed.toFixed(1)}px）`)
+  })
+
+  check('V6.82 图鉴**双向**对账：刷怪表能产出的 kind ⇔ CODEX 里有条目', () => {
+    // 方向①（V6.78 立）：CODEX 里有的 → codexGains 必须能产出。见上面那条穷举断言。
+    // 方向②（V6.82 补）：**刷怪表能产出的 → 图鉴里必须有一条**。
+    //   ⚠️ 两张表都从**表本身反推**，不手写第二份列表（手写副本必然漂移）。
+    const spawnable = new Set()
+    LAYERS.forEach((L, li) => {
+      for (const wv of LAYER_WAVES[li]) for (const [k] of spawnWeights(L, wv)) spawnable.add(k)
+    })
+    const byproduct = new Set(CODEX_BYPRODUCT_KINDS)
+    const codexEnemy = new Set(CODEX.filter(e => e.cat === 'enemy').map(e => e.id.slice(6)))
+    const missing = [...spawnable].filter(k => k !== 'boss' && !byproduct.has(k) && !codexEnemy.has(k))
+    assert.deepStrictEqual(missing, [], `这些生物刷得出来但图鉴里没有：${missing.join(', ')}`)
+    const orphan = [...codexEnemy].filter(k => !spawnable.has(k) && !byproduct.has(k))
+    assert.deepStrictEqual(orphan, [], `图鉴里有、但刷怪表产不出来的生物：${orphan.join(', ')}`)
+    assert.strictEqual(codexEnemy.size, 10, `敌人条目应为 10 条（5 旧 + 5 新），实测 ${codexEnemy.size}`)
   })
 }
 

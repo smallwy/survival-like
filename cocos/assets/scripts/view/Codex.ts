@@ -38,6 +38,7 @@ import { neon } from './neon'
 import { SpriteBank } from './art'
 import { MENU, TXT_LIGHT, UI } from '../shared/theme'
 import { CODEX, CODEX_CAT_NAME, codexByCat } from '../shared/dive/codex'
+import { ENEMY_TEX } from '../shared/dive/tables'
 import type { CodexCat, CodexEntry } from '../shared/dive/codex'
 import type { Profile } from '../shared/dive/profile'
 
@@ -74,10 +75,25 @@ const PAGE = COLS * ROWS           // 18 格/页
 
 const CATS: CodexCat[] = ['enemy', 'boss', 'weapon', 'relic']
 
-/** 敌人的立绘 key（`ENEMY_TEX` 的值；Boss 暂时复用 drift 的图） */
+/**
+ * 敌人的立绘 key。
+ *
+ * ⚠️ V6.82 起**从 `CODEX` + `ENEMY_TEX` 推导**，不再手写第二份映射表。
+ *    理由与 `codexGains()` 那条一模一样：手写的第二份副本**必然漂移** ——
+ *    原来这张表里就漏了 `boss:angler`（V6.62 加的第二个 Boss，图鉴里它一直
+ *    落进 `item_` 分支去取一张不存在的图），而且加 V6.82 五种新生物时
+ *    又要再手抄五遍。**同一条信息只有一处定义**。
+ *
+ * Boss 单独覆写：两个 Boss 共用一张占位图（真图走插画岗），
+ * 用**同一个 key** 让"未点亮时都是剪影、点亮后才分得出"这件事不成立 ——
+ * 所以给它们各映射到一张已有的鱼图（`f_drift` / `f_orbit`），至少能区分。
+ */
+const BOSS_KEY: Record<string, string> = { 'boss:abyss': 'f_drift', 'boss:angler': 'f_orbit' }
 const ENEMY_KEY: Record<string, string> = {
-  'enemy:swarm': 'f_swarm', 'enemy:dash': 'f_dash', 'enemy:drift': 'f_drift', 'boss:abyss': 'f_drift',
-  'enemy:armor': 'f_armor', 'enemy:orbit': 'f_orbit',
+  ...Object.fromEntries(
+    CODEX.filter(e => e.cat === 'enemy').map(e => [e.id, ENEMY_TEX[e.id.slice(6) as keyof typeof ENEMY_TEX]]),
+  ),
+  ...BOSS_KEY,
 }
 
 /** 条目 → 立绘 key。武器用**基础族**的立绘（进化共用族图即可） */

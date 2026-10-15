@@ -44,6 +44,7 @@ import {
   TURRET_SPIN, TURRET_OMEGA_IDLE, TURRET_OMEGA_TRACK, STREAK_MAX_LV,
   SEAT_SWAY_MAX, SEAT_SWAY_FOLLOW, SEAT_SWAY_DECAY,
   MAX_SEATS, BASE_SEATS, REROLL_BASE, REROLL_STEP, BONE, ENEMY_TEX, TEX_BASE_ROT, weaponFamily,
+  spawnWeights,
 } from './tables'
 import { CARD_POOL } from './pool'
 import { Rng, clamp, dist, wrapAngle } from './rng'
@@ -216,6 +217,158 @@ const ELITE_DROP_MUL = 4
 const ELITE_MIN = 1
 const ELITE_MAX = 2
 
+// ---------------------------------------------------------------------------
+// V6.82 第一批新生物（计划书 §5.4「20 种生物图鉴」）
+//
+// ★ 五种各带来**一个新的玩家动作**，不许只是"换个颜色的杂兵"（V6.49 §4.1）：
+//   ① splitter 裂体   → "别用单发高伤去收残血"（击杀会分裂）
+//   ② bulwark 盾鳐    → "绕到侧后 / 换爆炸·穿透"（正面免疫）
+//   ③ brood   孵卵囊  → "先点掉后排"（不点 = 场上小怪无限增）
+//   ④ kamikaze 自爆螺 → "在它贴上来之前处理 / 拉开"（贴脸站桩被罚）
+//   ⑤ herder  牧群者  → "先杀 buff 源"（不杀 = 全场提速）
+//
+// ⚠️ 三条配平红线：
+//   ① **新生物一律不进 L1**（`mix` 只在 L2–L5）：教学层不给机制，与 drift/armor 同规。
+//   ② **L5 不给 self-destruct**：那一层已经是"上限被压 + 耗氧 3.0/s"，
+//      再叠自爆就是"数值死刑"（§3.4 的 2026-10-11 修正写过同一条）。
+//   ③ **自爆 / 分裂出来的单位不给击杀收益**（不掉骨、不回氧）——
+//      否则"让它炸"变成刷氧手段，与氧气三道硬约束打架。
+// ---------------------------------------------------------------------------
+
+/** 裂体：本体血量（介于游群 30 与重甲之间），死亡时裂成 `SHARD_N` 只幼体 */
+const SPLITTER_HP = 46
+const SPLITTER_SPD = 62
+const SPLITTER_R = 21
+/** 裂出来的只数。★ 必须是**偶数**：对称分裂读作"裂开"，奇数读作"掉了半只" */
+const SHARD_N = 2
+/** 幼体继承本体的血量比例（0.35 = 一只幼体 ≈ 1/3 条裂体）。总血量增加 = 惩罚"收残血" */
+const SHARD_HP_MUL = 0.35
+/** 幼体体型比例与速度倍率：更小、更快（"幼"要一眼看出来） */
+const SHARD_R_MUL = 0.55
+const SHARD_SPD_MUL = 1.7
+
+/** 盾鳐：正面盾半角（弧度）。120° 全角 ⇒ 玩家有 240° 的安全弧，绕后有明确收益 */
+const BULWARK_ARC = (120 * Math.PI) / 180 / 2
+/** 正面减伤比例。0.8 而不是 1.0 —— 完全免疫会让"正面硬打"彻底无解，只剩"绕后"一条 */
+const BULWARK_CUT = 0.8
+/**
+ * 盾鳐的**转向角速度**（rad/s）。
+ *
+ * ★ 这个数字是"方向性免疫"能不能成立的全部 —— 见 `updateEnemies` 的 bulwark 分支。
+ * 取 0.9 的依据：玩家移速 220px/s，绕一圈半径 150px ⇒ 角速度 1.47 rad/s。
+ * 只要盾的转速明显低于它，**横向绕圈就能绕到侧后**；再低（<0.6）它就僵得像木桩，
+ * 再高（>1.3）就追得上玩家、绕后失效。
+ */
+const BULWARK_TURN = 0.9
+const BULWARK_HP = 90
+const BULWARK_SPD = 52
+const BULWARK_R = 25
+
+/** 孵卵囊：几乎不动（`spd = 14`），周期性吐幼体 */
+const BROOD_HP = 70
+const BROOD_SPD = 14
+const BROOD_R = 26
+/** 产卵间隔（s）。3.2s × 4 波 ≈ 每只囊一局能生 6–10 只 —— 不点它就会滚起来 */
+const BROOD_HATCH_T = 3.2
+/** 每胎只数 */
+const BROOD_LITTER = 2
+/**
+ * 场上**存活上限**（所有孵卵囊合计）。★ 防的是"滚雪球"：
+ * 没有它，第 4 波刷 8 只囊 = 每秒吐 5 只 ⇒ 敌人数指数发散，直接撞 `ENEMY_CAP` 后
+ * 帧率崩掉（而且玩家看不清发生了什么）。
+ */
+const BROOD_MAX_ALIVE = 26
+/** 出生后第一次产卵的延迟（s）：给它一点"刚孵化"的读图时间，不是立刻喷 */
+const BROOD_FIRST_DELAY = 1.6
+
+/** 自爆螺：贴到这个距离就点火 */
+const KAMI_ARM_R = 46
+/** 引信时长（s）：鼓胀 + 变红 = 预警窗。0.45 够玩家做一个侧移 */
+const KAMI_FUSE_T = 0.45
+/** 自爆半径与伤害。半径 78 略大于 `PLAYER.r + 螺 r`（42），所以"贴着也躲不掉" */
+const KAMI_BLAST_R = 78
+const KAMI_BLAST_DMG = 14
+const KAMI_HP = 34
+const KAMI_SPD = 88
+const KAMI_R = 17
+/** 自爆范围内对**玩家**的伤害（不走 `hurt`——那是"敌人受伤"的入口） */
+const KAMI_PLAYER_DMG = 26
+
+/** 牧群者：不追玩家，给半径内的小怪提速并把它们朝玩家方向推 */
+const HERDER_HP = 120
+const HERDER_SPD = 40
+const HERDER_R = 24
+/** 影响半径（px） */
+const HERDER_RANGE = 150
+/** 受益小怪的移速倍率 */
+const HERDER_SPD_MUL = 1.35
+/**
+ * 受益的 kind。**只给"直线压上"的那几类**——给 dash / armor 提速没有意义：
+ * dash 有自己的冲锋节奏、armor 根本不索敌，给它们加 buff 是数值噪声。
+ */
+const HERDER_TARGETS: Kind[] = ['swarm', 'shard', 'splitter']
+
+/**
+ * **先规格，后出图**的落点（本专家的工作方式）：
+ * 五种的**形状语汇**（给插画岗的交接）。
+ *
+ * | kind | 剪影 | 读数 |
+ * |---|---|---|
+ * | splitter | 纺锤 + **中段一道裂口** | "它要裂开" |
+ * | shard | 小纺锤，**无眼** | "幼体" |
+ * | bulwark | 宽扁，**前缘一块厚甲** | "正面硬" |
+ * | brood | 圆鼓，**表面一排卵孔** | "会生" |
+ * | kamikaze | 短粗圆壳，**背部一道红缝** | "要炸" |
+ * | herder | 细长，**两侧一排须** | "在指挥" |
+ *
+ * ### 配色口径（★ 与"加一个敌人就新开一支色"相反）
+ *
+ * `theme.ts` 的前七支色是**语义槽**，不是"每类一个"：
+ * `jade` 常见生物 · `magenta` 稀有/危险 · `amber` 资源 · `violet` 深渊/Boss ·
+ * `steel` 甲壳/金属 · `lime` 软体 · `danger` 致命预警（全场唯一纯红）。
+ *
+ * ⇒ 新生物**按语义归族取色，不新开槽**；**种类靠剪影 + 行为**（V6.49 §4.1 立下的）。
+ * 加一支色要动 `theme.ts` 的整个语义表，代价远大于收益 —— 而"颜色认种类"本来
+ * 就不是本作的读法（满屏 150 只时，颜色分不出 30 种，剪影才能）。
+ *
+ * | kind | 色 | 归族理由 |
+ * |---|---|---|
+ * | splitter | `jade` | 常见生物 |
+ * | shard | `jadeHi` | 同族幼体 ⇒ 用同色**高亮版**（"这是刚才那只的碎片"） |
+ * | bulwark | `steel` | 甲壳 / 金属（与重甲同族，差别全在**方向性**） |
+ * | brood | `lime` | 软体 / 会动的活物（与盘旋猎手同族：都不是鱼形） |
+ * | kamikaze | `magenta` | 危险生物（"自爆"是全场最危险的行为） |
+ * | herder | `jade` | 常见生物（它的"新"在**指挥**这个行为，不在配色） |
+ */
+
+/**
+ * 各 `Kind` 的**基础数值**（V6.82）。
+ *
+ * ⚠️ 收成一张表而不是散在 `spawnEnemy` 的四条三目链里：V6.82 之前
+ *    `hp / spd / r / color` 各是一条 `kind === 'x' ? … : …` 的链，
+ *    加一种生物要同时改四行、且**看不出漏了哪一行**（漏了会静默落进默认分支）。
+ *    表的形式让"加一种生物"变成**只加一行**，漏了 TS 直接报 missing property。
+ *
+ * ⚠️ `armor` 的 `hp / spd` 是**基础值**，还要在 `spawnEnemy` 里乘 `ARMOR_HP_MUL` /
+ *    `ARMOR_SPD_MUL` —— 那些倍率同时被别的分支读（如精英判定），不能并进来。
+ * ⚠️ `boss` 这一行只是为了让 `Record<Kind, …>` 齐全；实际数值由 `spawnBoss` 覆盖。
+ */
+const ENEMY_BASE: Record<Kind, { hp: number; spd: number; r: number; color: number }> = {
+  swarm:    { hp: 30,           spd: 68,  r: 19,       color: UI.jade },
+  dash:     { hp: 52,           spd: 96,  r: 25,       color: UI.magenta },
+  drift:    { hp: 110,          spd: 42,  r: 34,       color: UI.amber },
+  armor:    { hp: 40,           spd: 68,  r: ARMOR_R,  color: UI.steel },
+  orbit:    { hp: 38,           spd: 74,  r: 22,       color: UI.lime },
+  // ---- V6.82 第一批 ----
+  splitter: { hp: SPLITTER_HP,  spd: SPLITTER_SPD, r: SPLITTER_R, color: UI.jade },
+  shard:    { hp: 14,           spd: 104, r: 12,       color: UI.jadeHi },
+  bulwark:  { hp: BULWARK_HP,   spd: BULWARK_SPD,  r: BULWARK_R,  color: UI.steel },
+  brood:    { hp: BROOD_HP,     spd: BROOD_SPD,    r: BROOD_R,    color: UI.lime },
+  kamikaze: { hp: KAMI_HP,      spd: KAMI_SPD,     r: KAMI_R,     color: UI.magenta },
+  herder:   { hp: HERDER_HP,    spd: HERDER_SPD,   r: HERDER_R,   color: UI.jade },
+  boss:     { hp: 900,          spd: 46,  r: 52,       color: UI.violet },
+}
+
 /**
  * **连杀骨雨**（V6.62 §5-B）：`COMBO_WINDOW` 秒内连杀 ≥ `COMBO_N` 只 ⇒ 结算一次骨雨。
  * 奖励"**打得好**"而不是"走得远"：把爽感从位置轴挪到操作轴。
@@ -321,6 +474,22 @@ export class DiveWorld implements ShopTarget {
   sub: SubDef
   /** 撞击伤害的节流计时（刺鳐） */
   ramT = 0
+  /**
+   * 本轮 `updateEnemies` 里**已经被牧群者推过**的小怪（V6.82）。
+   *
+   * ⚠️ 必须是**每帧清空的临时集合**，不是持久状态：它的唯一作用是"同一帧别叠加两次"。
+   *    写成持久状态会变成"这只小怪一辈子只吃一次 buff"，与设计意图完全相反。
+   */
+  private readonly herded = new Set<Enemy>()
+  /**
+   * **待落地的幼体队列**（V6.82，裂体分裂）。
+   *
+   * 为什么不在 `tryKill` 里直接 push：`tryKill` 可能在遍历 `this.enemies` 的过程中
+   * 被调用（`updateEnemies` 的灼烧 tick、`updateBullets`、`explode`）。
+   * 在遍历中途改被遍历的数组，新元素会被**同一帧再遍历一次** —— 行为不明确。
+   * ⇒ 排队，帧末 `flushShards()` 统一落地。
+   */
+  private readonly pendingShards: Array<{ x: number; y: number; hpScale: number; spd: number; spread: number }> = []
   relics: RelicId[] = []
   /** 连续未受击时长（「洋流鳍」） */
   noHitT = 0
@@ -603,32 +772,33 @@ export class DiveWorld implements ShopTarget {
     const s = this.waves()[this.waveInLayer]
     const hpScale = L.hpMul * s.hpMul
 
-    // 类型抽签：drift → dash → **armor**（V6.62）→ swarm，按占比依次判定。
-    // 顺序固定 ⇒ 各带占比加起来 ≤1 时行为可预算（与旧版只多插了一档）。
-    const r = this.rng.next()
-    const dashP = s.dashRatio * L.dashMul
-    let kind: Kind
-    if (r < L.driftRatio) kind = 'drift'
-    else if (r < L.driftRatio + dashP) kind = 'dash'
-    else if (r < L.driftRatio + dashP + L.armorRatio) kind = 'armor'
-    // ⚠️ V6.79 盘旋猎手必须插在**最后**（armor 之后）：这是一条顺序 if/else，
-    //    插在中间会把 drift / dash / armor 的 r 区间整体搬家 ⇒ 既有各带配比**静默改变**。
-    //    代价：`L.orbitRatio` 在上述三项之和已经 ≥1 的波里刷不出来（见 LayerDef 的注释）。
-    else if (r < L.driftRatio + dashP + L.armorRatio + L.orbitRatio) kind = 'orbit'
-    else kind = 'swarm'
+    // 类型抽签：**归一化加权抽样**（V6.82，权重表见 `tables.spawnWeights`）。
+    // ⚠️ V6.79 之前这里是一条顺序 if/else（drift → dash → armor → orbit → swarm）。
+    //    那条链在 `Σ其他 > 1` 的波里是**先到先得**：排在前面的桶把区间吃满，
+    //    后面的桶**一次也刷不出来，而且不报错**。实测 L5 全程 + L4 第 4 波都撞在上面
+    //    （`drift .22 + dash .75×1.3 = 1.195`）⇒ 深渊带一整层刷不出 armor / orbit / swarm。
+    //    换成加权抽样后：`Σ ≤ 1` 时各带占比与旧写法**逐位一致**，`Σ > 1` 时按权重比例分。
+    const wl = spawnWeights(L, s)
+    let total = 0
+    for (const [, w] of wl) total += w
+    const r = this.rng.next() * total
+    let kind: Kind = wl[wl.length - 1][0]
+    let acc = 0
+    for (const [k, w] of wl) { acc += w; if (r < acc) { kind = k; break } }
 
-    const base = kind === 'drift' ? 110 : kind === 'dash' ? 52 : kind === 'armor' ? 40
-      : kind === 'orbit' ? 38 : 30
-    let hp = Math.round(base * hpScale)
+    const B = ENEMY_BASE[kind]
+    let hp = Math.round(B.hp * hpScale)
     if (kind === 'armor') hp = Math.round(hp * ARMOR_HP_MUL)   // 血厚 6×
     const relicSpd = this.hasRelic('abyss_mark') ? 1.1 : 1
-    let spd = (kind === 'drift' ? 42 : kind === 'dash' ? 96 : kind === 'orbit' ? 74 : 68) * relicSpd
+    let spd = B.spd * relicSpd
     if (kind === 'armor') spd *= ARMOR_SPD_MUL                 // 慢 0.4×
 
     // ---- 精英标记（V6.62 §5-A）----
     // 每波随机 1–2 只：**同一只不能既是重甲又是精英**（两者都是"值得打的"，叠加会读作数值失控）。
+    // ⚠️ V6.82 起自爆螺也排除：它**按设计一定会死**（自爆），
+    //    把精英名额给它 = 那一波白少一只"值得打的目标"。
     let elite = false
-    if (kind !== 'armor') {
+    if (kind !== 'armor' && kind !== 'kamikaze' && kind !== 'shard') {
       const want = ELITE_MIN + this.rng.int(0, ELITE_MAX - ELITE_MIN)
       if (this.eliteWave < want && this.rng.next() < 0.5) {
         elite = true
@@ -644,11 +814,9 @@ export class DiveWorld implements ShopTarget {
     this.enemies.push(this.mkEnemy({
       x, y,
       hp,
-      r: kind === 'drift' ? 34 : kind === 'dash' ? 25 : kind === 'armor' ? ARMOR_R
-        : kind === 'orbit' ? 22 : 19,
+      r: B.r,
       kind,
-      color: kind === 'drift' ? UI.amber : kind === 'dash' ? UI.magenta
-        : kind === 'armor' ? UI.steel : kind === 'orbit' ? UI.lime : UI.jade,
+      color: B.color,
       speed: spd,
       tex: ENEMY_TEX[kind],
       texRot: TEX_BASE_ROT[kind] ?? 0,
@@ -658,9 +826,66 @@ export class DiveWorld implements ShopTarget {
       dirY: kind === 'armor' ? Math.sin(armorAng) : 0,
       fx: kind === 'armor' ? Math.cos(armorAng) : -1,
       fy: kind === 'armor' ? Math.sin(armorAng) : 0,
+      // ---- V6.82 第一批量种：各自的专属状态 ----
+      // 盾鳐：正面盾（半角 + 减伤）。`undefined` = 无盾 ⇒ 与旧敌人完全一致。
+      shieldArc: kind === 'bulwark' ? BULWARK_ARC : undefined,
+      shieldCut: kind === 'bulwark' ? BULWARK_CUT : undefined,
+      // 孵卵囊：出生后先给 `BROOD_FIRST_DELAY` 的缓冲再开产
+      hatch: kind === 'brood' ? BROOD_FIRST_DELAY : undefined,
     }))
     this.eid++
     this.spawned[kind] = (this.spawned[kind] ?? 0) + 1
+  }
+
+  /**
+   * 造一只**幼体**（`shard`）—— 裂体死亡分裂（`tryKill`）与孵卵囊产卵共用。
+   *
+   * ⚠️ 刻意**不走 `spawnEnemy`**：那个函数带"抽签 + 精英判定 + 从屏边出生"三件事，
+   *    而幼体是**在场上某点凭空出现**的，且**不参与精英**。共用会让"裂体裂出来的
+   *    小鱼有可能是精英"这种荒谬情况出现。
+   * ⚠️ 不出现在 `spawned` 计数里 —— 图鉴按"遇见哪种"记，幼体是**副产品**不是物种。
+   *    但它确实进 `enemies` ⇒ 会被打死、会掉骨（体量小，掉落按 `r` 算自然很小）。
+   */
+  private spawnShard(x: number, y: number, hpScale: number, spd: number, spread: number): void {
+    const B = ENEMY_BASE.shard
+    const a = this.rng.next() * Math.PI * 2
+    const hp = Math.max(1, Math.round(B.hp * hpScale))
+    this.enemies.push(this.mkEnemy({
+      x: x + Math.cos(a) * spread,
+      y: y + Math.sin(a) * spread,
+      hp,
+      r: B.r,
+      kind: 'shard',
+      color: B.color,
+      speed: spd,
+      tex: ENEMY_TEX.shard,
+      texRot: TEX_BASE_ROT.shard ?? 0,
+      fx: -1, fy: 0,
+    }))
+    this.eid++
+  }
+
+  /** 场上存活的幼体数（孵卵囊的滚雪球上限 `BROOD_MAX_ALIVE` 按它算） */
+  private shardAlive(): number {
+    let n = 0
+    for (const e of this.enemies) if (e.alive && e.kind === 'shard') n++
+    return n
+  }
+
+  /** 把这一帧排队的幼体落地（裂体分裂）。见 `pendingShards` 的注释 */
+  private flushShards(): void {
+    if (!this.pendingShards.length) return
+    for (const p of this.pendingShards) this.spawnShard(p.x, p.y, p.hpScale, p.spd, p.spread)
+    this.pendingShards.length = 0
+  }
+
+  /**
+   * 当前层 + 当前波的**血量倍率**（`LayerDef.hpMul × WaveShape.hpMul`）。
+   * `spawnEnemy` 与"分裂 / 产卵出来的幼体"都要用它 —— 幼体不继承倍率的话，
+   * 深渊带裂出来的小鱼会是**一层薄纸**，玩家会觉得"分裂反而是好事"。
+   */
+  private hpScaleNow(): number {
+    return this.layer().hpMul * this.waves()[this.waveInLayer].hpMul
   }
 
   /**
@@ -833,6 +1058,13 @@ export class DiveWorld implements ShopTarget {
       this.updateBullets(dt)
       this.updateEchoes(dt)
       this.updateAcids(dt)
+      // ★ 裂体的分裂**延迟到这一帧的伤害结算全部跑完之后**（V6.82）：
+      //   直接在同一次 `hurt()` 里 `enemies.push`，等于**在 `for (const e of this.enemies)`
+      //   的遍历中途改数组** —— JS 会让新加的元素在同一帧被再遍历一次，
+      //   于是"这一帧刚裂出来的幼体立刻又挨了同一发爆炸"。
+      //   那样到底该不该挨，是个说不清的问题（物理上该，节奏上不该）。
+      //   排队 + 帧末统一落地 ⇒ 行为确定：幼体从**下一帧**起才参与碰撞与伤害。
+      this.flushShards()
       this.updateBones(dt)
       this.autoFire(dt)
       this.drainOxygen(dt)
@@ -953,6 +1185,9 @@ export class DiveWorld implements ShopTarget {
 
   updateEnemies(dt: number): void {
     const cur = this.layer().current
+    // ★ 牧群者的"这一帧已经被推过"集合（V6.82）。每帧清空 —— 见 `herder` 分支：
+    //   两只牧群者同时覆盖一只小怪时，只应加一次 35%，不是 70%（那是瞬移）。
+    this.herded.clear()
     for (const e of this.enemies) {
       if (!e.alive) continue
       if (e.flash > 0) e.flash -= dt
@@ -1064,6 +1299,124 @@ export class DiveWorld implements ShopTarget {
           //    必须在上面那次 `e.fx/e.fy` 赋值**之后**覆盖，否则会退回"朝玩家"。
           e.fx = tanX; e.fy = tanY
         }
+      } else if (e.kind === 'splitter') {
+        // ---- 裂体（V6.82）：**直线稳定压上**，不带扑击 ----
+        // 它的"新"不在移动，在**死亡**：血空时裂成 2 只幼体（见 `tryKill`）。
+        // 移动上刻意朴素 —— 如果它还会扑击，玩家读到的是"另一款游群"，
+        // 而分裂那一刻的意外感会被"它刚才还扑了我一下"冲淡。
+        e.x += nx * e.speed * slow * dt
+        e.y += ny * e.speed * slow * dt
+      } else if (e.kind === 'shard') {
+        // ---- 幼体（副产品）：小、快、直线。没有自己的招式 ----
+        // 它是"分裂"这个动作的**可见后果**，不再是独立的物种。
+        e.x += nx * e.speed * slow * dt
+        e.y += ny * e.speed * slow * dt
+      } else if (e.kind === 'bulwark') {
+        // ---- 盾鳐（V6.82）：正面打不动，但**它转得比玩家慢** ----
+        // 与 `armor` 的差别是本作最需要说清的一处：
+        //   `armor`  = 全向减伤 60% + **不索敌**（你得主动去打它）
+        //   `bulwark`= **方向性免疫**（正面 120° 减伤 80%）+ **主动追你**
+        //
+        // ⚠️ 关键约束：**朝向必须用"限速转向"而不是"直接指向玩家"**。
+        //    如果它每帧把盾对准玩家，那"绕后"在物理上不可能 ⇒ 玩家只剩"换爆炸武器"
+        //    一条解，方向性免疫就退化成"另一种全向减伤"。
+        //    限速转向（`BULWARK_TURN`）让**横向绕圈**成为可行解：
+        //    玩家在 150px 半径上以 220px/s 绕 = 1.47 rad/s > 0.9 rad/s ⇒ 追得上它的转角。
+        const want = Math.atan2(this.py - e.y, this.px - e.x)
+        const curA = Math.atan2(e.dirY, e.dirX)
+        let diff = wrapAngle(want - curA)
+        const step = BULWARK_TURN * dt
+        if (diff > step) diff = step
+        else if (diff < -step) diff = -step
+        const a2 = curA + diff
+        e.dirX = Math.cos(a2); e.dirY = Math.sin(a2)
+        // 走**它面朝的方向**（不是直指玩家）—— 盾在前、身在后，这是它能被绕后的原因
+        e.x += e.dirX * e.speed * slow * dt
+        e.y += e.dirY * e.speed * slow * dt
+        e.fx = e.dirX; e.fy = e.dirY
+      } else if (e.kind === 'brood') {
+        // ---- 孵卵囊（V6.82）：**几乎不动**，周期吐幼体 ----
+        // 它是本作第一个**静止的威胁**（重甲会巡逻、其它都会追）—— "不动"本身就是信号：
+        // 玩家一眼能扫到那个不参与围殴的圆鼓，从而学会"先点掉后排"。
+        // ⚠️ 仍要以极慢速度漂向玩家，否则玩家一直退它就永远不出画，
+        //    变成"我根本没看见那里有个囊在生"。
+        e.x += nx * e.speed * slow * dt
+        e.y += ny * e.speed * slow * dt
+        // 产卵：`hatch` 归零就吐一胎，并重置。`phase = 'charge'` 当"临产"信号给渲染层。
+        const alive = this.shardAlive()
+        e.hatch = (e.hatch ?? BROOD_HATCH_T) - dt
+        e.phase = e.hatch < 0.7 ? 'charge' : 'chase'
+        if (e.hatch <= 0) {
+          e.hatch = BROOD_HATCH_T
+          if (alive < BROOD_MAX_ALIVE) {
+            const hpScale = this.hpScaleNow()
+            const spd = ENEMY_BASE.shard.spd * (this.hasRelic('abyss_mark') ? 1.1 : 1)
+            for (let i = 0; i < BROOD_LITTER; i++) {
+              if (this.shardAlive() >= BROOD_MAX_ALIVE) break
+              this.spawnShard(e.x, e.y, hpScale, spd, 10)
+            }
+            // 产卵的可见信号 = **幼体自己从囊里冒出来**，不另开事件：
+            // 新加一个 `SimEvent` 类型要同时改两个渲染端，而这一处的表现
+            // 完全能由"凭空多出来的两只小鱼"承担。
+          }
+        }
+      } else if (e.kind === 'kamikaze') {
+        // ---- 自爆螺（V6.82）：贴近 → 前摇 → 自爆 ----
+        // 结构上它和 `dash` 同源（靠近 → 停下蓄力 → 爆发），但**爆发的后果不同**：
+        // dash 是"冲过去撞你"，它是"把自己炸掉"。前摇（鼓胀 + 变红）是唯一的预警，
+        // 所以那 0.45s 必须**完全静止** —— 边动边炸读不出"要炸了"。
+        if (e.fuse === undefined || e.fuse <= 0) {
+          e.x += nx * e.speed * slow * dt
+          e.y += ny * e.speed * slow * dt
+          if (da < KAMI_ARM_R && e.rootT <= 0) {
+            e.fuse = KAMI_FUSE_T
+            e.phase = 'charge'
+            e.t = 0
+          }
+        } else {
+          // 前摇：原地不动，`phase = 'charge'` 让渲染层画鼓胀
+          e.phase = 'charge'
+          e.fuse -= dt
+          if (e.fuse <= 0) {
+            // ★ 自爆：走 `explode` 打敌人（守方利），再单独打玩家（攻方害）。
+            //   `explode` 的 `dmg` 给 0 —— 它是**敌人的自爆**，不该顺手清掉同伴
+            //   （否则"引来一群自爆螺"会成为清场手段，正好把威胁变成资源）。
+            this.emit({ t: 'shake', ms: 140, intensity: 0.008 })
+            this.emit({ t: 'blast', x: e.x, y: e.y, r: KAMI_BLAST_R })
+            const pd = dist(e.x, e.y, this.px, this.py)
+            if (pd < KAMI_BLAST_R + PLAYER.r) {
+              // 来向 = 「爆心 → 玩家」
+              this.damagePlayer(KAMI_PLAYER_DMG, (this.px - e.x) / (pd || 1), (this.py - e.y) / (pd || 1))
+            }
+            e.alive = false
+            // ⚠️ 刻意**不走 `tryKill`**：自爆不该给击杀收益（不掉骨 / 不回氧 / 不计连杀）。
+            //    理由见文件头"配平红线 ③"——给了收益就等于把"让它炸"变成刷氧手段。
+            this.emit({ t: 'kill', x: e.x, y: e.y, r: e.r, color: e.color, kind: e.kind, cause: 'blast' })
+          }
+        }
+      } else if (e.kind === 'herder') {
+        // ---- 牧群者（V6.82）：**不追你**，它指挥别人追你 ----
+        // 全作第二个"作用于玩家环境而非玩家本人"的敌人（第一个是盘旋猎手的缠索）。
+        // 它的压力是**间接的**：只要它活着，附近的小怪就更快、更贴。
+        // ⇒ 玩家学会"先杀 buff 源"，这是 Bullet Heaven 里很典型的优先级判断。
+        const keep = 260
+        if (da > keep + 40) { e.x += nx * e.speed * slow * dt; e.y += ny * e.speed * slow * dt }
+        else if (da < keep - 40) { e.x -= nx * e.speed * slow * dt; e.y -= ny * e.speed * slow * dt }
+        // 施压：给范围内的直线类小怪**额外一段朝玩家的位移**（等效于 ×1.35 速度），
+        // 但**每帧每只只推一次** —— 两只牧群者叠加会把小怪推成瞬移。
+        for (const t of this.enemies) {
+          if (!t.alive || t === e) continue
+          if (!HERDER_TARGETS.includes(t.kind)) continue
+          if (this.herded.has(t)) continue
+          const td = dist(e.x, e.y, t.x, t.y)
+          if (td > HERDER_RANGE) continue
+          this.herded.add(t)
+          const ux2 = this.px - t.x, uy2 = this.py - t.y
+          const ul = Math.hypot(ux2, uy2) || 1
+          t.x += (ux2 / ul) * t.speed * (HERDER_SPD_MUL - 1) * slow * dt
+          t.y += (uy2 / ul) * t.speed * (HERDER_SPD_MUL - 1) * slow * dt
+        }
+        e.phase = 'chase'
       } else if (e.kind === 'boss') {
         e.t += dt
         if (e.bossKind === 'angler') {
@@ -1490,6 +1843,24 @@ export class DiveWorld implements ShopTarget {
     // V6.77d 破甲穿透：★ 与 `pierce` **语义不同** —— `pierce` 是"完全无视"，
     //   本卡是"把减伤按比例打折"（45% 穿透 ⇒ 60% 减伤只剩 33%）⇒ 保留重甲的存在感。
     if (blocked) d *= (1 - e.armor * (1 - this.st.armorPen))
+    // ---- V6.82 盾鳐的**方向性**盾 ----
+    // 与 `armor`（全向减伤）的差别就在这里：只在**正面 120°** 生效。
+    //
+    // ⚠️ 「来向」用**玩家位置**当代理，不是弹道起点：模拟层没把弹道起点传进 `hurt()`
+    //    （那要给 10 个调用点改签名），而本作所有伤害都源自玩家（或其召唤物）
+    //    ⇒ "玩家在不在它正面"与"这一击从不在它正面来"是同一件事。
+    //    代价：一个已经被抛出、从背后飞来的子弹，也会按"玩家现在的位置"判定。
+    //    可接受 —— 盾鳐追你，玩家在正面时本来也绕不到背后。
+    const shielded = !!e.shieldArc && !ignoreArmor && (
+      (() => {
+        const dx = this.px - e.x, dy = this.py - e.y
+        const L = Math.hypot(dx, dy) || 1
+        // 盾朝向 = `dirX/dirY`（限速转向，见 bulwark 分支）
+        const fdot = (dx / L) * e.dirX + (dy / L) * e.dirY
+        return fdot > Math.cos(e.shieldArc!)
+      })()
+    )
+    if (shielded) d *= (1 - (e.shieldCut ?? 0) * (1 - this.st.armorPen))
     e.hp -= d
     e.flash = Math.max(e.flash, 0.09)
     let nx = 0, ny = 0
@@ -1503,7 +1874,8 @@ export class DiveWorld implements ShopTarget {
     // 命中事件（渲染层据此画：冲击波 + 击打痕 + 迸溅火星 + 飘字）
     // ⚠️ 被护甲格挡时把火花换成**钢灰**：玩家第一次打重甲就能从颜色学到"这玩意抗弹、该换武器"，
     //    不用先去看图鉴。这是"逼玩家换武器"这条设计意图在**反馈层**的落点。
-    const hitCol = blocked ? UI.steel : (crit ? UI.violet : e.color)
+    //    V6.82 盾鳐同规 —— 方向盾被挡时也是钢灰，玩家据此学会"这个方向打不动，换个角度"。
+    const hitCol = (blocked || shielded) ? UI.steel : (crit ? UI.violet : e.color)
     this.emit({ t: 'hit', x: e.x, y: e.y, r: e.r, color: hitCol, crit, dmg: d, nx, ny, cause })
     if (crit) {
       // 命中震屏：只给暴击（普通命中频率太高，每次都震会变廉价且让人晕）
@@ -1567,6 +1939,26 @@ export class DiveWorld implements ShopTarget {
       //   Boss 重震 —— 一局一次，必须有分量。DiveScene.ts:2226-2231
       if (e.kind === 'boss') this.emit({ t: 'shake', ms: 320, intensity: 0.012 })
       else if (e.kind === 'drift') this.emit({ t: 'shake', ms: 120, intensity: 0.0035 })
+      // ---- V6.82 裂体：死亡时裂成 `SHARD_N` 只幼体 ----
+      // ★ 这是它存在的**全部**意义（移动上它和游群几乎一样）：
+      //   惩罚"用单发高伤去收残血"——那一发的高伤害会被浪费在分裂上。
+      //   ⚠️ 幼体**血量按本体的比例**继承（`SHARD_HP_MUL`）而不是固定值：
+      //      固定值会让它在低层"裂出一堆肉"，在深渊带"裂出两团空气"。
+      //   ⚠️ 排进 `pendingShards`，不在这里直接 push（见该字段的注释）。
+      if (e.kind === 'splitter') {
+        const spd = ENEMY_BASE.shard.spd * (this.hasRelic('abyss_mark') ? 1.1 : 1)
+        for (let i = 0; i < SHARD_N; i++) {
+          this.pendingShards.push({
+            x: e.x, y: e.y,
+            hpScale: this.hpScaleNow() * SHARD_HP_MUL,
+            spd,
+            spread: 14,
+          })
+        }
+      }
+      // ⚠️ 自爆螺**不走这里**（它自爆时直接 `e.alive = false`，不过在 `tryKill` 里兜一下
+      //    也没问题：如果它先被打死，那就该享受正常击杀收益 —— "抢在它炸之前打掉"
+      //    本来就是它设计上鼓励的解法）。所以这里**没有** kamikaze 的特判。
       this.dropBone(e)
       // 击杀回氧（深潜者 ×1.5 与「骨殖转化」×2 相乘）
       const kO2 = this.st.killO2 * this.sub.killO2Mul * (this.hasRelic('osteoblast') ? 2 : 1)

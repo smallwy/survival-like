@@ -59,6 +59,20 @@ export const WEAPON_NAME: Record<WeaponFamily, string> = {
 }
 
 /**
+ * **不进图鉴的 `Kind`**（V6.82）。
+ *
+ * `shard`（幼体）是裂体 / 孵卵囊的**副产品**，不是"一种生物"——
+ * 它没有自己的行为，也不由刷怪表产出（不在任何 `LayerDef.mix` 里）。
+ * 把它塞进图鉴会让玩家以为"我有一种鱼从没见过"，而那种鱼**永远不会单独刷出来**。
+ *
+ * ★ 这个列表的存在意义是让 `dive_sim_smoke.js` 能跑一条**双向对账**：
+ *   ① `CODEX` 里有的 → `codexGains()` 必须能产出（V6.78 立）；
+ *   ② 刷怪表能产出的 `Kind` → `CODEX` 里必须有（V6.82 补）。
+ *   两条都靠这张表 + `CODEX` 反推，**不手写第二份列表**（那是必然会漂移的副本）。
+ */
+export const CODEX_BYPRODUCT_KINDS: string[] = ['shard']
+
+/**
  * 图鉴条目全表。
  *
  * 敌人只收**战斗层真实存在的移动体**（swarm/dash/drift/**armor**）+ 两个 Boss ——
@@ -79,6 +93,12 @@ export const CODEX: CodexEntry[] = [
   { id: 'enemy:drift', cat: 'enemy', name: '漂移水母', hint: '慢、肉厚、值钱，是大目标' },
   { id: 'enemy:armor', cat: 'enemy', name: '甲壳重甲', hint: '慢、硬、子弹打上去会被弹开，要找穿透手段' },
   { id: 'enemy:orbit', cat: 'enemy', name: '盘旋猎手', hint: '不正面冲你 —— 绕着圈越缩越近，贴身才咬' },
+  // ---- V6.82 第一批新生物 ----
+  { id: 'enemy:splitter', cat: 'enemy', name: '裂体', hint: '它死的时候会**裂成两只** —— 别用一发高伤去收它' },
+  { id: 'enemy:bulwark', cat: 'enemy', name: '盾鳐', hint: '正面捅不进去，绕到它侧后（或换爆炸武器）' },
+  { id: 'enemy:brood', cat: 'enemy', name: '孵卵囊', hint: '它不动，但一直在生 —— 不点掉它，场上就不会少鱼' },
+  { id: 'enemy:kamikaze', cat: 'enemy', name: '自爆螺', hint: '贴近就鼓起来 —— 那是在倒计时，不是它在喘气' },
+  { id: 'enemy:herder', cat: 'enemy', name: '牧群者', hint: '它不咬你，它让别的鱼更快 —— 先杀它' },
   // ---- 首领 ----
   { id: 'boss:abyss', cat: 'boss', name: '深渊守望者', hint: '深渊带最后一波才现身的东西' },
   { id: 'boss:angler', cat: 'boss', name: '鮟鱇女王', hint: '在一片黑暗里挂着一盏灯等你游过去' },
@@ -130,7 +150,11 @@ export function codexGains(snap: CodexSnapshot): Record<string, number> {
   // ⚠️ 这几个 kind 必须与 `CODEX` 的 `enemy:*` 条目、以及 `types.ts` 的 `Kind` 对齐。
   //    V6.78 之前漏了 'armor'（V6.62 加的第 4 类）⇒ 打了一整局重甲，图鉴上还是剪影。
   //    ★ 每加一个 `Kind`，**这一行和 `CODEX` 两边都要加** —— 只加一边不报错，只会永远显示剪影。
-  for (const k of ['swarm', 'dash', 'drift', 'armor', 'orbit'] as const) {
+  //    ⚠️ V6.82 起这条列表**从 `CODEX` 反推**，不再手写第二份（手写副本必然漂移：
+  //      V6.79 加 orbit 时正是撞在"表加了、这份没加"，离线断言直接红）。
+  for (const e of CODEX) {
+    if (e.cat !== 'enemy') continue
+    const k = e.id.slice(6)
     add('enemy:' + k, snap.spawned[k] ?? 0)
   }
   // Boss：按**种类**各记一条（两个 Boss = 两个条目，见 `CodexSnapshot.bossesDown`）

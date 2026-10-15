@@ -19,7 +19,7 @@
  */
 
 import { UI } from '../theme'
-import type { LayerDef, WaveShape, Stats, RelicDef, RelicId, Kind, WeaponId } from './types'
+import type { LayerDef, WaveShape, Stats, RelicDef, RelicId, Kind, EnemyKind, WeaponId } from './types'
 
 // ---------------------------------------------------------------------------
 // 画布尺寸由调用方注入（Phaser 用 this.scale.width/height，Cocos 用 view 设计分辨率）
@@ -648,22 +648,37 @@ export const LAYERS: LayerDef[] = [
   { name: '阳光带', sub: 'SUNLIT', mech: '', tip: '没有额外机制 —— 先把手感练顺',
     o2Max: 100, drain: 1.00, dropCap: 70,  toll: 15, vis: 1.00, depthTop: 0,     depthBot: 200,
     ventPush: 0,  current: 0,  pressure: 0,    surge: false, tint: 0x2a6f8a, motes: 34,  hpMul: 1.00, cntMul: 1.00, dashMul: 0.5, driftRatio: 0.00, armorRatio: 0.00, orbitRatio: 0.06 },
+    // ⚠️ L1 **刻意没有 `mix`**：教学层不给机制（与 `driftRatio` / `armorRatio` 同规）。
   // L2 弱光带：**暗流**
   { name: '弱光带', sub: 'TWILIGHT', mech: '暗流', tip: '水流在缓慢旋转，鱼群和你都会被带偏',
     o2Max: 100, drain: 1.35, dropCap: 90,  toll: 20, vis: 0.92, depthTop: 200,   depthBot: 1000,
-    ventPush: 0,  current: 34, pressure: 0,    surge: false, tint: 0x1d6b7a, motes: 48,  hpMul: 1.35, cntMul: 1.25, dashMul: 1.0, driftRatio: 0.12, armorRatio: 0.05, orbitRatio: 0.12 },
+    ventPush: 0,  current: 34, pressure: 0,    surge: false, tint: 0x1d6b7a, motes: 48,  hpMul: 1.35, cntMul: 1.25, dashMul: 1.0, driftRatio: 0.12, armorRatio: 0.05, orbitRatio: 0.12,
+    // V6.82 第一批：裂体（死亡分裂）+ 自爆螺（贴脸自爆）+ 孵卵囊（先点后排）。
+    //   ⚠️ 孵卵囊也放 L2：它的到达率是 **92%**，而 L4/L5 只有 8% / 0%
+    //      （见 `tools/census_enemies.js` 的整局普查）。只写在深层的生物
+    //      = 玩家大概率遇不到 —— V6.79 盘旋猎手已经栽过一次，见交接文档 §8。
+    mix: { splitter: 0.08, kamikaze: 0.07, brood: 0.05 } },
   // L3 午夜带：**涌流**
   { name: '午夜带', sub: 'MIDNIGHT', mech: '涌流', tip: '它们从同一个方向压上来 —— 退路只有一条',
     o2Max: 85,  drain: 1.80, dropCap: 110, toll: 25, vis: 0.68, depthTop: 1000,  depthBot: 4000,
-    ventPush: 0,  current: 0,  pressure: 0,    surge: true,  tint: 0x352f6b, motes: 70,  hpMul: 1.80, cntMul: 1.50, dashMul: 1.1, driftRatio: 0.18, armorRatio: 0.09, orbitRatio: 0.12 },
+    ventPush: 0,  current: 0,  pressure: 0,    surge: true,  tint: 0x352f6b, motes: 70,  hpMul: 1.80, cntMul: 1.50, dashMul: 1.1, driftRatio: 0.18, armorRatio: 0.09, orbitRatio: 0.12,
+    // V6.82 第一批：裂体 + 盾鳐（要绕后）+ 孵卵囊（要优先点掉）+ 自爆螺 + 牧群者。
+    //   ⚠️ 牧群者**必须出现在 L3**：它原本只在 L4/L5，而普查显示 L4 只有 8% 到达、
+    //      L5 是 0% ⇒ 平均每局只遇到 **0.2 只**，等于没做。加进 L3（到达率 42%）后才可见。
+    mix: { splitter: 0.06, bulwark: 0.06, brood: 0.06, kamikaze: 0.05, herder: 0.04 } },
   // L4 热泉带：**热泉**
   { name: '热泉带', sub: 'HYDROTHERMAL', mech: '热泉', tip: '上升的热流会顶开你 —— 停不住',
     o2Max: 70,  drain: 2.40, dropCap: 135, toll: 30, vis: 0.60, depthTop: 4000,  depthBot: 6000,
-    ventPush: 190, current: 0, pressure: 0,   surge: false, tint: 0x7a3a16, motes: 90,  hpMul: 2.40, cntMul: 1.80, dashMul: 1.2, driftRatio: 0.15, armorRatio: 0.11, orbitRatio: 0.08 },
+    ventPush: 190, current: 0, pressure: 0,   surge: false, tint: 0x7a3a16, motes: 90,  hpMul: 2.40, cntMul: 1.80, dashMul: 1.2, driftRatio: 0.15, armorRatio: 0.11, orbitRatio: 0.08,
+    // V6.82 第一批：盾鳐（绕后）+ 孵卵囊（点杀）+ 牧群者（先杀 buff 源）+ 裂体。
+    mix: { splitter: 0.05, bulwark: 0.07, brood: 0.05, herder: 0.06 } },
   // L5 深渊带：**压力**
   { name: '深渊带', sub: 'THE ABYSS', mech: '压力', tip: '每过一波，舱体再压掉一截氧气上限',
     o2Max: 60,  drain: 3.00, dropCap: 160, toll: 0,  vis: 0.46, depthTop: 6000,  depthBot: 11000,
-    ventPush: 0,  current: 0,  pressure: 0.06, surge: false, tint: 0x1a1740, motes: 110, hpMul: 3.20, cntMul: 2.10, dashMul: 1.3, driftRatio: 0.22, armorRatio: 0.14, orbitRatio: 0.14 },
+    ventPush: 0,  current: 0,  pressure: 0.06, surge: false, tint: 0x1a1740, motes: 110, hpMul: 3.20, cntMul: 2.10, dashMul: 1.3, driftRatio: 0.22, armorRatio: 0.14, orbitRatio: 0.14,
+    // V6.82 第一批：盾鳐 + 孵卵囊 + 牧群者。**不给 self-destruct**：L5 已经是压死人的层，
+    //   再叠自爆就是"数值死刑"（参见 §3.4 的 2026-10-11 修正），压力应该来自上限与速率。
+    mix: { bulwark: 0.08, brood: 0.06, herder: 0.08 } },
 ]
 
 /**
@@ -770,6 +785,13 @@ export const TEX_BASE_ROT: Partial<Record<Kind, number>> = {
   drift: Math.PI,
   armor: Math.PI,        // 重甲：素材同规，头朝左
   orbit: Math.PI,        // V6.79 盘旋猎手：素材同规，头朝左
+  // ---- V6.82 第一批新生物：素材同规，全部头朝左 ----
+  splitter: Math.PI,
+  shard: Math.PI,
+  bulwark: Math.PI,
+  brood: Math.PI,
+  kamikaze: Math.PI,
+  herder: Math.PI,
 }
 
 /** 敌人贴图 key（渲染层按它取资源）。DiveScene.ts:1486 / 1572 */
@@ -779,5 +801,58 @@ export const ENEMY_TEX: Record<Kind, string> = {
   drift: 'f_drift',
   armor: 'f_armor',      // V6.62 第 4 类重甲
   orbit: 'f_orbit',      // V6.79 第 5 类盘旋猎手
+  // ---- V6.82 第一批（每加一行 = `tools/sync_art.py` 欠一行，闸门会红）----
+  splitter: 'f_splitter',
+  shard: 'f_shard',
+  bulwark: 'f_bulwark',
+  brood: 'f_brood',
+  kamikaze: 'f_kamikaze',
+  herder: 'f_herder',
   boss: 'f_dash',
 }
+
+/**
+ * **刷怪配比 → 权重表**（V6.82）。
+ *
+ * 为什么要把旧的"顺序阈值 if/else"换成这个：
+ *
+ * 旧写法是一条 `r < a` / `r < a+b` / `r < a+b+c` 的链子 —— 语义等价于
+ * 「swarm 拿残差 `1 − Σ其他`，其余按原始值分」。**只要 Σ其他 ≤ 1，两者逐位一致**。
+ * 但 Σ > 1 时旧写法是**先到先得**：排在前面的桶把区间吃满，排在后面的桶
+ * **一次也刷不出来，而且不报错**。L5 第 4 波就是这样（`drift .22 + dash .75×1.3 = 1.195`）
+ * ⇒ 那一波 `armor` / `orbit` 出现率是 **0**（V6.79 记过这个坑）。
+ *
+ * 新写法 = **归一化加权抽样**：
+ * - `swarm` 仍是残差 `max(0, 1 − Σ其他)` ⇒ **不加新生物时各带配比与 V6.79 完全相同**；
+ * - Σ > 1 时按**权重比例**分摊，而不是让尾部饿死。
+ *
+ * ⚠️ 这只是"怎么抽签"，**不改变任何数值**（HP / 速度 / 数量都在别处）。
+ * ⚠️ 权重表里出现但该层没有的 kind 直接不参与 —— 加生物不需要动别的层。
+ */
+export function spawnWeights(L: LayerDef, wave: WaveShape): Array<[Kind, number]> {
+  const out: Array<[Kind, number]> = [
+    ['drift', L.driftRatio],
+    ['dash', wave.dashRatio * L.dashMul],
+    ['armor', L.armorRatio],
+    ['orbit', L.orbitRatio],
+  ]
+  for (const k of Object.keys(L.mix ?? {}) as EnemyKind[]) {
+    out.push([k, L.mix![k] ?? 0])
+  }
+  let sum = 0
+  for (const [, w] of out) if (w > 0) sum += w
+  // ★ `swarm` = **保底权重**，不是纯残差。
+  //   纯残差（`max(0, 1 − Σ)`）在 L4 后段 / L5 全程会掉到 0 ⇒ 高压层退化成
+  //   **纯 dash 走廊**，"群"这条轴（AoE 需求）整段消失。给一个下限让基线压力永远在场。
+  out.unshift(['swarm', Math.max(SWARM_MIN, 1 - sum)])
+  return out.filter(([, w]) => w > 0)
+}
+
+/**
+ * `swarm` 权重的**下限**（0.20）。
+ *
+ * 依据：`swarm` 是唯一"量大、血薄、直线压上"的基线压力，是 AoE 需求的来源。
+ * 旧口径下 L5 第 1 波起 Σ其他 就 > 1 ⇒ 它的实际占比是 **0**，玩家在深渊带
+ * 从头到尾看不到"鱼群"，只剩 dash 冲锋 —— 与计划书 §3.4「L5 = 混编」矛盾。
+ */
+export const SWARM_MIN = 0.20
