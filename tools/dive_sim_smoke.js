@@ -1260,6 +1260,109 @@ console.log('\n[7] 元系统（沉淀 / 解锁 / 永久强化 / 图鉴）')
     w.diveDeeper()
     assert.strictEqual(w.eShots.length, 0, '换层应清空敌弹')
   })
+
+  // =======================================================================
+  // V6.83 四条"机制化"的属性卡
+  //   ★ 背景：24 张被动里原本 11 张是**纯 +X%**（"买了只有数字变化"）。
+  //     这一组把它们改成**条件下生效**，判据是"玩家因此要做一个新决策"。
+  //   ★★ 所有换算都按**平均强度等价**做过（见 `pool.ts` 每张卡的注释）
+  //      ⇒ 这一组断言不测"更强/更弱"，只测**机制真的在按条件生效**。
+  // =======================================================================
+
+  check('V6.83 机制卡·循环泵：**越缺氧回氧越快**（满氧不回，空氧最快）', () => {
+    const w = rig(5301)
+    w.addStat('regen', 0.4)
+    const drainAt = (frac) => {
+      w.o2 = w.o2Max * frac
+      const b = w.o2
+      w.drainOxygen(1.0)
+      return b - w.o2            // 净耗氧
+    }
+    const full = drainAt(1.0), half = drainAt(0.5), low = drainAt(0.12)
+    assert.ok(full > half && half > low,
+      `净耗氧应随缺氧加深而**减少**（满 ${full.toFixed(2)} / 半 ${half.toFixed(2)} / 低 ${low.toFixed(2)}）`)
+    assert.ok(full - low > 0.5, `差距要明显（满-低 = ${(full - low).toFixed(2)}）`)
+  })
+
+  check('V6.83 机制卡·循环泵：**没买卡时回氧仍为 0**（新维度默认值必须为 0）', () => {
+    const w = rig(5302)
+    assert.strictEqual(w.st.regen, 0, '前置：开局 regen 应为 0')
+    const at = (frac) => { w.o2 = w.o2Max * frac; const b = w.o2; w.drainOxygen(1.0); return b - w.o2 }
+    assert.ok(Math.abs(at(1.0) - at(0.12)) < 1e-9,
+      '没有这张卡时，耗氧不该随氧气水平变化（否则是 NaN/串味的静默泄漏）')
+  })
+
+  check('V6.83 机制卡·耐压装甲：**受击后窗口内**额外减伤', () => {
+    const w = rig(5303)
+    w.addStat('armor', 0.04)
+    w.addStat('plateArmor', 0.10)
+    // ⚠️ 必须把 dodge 压成负数：`damagePlayer` 里 `plateT > 0` 会给 +0.4 闪避，
+    //    不处理的话"窗口内"那一组会随机闪掉一半样本，测出来像是"减伤生效了"。
+    w.st.dodge = -10
+    const hit = (plate) => {
+      w.o2 = w.o2Max
+      w.plateT = plate
+      const b = w.o2
+      w.damagePlayer(100, 1, 0)
+      return b - w.o2
+    }
+    const cold = hit(0), hot = hit(1.0)
+    assert.ok(hot < cold * 0.96,
+      `受击后窗口内应更抗（常态扣 ${cold.toFixed(1)} vs 窗口内扣 ${hot.toFixed(1)}）`)
+  })
+
+  check('V6.83 机制卡·弱点解析：**满血敌人**吃额外暴击', () => {
+    const w = rig(5304)
+    // 直接写 `st`（绕过 `addStat` 的上限钳制），让判定变成确定性的：
+    //   满血 ⇒ 必暴；受过伤 ⇒ 必不暴。
+    w.st.crit = 0
+    w.st.fullHpCrit = 1
+    w.st.dmg = 0
+    const dmgOf = (hp) => {
+      const e = mke('swarm', w.px + 500, w.py, { hp, maxHp: 100, r: 19 })
+      const b = e.hp
+      w.hurt(e, 50, 'bullet')
+      return b - e.hp
+    }
+    const full = dmgOf(100), hurt = dmgOf(50)
+    assert.ok(full > hurt * 1.5,
+      `满血敌人应吃额外暴击（满血 ${full.toFixed(1)} vs 已受伤 ${hurt.toFixed(1)}，` +
+      `暴击倍率应为 ${(1 + w.st.critMul).toFixed(2)}）`)
+  })
+
+  check('V6.83 机制卡·流体规避：**静止计时**按输入维护（想动但动不了不算静止）', () => {
+    const w = rig(5305)
+    for (let i = 0; i < 30; i++) w.update(DT, { dx: 1, dy: 0, burst: false })
+    assert.strictEqual(w.stillT, 0, '有输入时静止计时必须归零')
+    for (let i = 0; i < Math.ceil(1.3 / DT); i++) w.update(DT, { dx: 0, dy: 0, burst: false })
+    assert.ok(w.stillT >= 1.2,
+      `静止 1.3 秒后 \`stillT\` 应 ≥ 1.2（实测 ${w.stillT.toFixed(2)}）`)
+    // 一旦重新动起来立刻清零（否则"停过一次就永久受益"）
+    w.update(DT, { dx: -1, dy: 0, burst: false })
+    assert.strictEqual(w.stillT, 0, '重新移动应立即清零')
+  })
+
+  check('V6.83 机制卡·流体规避：**静止时闪避明显更高**（多条样本统计）', () => {
+    // 闪避是概率判定 ⇒ 单次测不出来。用 60 个不同 seed 统计"被闪掉的次数"。
+    const dodged = (still) => {
+      let n = 0
+      for (let k = 0; k < 60; k++) {
+        const w = rig(5400 + k * 7)
+        w.st.dodge = 0.2
+        w.st.stillDodge = 0.6
+        w.plateT = 0
+        w.stillT = still ? 2.0 : 0
+        w.o2 = w.o2Max
+        const b = w.o2
+        w.damagePlayer(10, 1, 0)
+        if (b - w.o2 < 1e-6) n++
+      }
+      return n
+    }
+    const moving = dodged(false), still = dodged(true)
+    assert.ok(still > moving + 5,
+      `静止时闪避应明显更高（移动 ${moving}/60 vs 静止 ${still}/60）`)
+  })
 }
 
 // ---------------------------------------------------------------------------

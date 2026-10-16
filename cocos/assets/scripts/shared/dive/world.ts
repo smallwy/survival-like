@@ -434,6 +434,34 @@ const EHIT_R = 13
 const EBLAST_R = 34
 const EBLAST_DMG = 12
 
+// ---------------------------------------------------------------------------
+// V6.83 四条"机制化"卡的运行时参数
+// ---------------------------------------------------------------------------
+
+/**
+ * **循环泵**（`s_regen`）：回氧与缺氧程度的换算系数。
+ *
+ * 曲线 = `regen × REGEN_MISS_K × miss`，`miss = 1 − o2/o2Max`。
+ * ⇒ 满氧时回 0、空氧时回 `2.5 × regen`。
+ *
+ * ★ 2.5 是**按平均值反推**的：要让"平均回氧量"与改之前的恒定 +0.4/s 相当，
+ *   需要 `K = 1 / E[miss]`；而玩家实际大部分时间在 50%~75% 氧之间
+ *   ⇒ `E[miss] ≈ 0.4` ⇒ `K ≈ 2.5`。
+ * ⚠️ **这个 2.5 依赖"玩家平均氧气水平"这个体感假设，是四条里最需要实机校准的一个。**
+ *    偏高 ⇒ 中后期氧气永远满（把 `drainOxygen` 的意义架空）；
+ *    偏低 ⇒ 这张卡变成"没买"。
+ */
+const REGEN_MISS_K = 2.5
+
+/**
+ * **流体规避**（`s_dodge`）：判定"静止"的门槛（s）。
+ *
+ * 取 1.2s 的依据：玩家 220px/s ⇒ 1.2 秒能跑 264px（大半个屏幕宽）。
+ * 门槛再低（<0.6）就变成"每次微调都白拿闪避"，失去了"停下来是一个决定"的意思；
+ * 再高（>2.0）在与热泉带对抗时基本不可能达成。
+ */
+const STILL_T = 1.2
+
 /**
  * **先规格，后出图**的落点（本专家的工作方式）：
  * 五种的**形状语汇**（给插画岗的交接）。
@@ -630,6 +658,12 @@ export class DiveWorld implements ShopTarget {
   noHitT = 0
   /** 受击后闪避加成剩余时长（「静默装甲」） */
   plateT = 0
+  /**
+   * **连续静止时长**（s）。`s_dodge` 流体规避的判定依据。
+   * 每帧由 `movePlayer` 维护：有输入归零、无输入累加。
+   * ⚠️ 它是**世界状态**而不是 `Stats`（Stats 只存卡的数值），与 `plateT`/`noHitT` 同类。
+   */
+  stillT = 0
   hurtFlash = 0
   hurtDirX = 0
   hurtDirY = 0
@@ -1243,6 +1277,10 @@ export class DiveWorld implements ShopTarget {
       // ---- 缠索（V6.79b）：只压**移动速度**，不压射速、不动氧气、不扣氧 ----
       // 这就是"一条压力只配一个解"：它的解只有一个 —— 往外游。
       * (this.tetherSrc ? TETHER_SLOW : 1)
+    // ★ V6.83 流体规避：维护"连续静止时长"。判据用**输入**而不是位移 ——
+    //   缠索/减速下"想动但动不了"不该算静止（那会让这张卡在负面状态下白送收益）。
+    if (dx || dy) this.stillT = 0
+    else this.stillT += dt
     if (dx || dy) {
       const l = Math.hypot(dx, dy)
       this.aim = Math.atan2(dy, dx)
@@ -1904,14 +1942,21 @@ export class DiveWorld implements ShopTarget {
 
   /** 对玩家造成一次**一次性**打击（Boss 震击）。DiveScene.ts:1985-2002 */
   damagePlayer(amount: number, dirX: number, dirY: number): void {
-    const dodge = Math.min(0.9, this.st.dodge + (this.plateT > 0 ? 0.4 : 0))
+    // ★ V6.83 流体规避：**静止够久**时额外闪避（"停得住才灵活"）。
+    const dodge = Math.min(0.9, this.st.dodge
+      + (this.plateT > 0 ? 0.4 : 0)
+      + (this.stillT >= STILL_T ? this.st.stillDodge : 0))
     if (this.rng.chance(dodge)) {
       this.emit({ t: 'dodge', x: this.px, y: this.py })
       this.emit({ t: 'float', x: this.px, y: this.py - 34, text: '闪避', color: UI.cyanHi, size: 16 })
       this.plateT = 1.5
       return
     }
-    const d = amount * (1 - this.st.armor)
+    // ★ V6.83 耐压装甲：**受击后 2 秒内额外减伤**（`plateT` 是"刚被打过"的现成计时器）。
+    //   ⚠️ 必须在**扣血之前**读 `plateT` —— 这一击本身会把它重置成 1.5s，
+    //      若放在赋值之后读，就变成"永远处于减伤窗口内"（每一下都吃到额外减免）。
+    const ar = Math.min(0.9, this.st.armor + (this.plateT > 0 ? this.st.plateArmor : 0))
+    const d = amount * (1 - ar)
     this.o2 -= d
     if (this.o2 <= 0) { this.o2 = 0; this.showResult(false); return }
     this.hurtFlash = 0.35
@@ -2268,7 +2313,11 @@ export class DiveWorld implements ShopTarget {
     //   ⚠️ 放在最前面（连 `crit` 都不掷）：没有"打中了但不疼"这种中间态，
     //      要么这一击不存在，要么照常结算。
     if (e.kind === 'burrower' && e.phase === 'rest') return
-    const crit = this.rng.chance(this.st.crit)
+    // ★ V6.83 弱点解析：对**满血**敌人额外暴击（"开新刀最疼，补刀不给力"）。
+    //   ⚠️ 用 `hp >= maxHp` 而不是 `hp === maxHp`：浮点叠加/回血可能让它差一点点，
+    //      而"差 0.0001 就不触发"是**不报错的静默失灵**。
+    const critRate = this.st.crit + (e.hp >= e.maxHp ? this.st.fullHpCrit : 0)
+    const crit = this.rng.chance(critRate)
     let d = dmg * this.dmgMulNow()
     if (crit) d *= 1 + this.st.critMul
     // ---- V6.77d 狩猎本能：对**已被控住**的目标加伤 ----
@@ -3112,7 +3161,12 @@ export class DiveWorld implements ShopTarget {
   drainOxygen(dt: number): void {
     let net = this.layer().drain
     if (this.hasRelic('gluttony')) net += 0.6
-    net -= this.st.regen
+    // ★ V6.83 循环泵：回氧**与缺氧程度成正比**（0 氧时 2.5×，满氧时 0）。
+    //   把"低氧"从纯危险态变成一种**资源态** —— 与 `echo_heart`（低氧增伤）是同一套语汇。
+    //   ⚠️ `regen === 0`（没买这张卡）时整项仍为 0，与加卡之前逐帧一致。
+    net -= this.st.regen * (this.st.regen > 0
+      ? REGEN_MISS_K * (1 - this.o2 / this.o2Max)
+      : 0)
     // 持久酸池：站在自己的酸池里，环境氧耗减半。V6.29 氧耦合 C（场地换氧）
     if (net > 0 && this.weapons.some(w => w.id === 'acid_fd')
       && this.acids.some(a => dist(this.px, this.py, a.x, a.y) < a.r)) {

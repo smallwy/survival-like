@@ -465,6 +465,11 @@ export const STAT_CAP: Partial<Record<keyof Stats, number>> = {
   //     1.0（2 倍）已接近上限，写死 1.0。
   //   · `turretSpeed` —— 再高炮塔就是"瞬间转向"，转座动画失去意义（手感反而更差）。
   slowDmg: 0.9, bulletSpd: 1.0, turretSpeed: 1.2, armorPen: 0.8,
+  // ---- V6.83 四条机制卡的条件值上限 ----
+  // ⚠️ 这三条封顶的理由是同一个：**它们是"叠加在基础值之上的额外减免/增益"**。
+  //    不封顶的话，两张同类卡 + 遗物就能把"条件满足时"推到接近免疫
+  //    —— 那不是"机制强"，而是**这个条件变成了唯一玩法**。
+  plateArmor: 0.40, stillDodge: 0.50, fullHpCrit: 0.50,
 }
 
 /**
@@ -485,6 +490,10 @@ export const NEW_STATS = (): Stats => ({
   // （`streak` 乘 1、`slowDmg` 不触发、`bulletSpd` 不缩放、`turretSpeed` 不缩放、
   //  `armorPen` 不减甲）⇒ 老存档 / 冒烟基线不会因为"多了几个键"而变数。
   streak: 0, slowDmg: 0, bulletSpd: 0, turretSpeed: 0, armorPen: 0,
+  // V6.83：三条机制卡的**条件值**同理 —— 0 = "没买过这张卡"，
+  // 于是"没有这张卡"的玩家行为与加卡之前**逐帧一致**（同一个规矩）。
+  // ⚠️ 漏掉这里就是 `undefined` 参与算术 ⇒ `NaN` 一路传染（不报错）。
+  plateArmor: 0, stillDodge: 0, fullHpCrit: 0,
 })
 
 /** 属性的显示元数据（顺序 = 商店属性面板排列顺序）。DiveScene.ts:346-360 */

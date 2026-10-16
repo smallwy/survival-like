@@ -174,27 +174,42 @@ export const CARD_POOL: UpgradeDef[] = [
     cost: 30,
     apply: s => s.addStat('rate', 0.10),
   },
-  { id: 's_crit', name: '弱点解析', desc: '暴击率 +8%', kind: 'stat',
+  { id: 's_crit', name: '弱点解析', desc: '暴击 +2%；对**满血**敌人额外 +20%', kind: 'stat',
     cost: 28,
-    apply: s => s.addStat('crit', 0.08),
+    // ★ V6.83 机制化：从"恒定 +8%"改成"对没挨过打的目标特别狠"。
+    //   玩家的决策变了：**优先开新目标**（补刀不给力）—— 满屏都是"刚刷新"的敌人时收益最高。
+    //   基础值 8% → 2%+20%：按"约 30% 的命中打在满血目标上"折算 ≈ 0.02+0.30×0.20 = 0.08 ✓ 等价。
+    apply: s => { s.addStat('crit', 0.02); s.addStat('fullHpCrit', 0.20) },
     dead: s => s.st.crit >= 0.75,
   },
   { id: 's_range', name: '声场延伸', desc: '射程 +15%', kind: 'stat',
     cost: 26,
     apply: s => s.addStat('range', 0.15),
   },
-  { id: 's_armor', name: '耐压装甲', desc: '受到的伤害 −8%', kind: 'stat',
+  { id: 's_armor', name: '耐压装甲', desc: '伤害 −4%；**每次受击后 2 秒内额外 −10%**', kind: 'stat',
     cost: 30,
-    apply: s => s.addStat('armor', 0.08),
+    // ★ V6.83 机制化：从"恒定 −8%"改成"**越挨打越硬**"。
+    //   玩家的决策变了：**连续挨打时更抗** ⇒ 敢在怪堆里多撑一会儿再做决定。
+    //   基础 8% → 4%+10%：按"约 40% 时间处于受击后窗口内"折算 ≈ 0.04+0.40×0.10 = 0.08 ✓ 等价。
+    apply: s => { s.addStat('armor', 0.04); s.addStat('plateArmor', 0.10) },
     dead: s => s.st.armor >= 0.6,
   },
-  { id: 's_dodge', name: '流体规避', desc: '一次性打击闪避 +6%', kind: 'stat',
+  { id: 's_dodge', name: '流体规避', desc: '闪避 +3%；**静止 1.2 秒后额外 +12%**', kind: 'stat',
     cost: 28,
-    apply: s => s.addStat('dodge', 0.06),
+    // ★ V6.83 机制化：从"恒定 +6%"改成"**停得住才灵活**"。
+    //   ★ 这条与 L4 热泉带的「停不住」是**对着来的** —— 玩家第一次有了"想停"的理由，
+    //     而环境在推着他走。两个机制的张力就是这张卡的价值。
+    //   基础 6% → 3%+12%：大多时间在动 ⇒ 平均 ≈ 0.03+0.25×0.12 = 0.06 ✓ 等价。
+    apply: s => { s.addStat('dodge', 0.03); s.addStat('stillDodge', 0.12) },
     dead: s => s.st.dodge >= 0.6,
   },
-  { id: 's_regen', name: '循环泵', desc: '每秒回氧 +0.4', kind: 'stat',
+  { id: 's_regen', name: '循环泵', desc: '**回氧与缺氧程度成正比**（满氧不回，缺氧越多回得越快）', kind: 'stat',
     cost: 34,
+    // ★ V6.83 机制化：从"恒定 +0.4/s"改成"**越缺氧回得越快**"。
+    //   ★★ 这条与本作**唯一血条就是氧气**是同一件事的两面：它把"低氧"从一个纯粹的
+    //      危险态变成了**一种资源态** —— 与遗物 `echo_heart`（低氧增伤）形成组合技。
+    //   `apply` 仍是加 `regen`（那里存的是"满系数时的速率"），
+    //   真正的曲线在 `drainOxygen` 里，见 `REGEN_MISS_K`。
     apply: s => s.addStat('regen', 0.4),
   },
   { id: 's_luck', name: '打捞直觉', desc: '鱼骨换钱 +15%', kind: 'stat',
