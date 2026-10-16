@@ -45,12 +45,12 @@ import type {
   DamageCause,
 } from './types'
 import {
-  O2, BONE_O2, PLAYER, WEAPON_DEF, STAT_CAP, NEW_STATS, RELIC_DEF, RELIC_SLOTS,
+  O2, BONE_O2, BONE_COIN, BONE_RAIN, PLAYER, WEAPON_DEF, STAT_CAP, NEW_STATS, RELIC_DEF, RELIC_SLOTS,
   LAYERS, LAYER_WAVES, SEAT_MOUNTS, HULL_H, SUB_D, MOUNT_BASE_R, TURRET_OUT,
   TURRET_SPIN, TURRET_OMEGA_IDLE, TURRET_OMEGA_TRACK, STREAK_MAX_LV,
   SEAT_SWAY_MAX, SEAT_SWAY_FOLLOW, SEAT_SWAY_DECAY,
-  MAX_SEATS, BASE_SEATS, REROLL_BASE, REROLL_STEP, OFFER_N, BONE, ENEMY_TEX, TEX_BASE_ROT, weaponFamily,
-  spawnWeights,
+  MAX_SEATS, BASE_SEATS, REROLL_BASE, REROLL_STEP, OFFER_N, BONE, ENEMY_TEX, BOSS_TEX, TEX_BASE_ROT, weaponFamily,
+  spawnWeights, ECO_BAL, COST_GROWTH, ECO_CAP_REF,
 } from './tables'
 import { CARD_POOL } from './pool'
 import { Rng, clamp, dist, wrapAngle } from './rng'
@@ -159,8 +159,18 @@ const NET_CHARM_T = 4.0
 const ARMOR_HP_MUL = 6
 const ARMOR_SPD_MUL = 0.4
 const ARMOR_R = 30
-/** 护甲减伤比例。**爆炸 / 穿透无视它** —— 这是逼玩家换武器的唯一手段 */
-const ARMOR_REDUCE = 0.6
+/** 挡击反馈的**每只节流**（s，V6.84）。高射速武器打重甲会每发都挡，不节流 = 满屏 clang 事件 */
+const CLANG_CD = 0.14
+/**
+ * 护甲减伤比例。**爆炸 / 穿透无视它** —— 这是逼玩家换武器的唯一手段。
+ *
+ * V6.84：0.6 → 0.75。用户试玩反馈④「打不动，完全没有想法换武器」——
+ *   0.6 的墙在混战里读不出"这是墙"（掉血只是慢了一点），而对策武器
+ *   （爆炸 / 穿透）一直存在却从没被需要过。配合 `clang` 挡击事件（火花 + 弹开），
+ *   减伤一档要同时满足：① 普通武器打上去**明显变慢** ② 屏幕上看得出**子弹被弹开**。
+ * ⚠️ 只抬减伤**不加反馈** = 玩家只会觉得"这游戏伤害坏了"；两者必须一起落地。
+ */
+const ARMOR_REDUCE = 0.75
 
 /**
  * **盘旋猎手**（V6.79）：不正面冲，**切向绕圈 + 半径收缩**（螺旋），贴身才咬。
@@ -776,6 +786,12 @@ export class DiveWorld implements ShopTarget {
   // ---- 商店 ----
   offers: UpgradeDef[] = []
   bank = 0
+  /**
+   * **币值动态乘子**（V6.85 通用数值平衡系统）。`1` = 基准；由 `economyGuard()` 每进一次商店调一档。
+   * ⚠️ **只作用于拾取端**（`updateBones` 里 `bank += coin × … × coinMul`）——掉落端与
+   *    `droppedThisWave` 用的都是**原始币值**，所以氧气供给与它完全无关（止损线②）。
+   */
+  coinMul = 1
   locked: boolean[] = []
   sold: boolean[] = []
   rerollCost = 0
@@ -859,6 +875,7 @@ export class DiveWorld implements ShopTarget {
     this.tetherSrc = null; this.breakT = 0; this.tetherImmune = 0
     this.waveInLayer = 0
     this.mult = 1.0
+    this.coinMul = 1                    // V6.85：动态币值乘子换局归零（否则上一局的平衡会被继承）
     this.bossDown = false
     this.bossesDown.clear()
     this.st = NEW_STATS()
@@ -1036,6 +1053,10 @@ export class DiveWorld implements ShopTarget {
       //   见 `Enemy.passes` 的注释。
       passes: kind === 'lancer' ? 0 : undefined,
     }))
+    // ★ V6.84 精英出生通告：出生那一刻就抛事件（渲染层画 announce 环 + 名牌）。
+    //   "这一波有只特殊的"如果不在出生时说，玩家只会把它当普通怪打掉 ——
+    //   事后的 ×4 掉落再丰厚，也读不出"刚才那波不一样"（反馈⑤：没有「哎？」）。
+    if (elite) this.emit({ t: 'eliteSpawn', x, y, r: B.r, kind })
     this.eid++
     this.spawned[kind] = (this.spawned[kind] ?? 0) + 1
   }
@@ -1157,7 +1178,7 @@ export class DiveWorld implements ShopTarget {
       fx: -1, fy: 0,
       slowT: 0, slowMul: 1,
       // V6.62：硬控 / 护甲 / 精英默认全关 —— 只有对应分支才打开
-      rootT: 0, rootImmune: 0, armor: 0, elite: false,
+      rootT: 0, rootImmune: 0, clangT: 0, armor: 0, elite: false,
       burnT: 0, burnDps: 0, burnTick: 0,
       charmT: 0, charmTick: 0,
       ...p,
@@ -1185,8 +1206,13 @@ export class DiveWorld implements ShopTarget {
       // 鮟鱇女王用**琥珀**（诱饵光的颜色，与它的机制同源）；守望者保持紫。
       color: bk === 'angler' ? UI.amber : UI.violet,
       speed: (bk === 'angler' ? 30 : 46) * (this.hasRelic('abyss_mark') ? 1.1 : 1),
-      tex: ENEMY_TEX.boss,
-      texRot: TEX_BASE_ROT.dash ?? 0,
+      // V6.87：两个 Boss **各有自己的真图**（V6.82–V6.86 是共用 `f_dash`，
+      //   图鉴里还得借映 `f_drift`/`f_orbit` ⇒ 玩家看到的是别的生物）。
+      // ⚠️ 基准角不走 `TEX_BASE_ROT` —— 那张表的键类型是 `Kind`，两个 Boss 同属
+      //   `kind:'boss'` 塞不进去（硬塞要动 `Kind` 联合类型，会连锁）。
+      //   两张新图与 V6.82 那批同规（头朝左）⇒ 基准角 = π。
+      tex: BOSS_TEX[bk],
+      texRot: Math.PI,
     }))
     this.spawned.boss = (this.spawned.boss ?? 0) + 1
   }
@@ -1413,6 +1439,7 @@ export class DiveWorld implements ShopTarget {
       // V6.62 硬控：定身与它的免疫窗口都在这里递减（免疫比定身长，所以两个独立计时）
       if (e.rootT > 0) { e.rootT -= dt; if (e.rootT < 0) e.rootT = 0 }
       if (e.rootImmune > 0) { e.rootImmune -= dt; if (e.rootImmune < 0) e.rootImmune = 0 }
+      if (e.clangT > 0) { e.clangT -= dt; if (e.clangT < 0) e.clangT = 0 }
       if (e.charmT > 0) { e.charmT -= dt; if (e.charmT < 0) e.charmT = 0 }
       if (e.burnT > 0) {
         e.burnT -= dt
@@ -2134,18 +2161,26 @@ export class DiveWorld implements ShopTarget {
    */
   private openNet(b: Bullet): void {
     if (!b.net) return
+    // 先圈定目标（不施加效果）—— 渲染层需要 `catch` 才能把"打空的网"和
+    // "网住一圈的网"画成两句不同的话（V6.84 反馈②）。
+    const targets: Enemy[] = []
+    for (const e of this.enemies) {
+      if (!e.alive) continue
+      if (e.charmT > 0) continue                  // 已是友方的别再网一遍
+      if (dist(b.x, b.y, e.x, e.y) < NET_R + e.r) targets.push(e)
+    }
     // 视觉先于伤害：先抛事件（渲染层这一帧就能画网），再结算效果
     // `ang` = 抛出方向：网是柔性体，张开形状沿运动方向拉长（不是圆），渲染层需要它
-    this.emit({ t: 'burst', x: b.x, y: b.y, r: NET_R, ang: Math.atan2(b.vy, b.vx) })
+    this.emit({ t: 'burst', x: b.x, y: b.y, r: NET_R, ang: Math.atan2(b.vy, b.vx), catch: targets.length })
+    // 网住 ≥2 只时飘字 —— "网住一圈地方"这句话得让玩家看见（单只不飘：那会吵）。
+    if (targets.length >= 2) {
+      this.emit({ t: 'float', x: b.x, y: b.y - 30, text: `网住 ×${targets.length}`, color: UI.amber, size: 18 })
+    }
     // ★ **网收走敌方投射物**（V6.83）。网是"控制一片区域"，把飞进区域的弹一并卷走
     //   与它的语义完全一致 —— 而且这让"网"在弹幕场景里多了一个用途，
     //   而它原本只有一个（定身）。
     this.clearEShots(b.x, b.y, NET_R, 'net')
-    for (const e of this.enemies) {
-      if (!e.alive) continue
-      if (e.charmT > 0) continue                  // 已是友方的别再网一遍
-      if (dist(b.x, b.y, e.x, e.y) < NET_R + e.r) this.applyNet(b.net, e)
-    }
+    for (const e of targets) this.applyNet(b.net, e)
   }
 
   /**
@@ -2401,6 +2436,14 @@ export class DiveWorld implements ShopTarget {
     //    V6.82 盾鳐同规 —— 方向盾被挡时也是钢灰，玩家据此学会"这个方向打不动，换个角度"。
     const hitCol = (blocked || shielded) ? UI.steel : (crit ? UI.violet : e.color)
     this.emit({ t: 'hit', x: e.x, y: e.y, r: e.r, color: hitCol, crit, dmg: d, nx, ny, cause })
+    // ★ V6.84 挡击反馈：被护甲拦下时额外抛 `clang`（渲染层画"子弹被弹开"：
+    //   钢灰火花朝玩家方向倒卷 + 小冲击环）。命中事件本身已换成钢灰色，
+    //   但"变色"在混战里不够 —— 玩家要看见**形状**（弹开）才知道该换武器。
+    //   ⚠️ 按 `e.clangT` 节流（见 `CLANG_CD`）：机枪 8 发/s 全挡时不节流就是一片雪花。
+    if (blocked && e.clangT <= 0) {
+      e.clangT = CLANG_CD
+      this.emit({ t: 'clang', x: e.x, y: e.y, r: e.r })
+    }
     if (crit) {
       // 命中震屏：只给暴击（普通命中频率太高，每次都震会变廉价且让人晕）
       this.emit({ t: 'shake', ms: 90, intensity: 0.0022 })
@@ -2532,7 +2575,7 @@ export class DiveWorld implements ShopTarget {
     const isBoss = e.kind === 'boss'
     const size = isBoss ? 44 : clamp(e.r * 1.7, 14, 30)
     const o2 = isBoss ? 24 : Math.max(2, Math.round(BONE_O2.o2Base * (size / 18)))
-    const coin = isBoss ? 24 : Math.max(3, Math.round(4 * (size / 18)))
+    const coin = isBoss ? 24 : Math.max(3, Math.round(BONE_COIN.base * (size / 18)))
     // ---- 精英（V6.62 §5-A）：掉落 ×4 + **必掉一个「囊」** ----
     // ⚠️ 精英**整体绕过 dropCap** —— "必掉"就是必掉，不能被波预算吃掉。
     //    （否则"打得好的那一波反倒没掉落"，正好把奖励设计反了。）
@@ -2560,11 +2603,14 @@ export class DiveWorld implements ShopTarget {
       const r = this.rng.next() * COMBO_SPREAD
       const x = clamp(this.px + Math.cos(a) * r, 20, this.W - 20)
       const y = clamp(this.py + Math.sin(a) * r, 20, this.H - 20)
-      this.mkBone(x, y, 2, 3, 20, 0.6)
+      this.mkBone(x, y, BONE_RAIN.o2, BONE_RAIN.coin, 20, 0.6)
     }
     // 结算反馈：一句飘字（"骨雨"是这个惊喜点的**名字**，玩家得看得见它发生了）
-    this.emit({ t: 'float', x: this.px, y: this.py - 46, text: `连杀 ×${COMBO_N} · 骨雨`, color: UI.amber, size: 22 })
-    this.emit({ t: 'shake', ms: 120, intensity: 0.004 })
+    // V6.84 加磅：22→26、震屏 0.004→0.008、再加一次水体光扫（`flash` 事件）。
+    // 用户反馈⑤「没有哎？」—— 骨雨本来就是全作最强的单点惊喜，却只值一句小飘字。
+    this.emit({ t: 'float', x: this.px, y: this.py - 46, text: `连杀 ×${COMBO_N} · 骨雨`, color: UI.amber, size: 26 })
+    this.emit({ t: 'shake', ms: 120, intensity: 0.008 })
+    this.emit({ t: 'flash', x: this.px, y: this.py, kind: 'rain' })
   }
 
   /**
@@ -2609,7 +2655,10 @@ export class DiveWorld implements ShopTarget {
         //   ⚠️ 用 `waveBones === 0` 判"这一波还没拾过"，**不是**"这一帧第一块" ——
         //      同一帧吃两块骨时，第二块不该也算首块。
         const first = this.waveBones === 0
-        const mul = this.boneValueMul() * (first ? (1 + this.st.firstBone) : 1)
+        // ⚠️ `coinMul`（V6.85 动态平衡系统）**只在这一处乘** —— 这就是"币值与氧气解耦"的唯一接缝：
+        //    掉落端 `droppedThisWave += coin` 用的始终是**原始币值** ⇒ 改 `coinMul` 不动掉落块数、
+        //    不动氧气供给（**止损线②** 安全）。别顺手把它挪到 `dropBone` 里去。
+        const mul = this.boneValueMul() * (first ? (1 + this.st.firstBone) : 1) * this.coinMul
         const coin = Math.round(b.coin * mul)
         this.waveBones++
         this.bank += coin
@@ -2992,7 +3041,9 @@ export class DiveWorld implements ShopTarget {
         })
         // 布雷的位置反馈：不发光环的话，玩家不知道雷落在哪（尤其是移动中）。
         // 半径取 44（不再是踩触发半径 34）：布雷是"我放了个东西在这"，不是"有人踩到了"。
-        this.emit({ t: 'burst', x: this.px, y: this.py, r: 44 })
+        // V6.84：带 `col`（琥珀）—— 投放是"放置"（暖），引爆是"炸开"（青），
+        //   两个动作必须分色，否则玩家把"我又放了一颗"读成"有东西炸了"。
+        this.emit({ t: 'burst', x: this.px, y: this.py, r: 44, col: UI.amber })
       } else if (fam === 'net') {
         const e = this.nearestEnemy(rng); if (!e) continue
         const base = pose ? pose.ang : Math.atan2(e.y - this.py, e.x - this.px)
@@ -3333,7 +3384,41 @@ export class DiveWorld implements ShopTarget {
     this.rerollCost = REROLL_BASE
     if (this.bank < REROLL_BASE) this.bank = 20
     this.rollOffers(true)
+    // ★ V6.85 通用数值平衡系统：进商店这一刻是唯一能看到"产 − 消"全貌的时机
+    //   （手上剩多少 + 这次能花多少），所以控制器挂在这里，每商店结算一次。
+    //   ⚠️ 必须排在 `rollOffers(true)` **之后** —— 它要读本次上架卡的总价当"消耗容量"。
+    this.economyGuard()
     this.bullets = []; this.pulses = []; this.echoes = []; this.acids = []; this.eShots = []
+  }
+
+  /**
+   * **通用数值平衡系统 · 动态币值控制器**（V6.85）。见 `tables.ts` 的 `ECO_BAL` 注释。
+   *
+   * ★ **它治的不是"余钱率"，是"永远买得光"** —— 后者才是"没有选择犹豫感"的真正原因：
+   *   实测一局能买得起 ≈ 47 张，而商店只上架 30 张 ⇒ 玩家**总能买光**，那无论余钱多少都没有取舍。
+   *   所以目标量是 `bank/capacity`，`hi` 直接定义"**这次商店你买得起几张**"。
+   *
+   *   · `bank/capacity > hi` ⇒ 钱溢出 ⇒ 下一波 `coinMul` **按超出倍数比例**下调
+   *   · `bank/capacity < lo` ⇒ 不够花 ⇒ 按比例回升
+   *   · 死区内 ⇒ 不动（**死区是防抖的核心**：没有它，控制器会每店来回抽）
+   *
+   * ⚠️ 单次下调钳在 `ECO_BAL.catch`、上调钳在 `ECO_BAL.boost`，总乘子钳在 `[min, max]` ——
+   *    币值跳变玩家看得见，所以限制单店幅度；但**必须允许"追上爆炸"**（固定步长会失效）。
+   */
+  private economyGuard(): void {
+    // ★ V6.85：分母取**固定基准 `ECO_CAP_REF`**，不是"当次上架总价" —— 理由见
+    //   `tables.ts` 的 `COST_GROWTH`：若分母跟着卡价一起涨，控制器会把玩家收入也抬上去、
+    //   **涨价被完全抵消**（实测过）。固定分母 ⇒ 卡价涨 = 玩家真的越买越少。
+    const capacity = ECO_CAP_REF
+    const ratio = this.bank / capacity
+    if (ratio > ECO_BAL.hi) {
+      // 钱溢出 ⇒ 按**超出倍数**比例回调（不是固定步长 —— 固定步长追不上 6–8 倍的爆炸）
+      const corr = Math.max(ECO_BAL.catch, ECO_BAL.hi / ratio)
+      this.coinMul = Math.max(ECO_BAL.min, this.coinMul * corr)
+    } else if (ratio < ECO_BAL.lo) {
+      const corr = Math.min(ECO_BAL.boost, ECO_BAL.lo / ratio)
+      this.coinMul = Math.min(ECO_BAL.max, this.coinMul * corr)
+    }
   }
 
   /** 抽三张（fresh=true 全换；否则保留锁定格）。DiveScene.ts:5153-5165 */
@@ -3354,11 +3439,29 @@ export class DiveWorld implements ShopTarget {
     if (this.phase !== 'shop') return
     const up = this.offers[i]
     if (!up || this.sold[i]) return
-    if (this.bank < up.cost) return
-    this.bank -= up.cost
+    const cost = this.offerCost(i)
+    if (this.bank < cost) return
+    this.bank -= cost
     up.apply(this)
     this.sold[i] = true
     this.locked[i] = false
+  }
+
+  /**
+   * **商店卡的当次售价乘子**（V6.85 方案 A）：随深度上涨。见 `tables.ts` 的 `COST_GROWTH`。
+   */
+  costMul(): number {
+    return 1 + COST_GROWTH.perLayer * this.layerIdx + COST_GROWTH.perWave * this.waveInLayer
+  }
+
+  /**
+   * **第 i 张卡的当次售价**（金）。★ **唯一算式** —— `buyCard` 与商店 UI **都必须调它**，
+   * 各写一份的下场是"面板显示 45、实扣 78"，且**不报错**（本项目最贵的一类坑）。
+   */
+  offerCost(i: number): number {
+    const up = this.offers[i]
+    if (!up) return 0
+    return Math.round(up.cost * this.costMul())
   }
 
   /** DiveScene.ts:5181-5188 */

@@ -38,7 +38,7 @@ import { neon } from './neon'
 import { SpriteBank } from './art'
 import { MENU, TXT_LIGHT, UI } from '../shared/theme'
 import { CODEX, CODEX_CAT_NAME, codexByCat } from '../shared/dive/codex'
-import { ENEMY_TEX } from '../shared/dive/tables'
+import { ENEMY_TEX, BOSS_TEX } from '../shared/dive/tables'
 import type { CodexCat, CodexEntry } from '../shared/dive/codex'
 import type { Profile } from '../shared/dive/profile'
 
@@ -84,11 +84,14 @@ const CATS: CodexCat[] = ['enemy', 'boss', 'weapon', 'relic']
  *    落进 `item_` 分支去取一张不存在的图），而且加 V6.82 五种新生物时
  *    又要再手抄五遍。**同一条信息只有一处定义**。
  *
- * Boss 单独覆写：两个 Boss 共用一张占位图（真图走插画岗），
- * 用**同一个 key** 让"未点亮时都是剪影、点亮后才分得出"这件事不成立 ——
- * 所以给它们各映射到一张已有的鱼图（`f_drift` / `f_orbit`），至少能区分。
+ * Boss 单独覆写：V6.87 起两个 Boss **各有自己的真图**（`BOSS_TEX`）。
+ * ⚠️ V6.82–V6.86 这里是借映（`f_drift` / `f_orbit`）——那时 Boss 复用冲刺体贴图，
+ *    图鉴里看到的是**别的生物**。真图到位后必须换成 `BOSS_TEX` 的 key。
  */
-const BOSS_KEY: Record<string, string> = { 'boss:abyss': 'f_drift', 'boss:angler': 'f_orbit' }
+const BOSS_KEY: Record<string, string> = {
+  'boss:abyss': BOSS_TEX.watcher,
+  'boss:angler': BOSS_TEX.angler,
+}
 const ENEMY_KEY: Record<string, string> = {
   ...Object.fromEntries(
     CODEX.filter(e => e.cat === 'enemy').map(e => [e.id, ENEMY_TEX[e.id.slice(6) as keyof typeof ENEMY_TEX]]),

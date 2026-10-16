@@ -108,7 +108,7 @@ import {
   CAM_ZOOM, MOUNT_RING_R, SEAT_PORT_R, SEAT_MOUNTS, MAX_SEATS,
   SLOT_HW, SLOT_HD, TURRET_OUT,
   EMITTER_SIZE, SUB_D, HULL_H, BASE_SEATS, WEAPON_DEF,
-  BONE, weaponFamily, LAYER_ECO, LAYERS, OFFER_N,} from '../shared/dive/tables'
+  weaponFamily, LAYER_ECO, LAYERS, OFFER_N,} from '../shared/dive/tables'
 import { UI } from '../shared/theme'
 import { SUBS, getSub } from '../shared/subs'
 import type { SubId } from '../shared/subs'
@@ -313,6 +313,8 @@ interface NetOpen {
   maxLife: number
   /** 12 个网缘分区各自的随机下垂量 `0..1`（打破完美对称）*/
   ph: number[]
+  /** 整体不透明度倍率（V6.84：空网 0.5 弱化 / 实网 1.0 全貌）。见 `burst` 事件的 `catch` */
+  alphaMul: number
 }
 
 /** 贴图池里的一条：`key` 让它能被同种敌人复用（与 web 的 fishPool 同构） */
@@ -532,6 +534,16 @@ const FLASH_LAYERS = 3
 const FLASH_MUZZLE = { r0: 20, r1: 38, dur: 0.12, col: 0xdff2ff, a: 0.26 }
 const FLASH_BLAST = { r0: 56, r1: 158, dur: 0.28, col: 0xffe6bc, a: 0.30 }
 const FLASH_PICK = { r0: 140, r1: 248, dur: 0.20, col: 0x6fe8ff, a: 0.13 }
+/**
+ * 骨雨光扫（V6.84）。**琥珀暖色** —— 骨雨是"资源"语义（色板 amber 槽，见铁规 16），
+ * 比拾取的青更暖、更"嘉奖"。半径介于 blast 与 pick 之间：它亮的是"我周围这一片"。
+ * 用户反馈⑤「没有哎？」—— 全作最强的单点惊喜只值一句小飘字，加一次水体反光。
+ */
+const FLASH_RAIN = { r0: 120, r1: 280, dur: 0.30, col: 0xffd166, a: 0.16 }
+/** 精英出生通告（V6.84）。**品红** = 稀有危险（色板 magenta 槽），与 Boss 的紫错开 */
+const FLASH_ELITE = { r0: 50, r1: 150, dur: 0.32, col: 0xff9ade, a: 0.20 }
+/** 布雷投放（V6.84）。小范围暖斑 —— "我放了个东西在这"；与引爆的青色爆闪分色 */
+const FLASH_MINE = { r0: 24, r1: 62, dur: 0.22, col: 0xffd9a0, a: 0.20 }
 
 // ---- 网张开（V6.61 按物理重写）----
 /** 张开动画总时长（s）。比爆炸环（0.32）长 —— 柔性体的展开与塌陷比冲击波慢 */
@@ -635,6 +647,15 @@ const DOTS_SAFE_R = 260
  *    "颗粒往下飘"（= 上浮），与下潜完全相反，且**不报任何错**（V6.56 踩过一次）。
  */
 const SCROLL_BASE = 46
+/**
+ * **朝向翻面的死区**（`cos` 阈值）与**迟滞时长**（s）。V6.85b 加，治"炮口跟着左右跑"。
+ *
+ * ⚠️ 阈值原来只有 **0.25** —— 意味着"只要有一点点横向分量（≈75°以内）就翻面"，
+ *   包括斜着走。现在 0.45 ≈ 横向分量要占到 **63%** 以上才参与判朝向（≈63°以内）。
+ * 迟滞 0.35s：候选方向连续保持这么久才真翻 —— 手指来回点时不再抽。
+ */
+const FACE_COS = 0.45
+const FACE_DWELL = 0.35
 
 /**
  * **背景出血系数**（V6.70）。cover 之外再放大这么多，给背景漂移留出可动范围。
@@ -646,18 +667,42 @@ const SCROLL_BASE = 46
  */
 const BG_BLEED = 1.07
 /**
- * 换带时的**爆冲速度**（px/s）。V6.52 §3.1：`4.8×`，指数衰减 `e^(-t/0.9)`。
+ * **脚本化下沉节拍**（V6.84）。用户试玩反馈①：「打完第 1 波，画面有没有沉了一下 …
+ * 我需要的是一个下沉的动画特效」。
  *
- * 这是"下潜是**动作**不是**切图**"的核心 —— 换带那一刻世界猛地往上一窜，
- * 玩家读到的是"我在加速下潜"，而不是"背景图跳了一下"。
- * 与 §3.3 的"起势 0.8s"是同一件事的两种描述：瞬时置顶 + 指数衰减，
- * 视觉上就是"猛冲一下然后缓和"。
+ * 旧实现的病根：`burstV` 一次性置顶 + 指数衰减（τ=0.9s）—— 速度在 t=0 即峰值，
+ * 读作"镜头被猛地扽了一下"，而不是"我沉了一截"；总位移仅 115×0.9 ≈ 104px，
+ * 混战里根本注意不到（反馈原话：「画面有没有沉一下」= 没有）。
+ *
+ * 新实现按**总位移**设计：给定时长 D 与位移 S，速度 = smoothstep 的导数
+ * `S × 6k(1−k) / D`（k = t/D）⇒ 平滑起步、平滑收尾，且 `∫₀^D v dt` **正好是 S**。
+ * ⚠️ **分母是 D 不是 D²**（V6.85 修正：写成 D² 时积分 = S/D，换带那个 380 实际只沉 200）。
+ * 峰速 = 1.5·S/D：波间小拍 ≈ 232（常态 46 的 5 倍，明显但不悚）；
+ * 换带大拍 ≈ 300（6.5 倍，与 2.1s 的 descending 相位、2.0s 的 crossfade 对齐 ——
+ * 背景是在一段**持续的沉**里化开的，不是"跳一下再淡入"，反馈⑤b「第三层背景很突兀」同解）。
+ *
+ * ⚠️ 对比度仍是核心：大拍位移 = 小拍的 2.2 倍。换带 5 次/局是**事件**、
+ *    换波 20 次/局是**节拍**，同强度会把事件淹掉（同旧 `WAVE_BURST` 0.52× 的逻辑）。
  */
-const SCROLL_BURST = 220
+const SINK_WAVE_PX = 170
+const SINK_WAVE_DUR = 1.1
+const SINK_DESC_PX = 380
+const SINK_DESC_DUR = 1.9
+/**
+ * 底色层（`gBase`）的**纵向额外外扩**（px）。必须 ≥ `diveY` 的峰值（`SINK_DESC_PX / 2 = 190`）
+ * —— 世界整体下潜时底色会跟着被抬走，外扩不够就是屏幕下缘露一条清屏色（**不报错**）。
+ */
+const DIVE_OVERSCAN = 210
+/**
+ * 节拍期间深度计的滚动目标速率（1/s）。2.4 ⇒ 95% 收敛约 1.2s，正好覆盖小拍全长 ——
+ * 数字是**滚着**到位而不是跳一下，与世界的持续下沉说同一句话（Hud 的 `DEPTH_FOLLOW` 是 6/s，
+ * 太快：0.5s 就到位，然后数字停了、世界还在沉，两件事对不上）。
+ */
+const SINK_ROLL_RATE = 2.4
 /** 爆冲的指数衰减时间常数（s）。越小收得越快 */
 const BURST_TAU = 0.9
-/** 温跃层扫带时长（s）。V6.52 §3.3 ② */
-const SCAN_DUR = 0.6
+/** 温跃层扫带时长（s）。V6.52 §3.3 ②。V6.85：0.6 → **0.9**（扫得太快读不出"有东西在位移"）*/
+const SCAN_DUR = 0.9
 /**
  * 背景 crossfade 时长（s）。V6.52 §3.3 ③。
  *
@@ -675,27 +720,17 @@ const XFADE_DUR = 2.0
  * 于是它读作"我沉进了新的一层"，而不是"图层交叉淡入"。
  *
  * ⚠️ **必须 < 纵向出血**：`BG_BLEED` 1.07 下纵向各多 ≈72px，而 `stepBgDrift` 还占 ±16
- *    ⇒ 40 + 16 = 56 < 72，安全。⛔ 调大这个数要同时核 `BG_BLEED`（超了就是屏幕上下露黑边）。
+ *    ⇒ **52 + 16 = 68 < 72**，安全（V6.85 从 40 加到 52，逼近上限）。
+ * ⛔ 调大这个数要同时核 `BG_BLEED`（超了就是屏幕上下露黑边）。
  * ⛔ **不能推到半屏**（那要 ~350px）：现有图纵向只有 ~145px 的余量，
- *    真要做"整屏推入"必须新出 1536×1180 的无缝图（V6.56 §3 已记）。
+ *    真要做"整屏推入"必须新出 1536×1180 的无缝图（V6.56 §3 已记）——
+ *    ★ **这就是"换层下沉感不够"的天花板**：换层推入的幅度被**背景图的出血量**卡死，
+ *       要更强的下沉，缺的是一张**更高出血的 env 图**（属美术任务），不是代码。
  */
-const XFADE_PUSH = 40
-/** 水压环时长（s）。V6.52 §3.4：3 圈从屏幕中心外扩 */
-const RING_DUR = 0.9
+const XFADE_PUSH = 52
+/** 水压环时长（s）。V6.52 §3.4：3 圈从屏幕中心外扩。V6.85：0.9 → **1.2**（延长可见期）*/
+const RING_DUR = 1.2
 
-/**
- * **换波「下探节拍」的爆冲峰值**（px/s）。V6.49 §2 / V6.50 §下探节拍。
- *
- * 为什么它比换带更重要：全流程下潜次数 **5 → 25**。同样 156s 的战斗，
- * 从"我打完 4 波然后换了个地方"变成"**我一直在往下沉**"。
- *
- * ⚠️ **峰值必须明显小于换带**（0.52×）：换带 5 次/局 = **事件**，
- *   换波 20 次/局 = **节拍**。两者同强度的话，节拍会把事件淹掉 ——
- *   **对比度**才是这套设计的核心（同 `SCROLL_BURST` 的 4.8× 逻辑）。
- *   115 px/s ≈ 常态的 **2.5×**：一眼看得出"往下沉了一截"，
- *   但不至于被误读成"换水域了"。
- */
-const WAVE_BURST = 115
 /** 换波节拍的水压环强度倍率（换带是满环 1.0）。环是"又穿过了一小段水"的确认 */
 const WAVE_RING = 0.55
 
@@ -732,6 +767,18 @@ const MOTE_MUL: ReadonlyArray<readonly [number, number]> = [
  * `1` = 只留骨白圈。**辉光会变硬**，只在帧率实在不够时用
  */
 const BONE_GLOW = 2
+/**
+ * 鱼骨掉落的**金色**（V6.85）。
+ *
+ * 用户 2026-10-16：「击杀掉鱼骨可能要换美术 UI …… **这个是可以商店买东西的** 而且也不好看」。
+ * 病根：旧画法里鱼骨本体是**骨白**、辉光内层也是白，外圈才是氧青 ⇒ 整体读作"**氧气骨**"，
+ *   而它其实是**货币**（`bank += coin`）。玩家看不出"这能拿去商店花"。
+ *
+ * ★ 判据（铁规 16：颜色是语义槽）：`amber` = **资源** —— 掉落本体改成金，
+ *   氧青只留最外一圈当"**可拾取**"的通用信号（那是功能，不是配色）。这样两件事各归各的色。
+ */
+const BONE_GOLD = 0xffd98a
+const BONE_GOLD_HI = 0xfff2c8
 /** 位图击杀特效同屏上限。一帧十几只同屏死是常事，超了就丢最早的。 */
 const FXBIT_CAP = 28
 /** 单帧最大步长（与模拟层的 MAX_DT 同源，防止后台切回来时世界瞬移） */
@@ -786,9 +833,9 @@ const BODY_METAL = 0x2f8fa8
  */
 const SUB_HULL = {
   w: 102.0,           // 408 / 4
-  h: 84.75,           // 339 / 4
+  h: 90.25,           // 361 / 4   ← V6.85：三台各自侧视立绘统一到这版画布（原 339/84.75）
   cx: 0.5000,         // (28 + 352/2) / 408
-  cy: 0.5841,         // (86 + 224/2) / 339  —— >0.5：塔在画布上方
+  cy: 0.5928,         // (102 + 224/2) / 361  —— >0.5：塔在画布上方
 } as const
 
 /**
@@ -910,8 +957,30 @@ export class DiveGame extends Component {
    * 模拟层里没有任何东西读它，改它也不会动到弹道 / 碰撞 / 氧气。
    */
   private scrollV = SCROLL_BASE
-  /** 换带爆冲速度（px/s），指数衰减回 0。见 `SCROLL_BURST` */
+  /** 换带爆冲速度（px/s）。V6.84 起由**脚本化下沉节拍**驱动（见 `startSink`），不再是一次性冲量 */
   private burstV = 0
+  /** 下沉节拍计时（0→`sinkDur`）；`< 0` = 未激活（V6.84）*/
+  private sinkT = -1
+  /** 当前节拍总时长（s）*/
+  private sinkDur = 1
+  /** 当前节拍总位移（px）—— 速度 Profile 对时间的积分正好等于它（不是"冲一下算一下"）*/
+  private sinkPx = 0
+  /** 当前是不是"换带大拍"（换波小拍不覆盖它，同旧 `max` 语义）*/
+  private sinkBig = false
+  /**
+   * **整层世界的垂直位移**（px，V6.85）。
+   *
+   * 用户 2026-10-16：「我要的效果是**一个向下移动到下一层的动画**」——
+   *   原版换层只有"背景轻度垂直推入（`XFADE_PUSH` 40px）+ 扫带 + 环"，
+   *   世界本体**不动** ⇒ 读作"两张图在化开"，不像"我往下走了一层"。
+   *
+   * ★ 做法：把整个世界根节点 `worldRoot` 整体上移（= 玩家在下沉）。因为它**是唯一的定位点**
+   *   （背景 / 敌人 / 玩家 / 特效全是它的子节点），一处生效，全世界跟着走。
+   *   ⚠️ 位移是**上去再回来**（`sin(πk)`）而不是永久偏移 —— 永久偏移会让
+   *     背景图（只按 `BG_BLEED` 出血）**在屏幕下缘永久露一条底色**。
+   *     回弹形状读作"被水**往下扽了一下**"，正是要的"沉一层"。
+   */
+  private diveY = 0
   /** 温跃层扫带计时（0→`SCAN_DUR`）；`< 0` = 未激活。见 §3.3 ② */
   private scanT = -1
   /** 背景 crossfade 计时（0→`XFADE_DUR`）；`< 0` = 未激活。见 §3.3 ③ */
@@ -1040,6 +1109,10 @@ export class DiveGame extends Component {
    *    死区之外的翻转是**立即**的 —— 掉头本来就该干脆。
    */
   private faceX = 1
+  /** 朝向候选的**持续计时**（s）。见 `updateFace` 的"防抽"说明（V6.85b）*/
+  private faceT = 0
+  /** 推进器尾流粒子池（V6.85b）。见 `stepJets` */
+  private jets: { x: number; y: number; vx: number; vy: number; life: number; max: number; r: number }[] = []
 
   // ---- 输入 ----
   private keys: Record<string, boolean> = {}
@@ -1146,8 +1219,10 @@ export class DiveGame extends Component {
     this.clearFx()
     this.bgLayer = -1              // 强制重设背景（换层/重开都可能换了图）
     this.bgDriftT = 0// 漂移相位归零，否则新开局第一帧背景会停在上一局的偏移上
-    // 别把上一局的余速带进新局：爆冲 / 扫带 / crossfade 三个计时器一律归零
+    // 别把上一局的余速带进新局：下沉节拍 / 扫带 / crossfade 三个计时器一律归零
     this.burstV = 0
+    this.sinkT = -1
+    this.jets = []
     this.scrollV = SCROLL_BASE
     this.scanT = -1
     this.xfadeT = -1
@@ -1502,13 +1577,16 @@ export class DiveGame extends Component {
 
     this.drawBg(w, dt)
     if (combat) {
-      this.syncSub(w)
+      this.syncSub(w, dt)
       this.drawWorld(w)
     } else {
       this.hideWorld()
     }
     this.drawVeil(w)
     this.drawAtmo(w, dt)
+    // 推进器尾流（V6.85b）：`gPlayer` 已在本帧被 clear 过，这里画在机体之后 ⇒ 压在最上层。
+    // ⚠️ 非战斗相位也调 —— 那时 `w.moving` 恒为 false（不补充），但**已有粒子要自然散掉**。
+    this.stepJets(w, dt)
     this.drawFx(dtSec)
     this.drawFxBits()
 
@@ -1522,6 +1600,10 @@ export class DiveGame extends Component {
       if (this.inspectT > 8 || !combat) this.inspect = null
     }
     if (combat) {
+      // V6.84：下沉节拍期间把深度计的阻尼速率交给节拍目标速率（`SINK_ROLL_RATE`）——
+      // 让米数跟着世界滚完整个节拍，而不是 0.5s 跳到头、然后干看着世界继续沉。
+      // 平时传 0 = Hud 回退默认 `DEPTH_FOLLOW`（6/s）。
+      this.hud.depthRate = this.sinkT >= 0 ? SINK_ROLL_RATE : 0
       this.hud.drawCombat(w, {
         onPause: () => this.togglePause(true),
         inspect: this.inspect,
@@ -1645,7 +1727,10 @@ export class DiveGame extends Component {
     }
     this.worldRoot.setPosition(
       -this.zoom * this.camX + jitter(view.w),
-      this.zoom * (this.camY - this.H) + jitter(view.h),
+      // ★ V6.85：整层世界的垂直位移（"向下移动到下一层"）加在**世界根**上 ——
+      //   背景 / 敌人 / 玩家 / 特效一起走，一处生效。与 `camY` 同量纲（屏幕像素），
+      //   所以幅度不受 `zoom` 影响。
+      this.zoom * (this.camY - this.H) + jitter(view.h) + this.diveY,
     )
   }
 
@@ -1752,6 +1837,14 @@ export class DiveGame extends Component {
     this.bgNode.node.setPosition(x, y + dyNew)
     // 旧图（crossfade 用）必须**同步跟着漂**，否则过渡那 2s 里两张图会相对滑动
     if (this.bgNodeOld.node.active) this.bgNodeOld.node.setPosition(x, y + dyOld)
+
+    // ★ V6.85：世界整体下潜位移（`diveY`）会把背景图**一起抬上去** ⇒ 屏幕下缘会露底色。
+    //   位移期间把两张背景图**等比放大** `1 + |diveY| / H`，补回被抬走的那一条。
+    //   ⚠️ 只在位移中放大（`diveY = 0` 时倍率恒为 1）⇒ 不影响常态构图；
+    //     副产物是过渡期背景有个轻微"推近"，与下沉同向，读作"冲进新一层"。
+    const ds = 1 + Math.abs(this.diveY) / this.H
+    this.bgNode.node.setScale(ds, ds, 1)
+    if (this.bgNodeOld.node.active) this.bgNodeOld.node.setScale(ds, ds, 1)
   }
 
   /**
@@ -1779,10 +1872,17 @@ export class DiveGame extends Component {
    *      "同形近黑副本"，硬边露在剪影之外 ⇒ 读作"机体底下粘了块黑胶布"。
    *      理由与被删的实测数据见字段声明处那段注释。
    */
-  private syncSub(w: DiveWorld): void {
-    this.updateFace(w)
+  private syncSub(w: DiveWorld, dt: number): void {
+    this.updateFace(w, dt)
 
-    const sf = this.artLoaded ? this.art.get('sub_hull') : null
+    // ★ V6.85：**战斗中用的机体 = 你选的那一台自己的侧视立绘**（原来三台共用 `sub_hull`）。
+    //   用户：「选潜航器界面就应该是侧视的，**要和战斗内保持一致**」—— 现在两边是**同一张图**。
+    //   三张图都由 `prep_sub_art.py` + `normalize_sub_art.py` 处理过 ⇒ 躯干都精确等于
+    //   `SUB_D × HULL_H` 且共用同一套 `SUB_HULL` 几何 ⇒ 挂点不漂。缺图退回 `sub_hull`。
+    const subKey = 'sub_' + w.sub.id
+    const sf = this.artLoaded
+      ? (this.art.get(subKey) ?? this.art.get('sub_hull'))
+      : null
     const n = this.subNode.node
     if (!sf) {
       // 缺图：位图关掉，但**不能退回矢量机体**（V6.75 已整段删除）。
@@ -1804,13 +1904,24 @@ export class DiveGame extends Component {
   }
 
   /**
-   * 朝向镜像（每帧一次，离散）。**单一入口** —— `syncSub`（在位图摆放前）调用，
-   * `drawPlayer` 不再自己更新（两处更新会差一帧，位图的朝向与炮位的朝向就对不上）。
+   * 朝向镜像（每帧一次，离散）。**单一入口** —— `syncSub`（在位图摆放前）调用。
+   *
+   * ★★ V6.85b 修「炮口跟着左右跑」：用户原话「在战斗中 左右移动 **炮口会左右移动，没固定的感觉**」。
+   *   病根：模拟层里 `w.aim` **就是移动方向**（`world.ts` 的 `this.aim = atan2(dy, dx)`，只在移动时更新）
+   *   ⇒ 按左 `cos=-1`、按右 `cos=+1` ⇒ **换个方向整艘船就翻面**，而 6 个炮位是挂在机体上的
+   *   （`drawPlayer` 用同一个 `faceX` 镜像座标）⇒ 玩家读到的是"炮口跟着我左右跑"。
+   *
+   *   两条处置（都要，缺一条还会抽）：
+   *     ① **死区放宽** `FACE_COS`（0.25 → 0.45）：斜着走不再参与判朝向 —— 那一档最容易左右来回跳；
+   *     ② **迟滞**：候选方向必须**连续保持** `FACE_DWELL` 秒才真的翻面。
+   *        ⚠️ 手指在左右之间来回点时，没有迟滞就会每几帧翻一次（= 整组炮口在抖）。
    */
-  private updateFace(w: DiveWorld): void {
+  private updateFace(w: DiveWorld, dt: number): void {
     const wantX = Math.cos(w.aim)
-    if (wantX > 0.25) this.faceX = 1
-    else if (wantX < -0.25) this.faceX = -1
+    const want = wantX > FACE_COS ? 1 : (wantX < -FACE_COS ? -1 : this.faceX)
+    if (want === this.faceX) { this.faceT = 0; return }
+    this.faceT += dt
+    if (this.faceT >= FACE_DWELL) { this.faceX = want; this.faceT = 0 }
   }
 
   /**
@@ -2237,11 +2348,36 @@ export class DiveGame extends Component {
           // ① **撒网张开**（有抛出方向）：柔性体 ⇒ 水滴形 + 扇贝边 + 展开→塌陷。
           //    ⚠️ V6.60 及以前这里也是同心圆环 —— 那是**冲击波**的形状，不是网的形状。
           //       网沿速度方向被甩长、网缘挂着铅坠、张开后受水阻塌回去（见 `drawNets`）。
-          this.pushNet(ev.x, ev.y, ev.r, ev.ang, UI.jade)
+          // V6.84 空网/实网分流（`catch`）：
+          //   实网 = "网住一圈地方"（这把武器的全部语义）⇒ 放大到 1.28× 全貌；
+          //   空网 = 打空了 ⇒ 弱化（小 / 短命 / 淡）。没有这个分流，玩家眼里
+          //   "每一发网都长一样"，网住与打空读不出差别（反馈②："旁边也有空网"）。
+          const caught = ev.catch ?? 0
+          this.pushNet(ev.x, ev.y, ev.r, ev.ang, UI.jade, caught > 0
+            ? { scale: 1.28 }
+            : { scale: 0.68, lifeMul: 0.55, alphaMul: 0.5 })
         } else {
-          // ② **全向爆炸**（氧气雷 / 水雷 / 诱饵引爆）：各向同性 ⇒ 冲击波环。
+          // ② **全向爆炸 / 投放**（氧气雷 / 水雷 / 诱饵引爆 / 布雷投放）：各向同性 ⇒ 冲击波环。
           //    没有方向可言，别硬套网状（那会把"炸开"画成"抛出"）。
-          this.pushShock(ev.x, ev.y, ev.r, 0.4, UI.cyanHi, 3, ev.r * 0.12, 1)
+          //    `col` = 布雷投放（琥珀）："放置"与"炸开"分色，见 world.ts 布雷处注释。
+          const c = ev.col ?? UI.cyanHi
+          this.pushShock(ev.x, ev.y, ev.r, 0.4, c, 3, ev.r * 0.12, 1)
+          if (ev.col !== undefined) {
+            // 布雷投放三件套：淤泥颗粒（慢、暗琥珀、微微下沉）+ 暖光斑。
+            // 用户反馈③「布雷也不是很突出」—— 原来只有一个青色细环，还与引爆环同色同形，
+            // 玩家把"我又放了一颗"读成"有东西炸了"（或者根本没读）。
+            for (let i = 0; i < 5; i++) {
+              const a = Math.random() * Math.PI * 2
+              const sp = 20 + Math.random() * 40
+              this.sparks.push({
+                x: ev.x, y: ev.y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 30,
+                life: 0.4, maxLife: 0.4, color: 0x8a7a5a, size: 2.2 + Math.random() * 1.6,
+                ang: a, kind: 'hit',
+              })
+            }
+            this.trimSparks()
+            this.pushFlash(ev.x, ev.y, FLASH_MINE)
+          }
         }
         break
       case 'arc':
@@ -2252,32 +2388,74 @@ export class DiveGame extends Component {
         // V6.74：光有"环 + 反光"只是"闪了一下"。补两样才读作"炸"：
         //   · 被抛出的**破片**（径向火花，橙色 —— 与水的青蓝对立，一眼看见）
         //   · 一圈比爆心更大的**外扩冲击环**（爆炸把周围的水推开）
+        // V6.84 加磅（反馈③"爆炸特效不够明显"）：破片 14→20、外扩环 1.6×→2.1×。
+        //   ⚠️ 环再大就是"伤害圈"的误读 —— 2.1× 仍显著小于 blast 判定半径的视觉惯例。
         this.pushRadialSparks(ev.x, ev.y,
-          Math.min(14, 6 + Math.round(ev.r * 0.05)), 90, 130, 2.2, 0xffb347)
-        this.pushShock(ev.x, ev.y, ev.r * 1.6, 0.34, 0xffd166, 2.2, ev.r * 0.10, 1)
+          Math.min(20, 8 + Math.round(ev.r * 0.07)), 90, 130, 2.2, 0xffb347)
+        this.pushShock(ev.x, ev.y, ev.r * 2.1, 0.34, 0xffd166, 2.2, ev.r * 0.10, 1)
         // §6：硬边冲击波（`blasts`）+ 软边环境反光（这里）叠加才是"炸了一下，整个水都亮了"
         this.pushFlash(ev.x, ev.y, FLASH_BLAST)
+        break
+      case 'eliteSpawn':
+        // ★ V6.84 精英出生通告（反馈⑤「没有哎？」）：出生即 announce，三件套 ——
+        //   ① 品红双环（外环"警报"、内环"它在这"；与 Boss 的紫、水压环的青错开）
+        //   ② 名牌飘字（"精英"两个字必须出现一次，否则玩家不知道这只为什么特殊）
+        //   ③ 一次品红环境反光（"整片水都注意到它"）
+        // ⚠️ 与 `waveCleared` 的水压环分清：那个是"我又沉了一截"（青、大、慢、居中），
+        //    这个是"这只不一样"（品红、小、快、在怪身上）—— 同时出现也要能分出是谁。
+        this.pushShock(ev.x, ev.y, ev.r * 2.6, 0.5, UI.magenta, 2.4, ev.r * 0.5, 2)
+        this.pushFloat(ev.x, ev.y - ev.r - 18, '精英', UI.magenta, 20)
+        this.pushFlash(ev.x, ev.y, FLASH_ELITE)
+        break
+      case 'clang':
+        // ★ V6.84 重甲挡击（反馈④「打不动，完全没有想法换武器」）：
+        //   普通命中的火花是"子弹钻进去"；挡击是"子弹被弹开"—— 火花从命中点
+        //   **朝玩家方向**倒卷（弹道反弹），加一圈钢灰小冲击环。玩家从**形状**
+        //   （而不只是命中变灰）读出"这玩意抗弹"，才会去找爆炸/穿透武器。
+        //   ⚠️ 世界侧已按 `clangT` 节流（0.14s/只），这里不重复节流。
+        {
+          const px = this.world.px, py = this.world.py
+          const ia = Math.atan2(py - ev.y, px - ev.x)
+          for (let i = 0; i < 6; i++) {
+            const a = ia + (Math.random() - 0.5) * 1.4
+            const sp = 110 + Math.random() * 150
+            this.sparks.push({
+              x: ev.x, y: ev.y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+              life: 0.2, maxLife: 0.2, color: i < 2 ? 0xffffff : UI.steel,
+              size: 1.4 + Math.random() * 1.2, ang: a, kind: 'hit',
+            })
+          }
+          this.trimSparks()
+          this.pushShock(ev.x, ev.y, ev.r * 0.9, 0.22, UI.steel, 2, 6, 1)
+        }
+        break
+      case 'flash':
+        // V6.84 环境光扫（骨雨用）。`kind` 只是选参数表的钥匙，语义都在模拟层判完。
+        this.pushFlash(ev.x, ev.y,
+          ev.kind === 'blast' ? FLASH_BLAST : ev.kind === 'rain' ? FLASH_RAIN : FLASH_PICK)
         break
       case 'descend':
         this.clearFx()
         // V6.52 §3.1 / §3.3：换带的三个表现同时起 ——
-        //   ① 爆冲（世界猛地往上一窜 = "我在加速下潜"，不是"背景跳了一下"）
+        //   ① **下沉**（V6.84 起是脚本化节拍：世界在 1.9s 里持续沉 380px，
+        //      不是"猛地扽一下"。峰速 300 ≈ 常态 6.5×，且与 descending 相位、
+        //      crossfade 同时长 ⇒ 背景是在一段持续的沉里化开的（反馈⑤b））
         //   ② 温跃层扫带（一条波纹带从下往上扫过 = "我穿过了一层水"）
         //   ③ 双图 crossfade（旧图淡出 = 新水域"化"出来，而不是"啪"地切）
         // ⚠️ `beginXfade()` 必须在**本帧 `syncBg()` 之前**调 —— 那时 `bgNode` 上还是旧图。
         //    `handleEvent` 天然满足（它在本帧 update 里、`syncBg` 在其后），别把这个顺序改掉。
-        this.burstV = SCROLL_BURST
+        this.startSink(SINK_DESC_PX, SINK_DESC_DUR, true)
         this.scanT = 0
         this.ringT = 0
         this.ringStr = 1                            // 换带 = 满环（换波只有 0.55，见 WAVE_RING）
         this.beginXfade()
         break
       case 'waveCleared':
-        // **波间下探节拍**（V6.49 §2：这条是"下潜体感"里唯一能单独成立的改动）——
-        // 每波结束都"往下沉一截"：世界再窜一下（小幅）+ 一圈水压环掠过。
-        // ⚠️ 用 `max` 而不是直接赋值：若换带的 220 还在衰减中就清了这一波，
-        //   不该把它**拉低**到 115（那会读作"节拍反而变弱了"）。
-        this.burstV = Math.max(this.burstV, WAVE_BURST)
+        // **波间下沉节拍**（V6.49 §2 立，V6.84 按总位移重做）—— 每波结束都"往下沉一截"：
+        // 脚本化速度 Profile（平滑起步/收尾，净位移 170px）+ 一圈水压环掠过。
+        // ⚠️ 换带大拍进行中不覆盖（同旧 `max` 语义）：大拍是**事件**、小拍是**节拍**，
+        //    被小拍拉低的大拍会读作"换水域反而更轻了"。
+        if (!(this.sinkT >= 0 && this.sinkBig)) this.startSink(SINK_WAVE_PX, SINK_WAVE_DUR, false)
         this.ringT = 0
         this.ringStr = WAVE_RING
         break
@@ -2364,11 +2542,21 @@ export class DiveGame extends Component {
    *
    * `ang` 是抛出方向 —— 网沿它拉长。这个值必须由模拟层给出（`openNet` 传子弹速度方向），
    * 渲染层猜不出来：同一个位置往上扔和往右扔，网的形状完全不同。
+   *
+   * `opts`（V6.84）= 空网/实网分流，由 `burst.catch` 驱动：
+   *   实网（catch ≥ 1）→ `scale` 1.28 全貌放大（"网住一圈地方"是这把武器的全部语义）；
+   *   空网（catch = 0）→ 0.68 小尺寸 + 0.55 短命 + 0.5 淡 —— 弱化到"看得出是张空网"但不抢戏。
+   *   ⚠️ 机制半径 `NET_R` **不动**（模拟层判定不变），放大的只是视觉。
    */
-  private pushNet(x: number, y: number, r: number, ang: number, col: number): void {
+  private pushNet(x: number, y: number, r: number, ang: number, col: number,
+    opts?: { scale?: number; lifeMul?: number; alphaMul?: number }): void {
     const ph: number[] = []
     for (let i = 0; i < NET_SEGS; i++) ph.push(Math.random())
-    this.nets.push({ x, y, ang, r, col, life: 0, maxLife: NET_DUR, ph })
+    this.nets.push({
+      x, y, ang, r: r * (opts?.scale ?? 1), col,
+      life: 0, maxLife: NET_DUR * (opts?.lifeMul ?? 1), ph,
+      alphaMul: opts?.alphaMul ?? 1,
+    })
     if (this.nets.length > NET_CAP) this.nets.splice(0, this.nets.length - NET_CAP)
   }
 
@@ -2607,10 +2795,27 @@ export class DiveGame extends Component {
   // 绘制
   // =========================================================================
   /**
+   * 起一次**脚本化下沉节拍**（V6.84）。`px` = 净位移（px）、`dur` = 时长（s）。
+   *
+   * 速度 Profile 在 `stepWater` 里逐帧求值（smoothstep 导数）—— 这里只记账。
+   * `big` = 换带大拍：进行中时换波小拍不覆盖（事件 > 节拍，见 `waveCleared` 注释）。
+   *
+   * ⚠️ 净位移是**渲染层**的：模拟层 `depthM` 一秒都不会因此多走（V6.52 §3.1 铁律：
+   *    表现层状态绝不回写 sim）。世界在下沉、深度计在滚，但 sim 里的氧气/碰撞/弹道
+   *    一切都按原来的节奏走 —— 这套演出全部发生在"水"里，不发生在"规则"里。
+   */
+  private startSink(px: number, dur: number, big: boolean): void {
+    this.sinkT = 0
+    this.sinkDur = dur
+    this.sinkPx = px
+    this.sinkBig = big
+  }
+
+  /**
    * 推进**下潜滚动**与**换带过渡**（V6.52 §3.1 / §3.3，V6.56 落）。
    *
    * 四件事，全是**表现层状态**，模拟层零改动：
-   *   ① 换带爆冲的指数衰减 → `scrollV`（`SCROLL_BASE + burstV`）
+   *   ① 下沉节拍的速度 Profile → `burstV` → `scrollV`（`SCROLL_BASE + burstV`）
    *   ② 温跃层扫带的推进
    *   ③ 水压环的推进
    *   ④ 背景 crossfade 的推进
@@ -2622,8 +2827,25 @@ export class DiveGame extends Component {
     // ⓪ 背景慢漂移（V6.70）—— 必须排在 crossfade 之前，让 `bgNodeOld` 拿到同一位置。
     this.stepBgDrift(dt)
 
-    // ① 爆冲衰减（§3.1）：低于 0.05 直接归零，免得永远吊着一条看不见的尾巴
-    this.burstV = this.burstV > 0.05 ? this.burstV * Math.exp(-dt / BURST_TAU) : 0
+    // ① 下沉节拍（V6.84）：速度 = S × 6k(1−k) / D（smoothstep 的导数，k = t/D）
+    //    ⇒ 平滑起步、平滑收尾，且 ∫₀^D v dt **正好等于 S**。
+    //    ⚠️ **分母是 D 不是 D²**（V6.85 修正）：写成 D² 时 ∫ = S/D，
+    //       换带那个 380px 的大拍实际只沉了 **200px**（53%），波间 170 只剩 154 —— 
+    //       "下沉看不出来"的一半根因在这儿。铁规：**速度 Profile 必须回代积分验证净位移**。
+    //    未激活时走指数衰减兜底 —— 正常不会发生（节拍结束即归零），防的是别的路径写了它。
+    if (this.sinkT >= 0) {
+      this.sinkT += dt
+      const k = Math.min(1, this.sinkT / this.sinkDur)
+      this.burstV = this.sinkPx * 6 * k * (1 - k) / this.sinkDur
+      // ★ V6.85 整层世界位移（"向下移动到下一层"）：形状 `sin(πk)` = 上去再回到 0。
+      //   幅度 = `sinkPx × 0.5`（换带 190px / 换波 85px）。**负号 = 世界向上 = 玩家在下沉**。
+      this.diveY = -this.sinkPx * 0.5 * Math.sin(Math.PI * k)
+      if (k >= 1) { this.sinkT = -1; this.burstV = 0; this.diveY = 0 }
+    } else {
+      // 爆冲衰减（§3.1）：低于 0.05 直接归零，免得永远吊着一条看不见的尾巴
+      this.burstV = this.burstV > 0.05 ? this.burstV * Math.exp(-dt / BURST_TAU) : 0
+      this.diveY = 0
+    }
     this.scrollV = SCROLL_BASE + this.burstV
 
     // ② 温跃层扫带（§3.3 ②）
@@ -2680,7 +2902,9 @@ export class DiveGame extends Component {
     // 细带（只在某些机型上出现，最难查的那类 bug）。所以按可视区外扩。
     const view = this.viewWorld()
     const pw = Math.max(0, (view.w - this.W) / 2) + 8
-    const ph = Math.max(0, (view.h - this.H) / 2) + 8
+    // ⚠️ 纵向多补 `DIVE_OVERSCAN`：`diveY` 会把整个世界抬上去最多 ~190px
+    //   （见 `stepWater`），底色层若只按可视区外扩，屏幕下缘会露一条清屏色。
+    const ph = Math.max(0, (view.h - this.H) / 2) + 8 + DIVE_OVERSCAN
     this.gBase.fill(UI.abyss, 1)
     this.gBase.fillRect(-pw, -ph, this.W + pw * 2, this.H + ph * 2)
 
@@ -3151,7 +3375,7 @@ export class DiveGame extends Component {
     const k = this.ringT / RING_DUR
     // 强度只调 alpha，不调半径：换波与换带的环大小差 9% 肉眼看不出来，
     // 但 alpha 差 45% 一眼可辨 —— **对比度要花在能被感知的量上**。
-    const a = 0.42 * this.ringStr * (1 - k)
+    const a = 0.58 * this.ringStr * (1 - k)
     for (let i = 0; i < 3; i++) {
       const kk = k - i * 0.12
       if (kk <= 0) continue
@@ -3183,11 +3407,11 @@ export class DiveGame extends Component {
     const sw = this.W / seg + 1
     for (let i = 0; i < seg; i++) {
       const yy = y + Math.sin(i * 0.85 + w.t * 5) * 6
-      this.gAtmo.fill(UI.cyanHi, 0.34 * a)
+      this.gAtmo.fill(UI.cyanHi, 0.50 * a)
       this.gAtmo.fillRect(i * sw, yy - 2, sw, 3)      // ① 头线
-      this.gAtmo.fill(UI.cyan, 0.13 * a)
+      this.gAtmo.fill(UI.cyan, 0.20 * a)
       this.gAtmo.fillRect(i * sw, yy + 1, sw, 14)     // ② 过渡带
-      this.gAtmo.fill(UI.cyanDim, 0.09 * a)
+      this.gAtmo.fill(UI.cyanDim, 0.14 * a)
       this.gAtmo.fillRect(i * sw, yy - 26, sw, 22)    // ③ 余晖
     }
   }
@@ -3444,21 +3668,24 @@ export class DiveGame extends Component {
       if (BONE_GLOW >= 3) {
         this.gBack.fill(0x4fe8ff, 0.10 * al); this.gBack.fillCircle(b.x, b.y, s * 1.30)
       }
+      //    V6.85：**本体与内层由骨白改金** —— 掉落是**货币**（`bank += coin`），
+      //    金（`amber` 语义槽 = 资源）才读得出"这能拿去商店花"；旧画法通体骨白 + 氧青，
+      //    只会读成"氧气骨"。⚠️ 最外圈**留氧青**：那是"**可拾取**"的通用信号（功能，不是配色）。
       this.gBack.fill(0x4fe8ff, (BONE_GLOW >= 3 ? 0.16 : 0.20) * al); this.gBack.fillCircle(b.x, b.y, s * 1.02)
-      this.gBack.fill(BONE, 0.14 * al); this.gBack.fillCircle(b.x, b.y, s * 0.78)
-      // ② 脊柱（贯穿全身）
-      this.gBack.line(BONE, 0.95 * al, Math.max(1.2, s * 0.16))
+      this.gBack.fill(BONE_GOLD, 0.16 * al); this.gBack.fillCircle(b.x, b.y, s * 0.78)
+      // ② 脊柱（贯穿全身）—— 金骨
+      this.gBack.line(BONE_GOLD, 0.95 * al, Math.max(1.2, s * 0.16))
       this.gBack.strokeSeg(b.x - s * ca, b.y - s * sa, b.x + s * ca, b.y + s * sa)
       // ③ 肋骨 ×4：`|k-1.5|` 让中间两根最长、两端收 —— 剪影才读作"鱼骨"而不是"梯子"
-      this.gBack.line(BONE, 0.80 * al, Math.max(1, s * 0.11))
+      this.gBack.line(BONE_GOLD, 0.80 * al, Math.max(1, s * 0.11))
       for (let k = 0; k < 4; k++) {
         const lx = (-0.55 + k * 0.32) * s
         const len = (0.62 - Math.abs(k - 1.5) * 0.12) * s
         this.gBack.strokeSeg(b.x + lx * ca - len * sa, b.y + lx * sa + len * ca,
           b.x + lx * ca + len * sa, b.y + lx * sa - len * ca)
       }
-      // ④ 头端亮核：给鱼骨一个"头"，扫视时视线先落在这里
-      this.gBack.fill(0xffffff, 0.95 * al)
+      // ④ 头端亮核：金色高光 —— 扫视时视线先落到"金头"上（"值钱"的锚点）
+      this.gBack.fill(BONE_GOLD_HI, 0.95 * al)
       this.gBack.fillCircle(b.x + s * 0.92 * ca, b.y + s * 0.92 * sa, Math.max(1.6, s * 0.18))
     }
 
@@ -4189,6 +4416,59 @@ export class DiveGame extends Component {
     }
   }
 
+  /**
+   * **推进器尾流**（V6.85b）。用户原话：「潜航器**游行的时候 可以有不同动力特效**出来」。
+   *
+   * ★ 三台各一套"动力语汇"（靠 `w.sub.color` 上色 + 粒子形态区分）：
+   *    · **灯艇**（青白）：细密**气泡**——多、小、散得快（明亮 · 轻盈）
+   *    · **刺鳐**（玉绿）：两三道**长条速度流线**——少、快、拖尾长（尖锐 · 高速）
+   *    · **深潜者**（暗紫）：**大颗低沉的脉冲气泡**——少、大、慢（厚重 · 军械）
+   *
+   * ⚠️ 尾流从**艉部**喷出、方向 = **移动方向的反向**（推进的反作用力）——
+   *   角度一律取 `w.aim`，⛔ **不取 `faceX`**：朝向是离散翻面的（还有 0.35s 迟滞），
+   *   喷口跟着它跳会读成"尾流在左右抽搐"。
+   * ⚠️ 坐标是 **sim 坐标** —— `Gfx` 包装器内部自己做 `H - y`（见 `Gfx.ts` 头注）。
+   */
+  private stepJets(w: DiveWorld, dt: number): void {
+    const g = this.gPlayer
+    const id = w.sub.id
+    // ① 补充：只在移动时喷
+    if (w.moving) {
+      const bx = w.px - Math.cos(w.aim) * (SUB_D * 0.46)
+      const by = w.py - Math.sin(w.aim) * (SUB_D * 0.46)
+      const n = id === 'raia' ? 1 : (id === 'bathy' ? 1 : 2)
+      for (let k = 0; k < n; k++) {
+        const a = w.aim + Math.PI + (Math.random() - 0.5) * 0.5
+        const sp = (id === 'raia' ? 165 : id === 'bathy' ? 55 : 95) * (0.8 + Math.random() * 0.4)
+        this.jets.push({
+          x: bx + (Math.random() - 0.5) * 6, y: by + (Math.random() - 0.5) * 6,
+          vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+          life: 0,
+          max: id === 'raia' ? 0.55 : (id === 'bathy' ? 0.70 : 0.45),
+          r: id === 'raia' ? 2.2 : (id === 'bathy' ? 5.5 : 3.2),
+        })
+      }
+    }
+    // ② 更新 + 绘制（画在 `gPlayer` 里、机体之后 ⇒ 压在最上面；尾流本体在艉部之外，
+    //    与艇身几乎不重叠，所以压在后面看不出来）
+    const col = w.sub.color
+    for (const j of this.jets) {
+      j.life += dt
+      j.x += j.vx * dt
+      j.y += j.vy * dt
+      j.vx *= 0.94
+      j.vy *= 0.94
+      const k = 1 - j.life / j.max
+      if (k <= 0) continue
+      g.fill(col, 0.26 * k)
+      g.fillCircle(j.x, j.y, j.r * (1 + (1 - k) * 0.9))
+      g.fill(0xffffff, 0.30 * k * k)
+      g.fillCircle(j.x, j.y, j.r * 0.4 * k)
+    }
+    this.jets = this.jets.filter(j => j.life < j.max)
+    if (this.jets.length > 90) this.jets.splice(0, this.jets.length - 90)
+  }
+
   private drawPlayer(w: DiveWorld): void {
     // 朝向镜像**已改由 `syncSub` → `updateFace` 每帧更新**（那一位在同一帧更早执行）：
     // 位图的朝向与炮位的朝向必须用**同一个** `faceX`，两处各更新一次会差一帧。
@@ -4420,24 +4700,20 @@ export class DiveGame extends Component {
     //        从 `u = 0.12` 起，就是为了避开 `u ∈ [0.30, 0.72]` 的塔 ——
     //        换位图时**必须保证图上的塔落在同一段 u 上**，否则炮会装到塔上。
 
-    // ⑧ 兜底轮廓 —— **暗缝**，不是亮边（V6.77 改，用户 2026-10-15 报「机体为啥还是有白色的描边」）。
+    // ⑧ 兜底轮廓 —— **V6.85g 整段删除**（用户 2026-10-16：「**浮在机体外的霓虹兜底线要我一起
+    //    收掉，不要其他的描绘**」）。
     //
-    //   为什么原来是 `UI.cyan` α0.55：V6.75 换位图时担心"位图自带的青蓝描边缩到 88px
-    //   会和背景糊在一起"，于是补一条与 `HULL_OUTLINE` 严格同源的矢量线兜清晰度。
+    //   历史：V6.75 换位图时担心"位图自带的青蓝描边缩到 88px 会和背景糊在一起"，
+    //   于是补一条与 `HULL_OUTLINE` **严格同源**的矢量线兜清晰度（原 `UI.cyan` α0.55，
+    //   V6.77 压成 `UI.abyss` 暗缝）。
     //
-    //   ⚠️ **这条兜底本身是"造白描边"的主因**。原因是两条判据叠加：
-    //     ① **闭环 + 高亮 = "UI 框"的语汇**（铁规 14）—— 无论颜色多对，读出来都是
-    //        "贴上去的一块板，还描了一圈白边"，而不是"金属在光里的边"；
-    //     ② 位图**自己也有一圈亮 rim**（实测最外圈比内侧亮 30~49%）⇒ 两道叠在一起，
-    //        在深色层上那圈白得刺眼。
-    //   ⇒ 兜底的作用是"让机体和背景分开"，**暗缝同样能做到**（亮背景靠压暗、暗背景靠
-    //     位图自带 rim 的亮），而暗缝不会读成"描上去的一圈"。
-    //     这就是铁规 14 的原话：**封板/补板一律走暗缝，给了亮边就变回"贴上去的一块"**。
-    //   ⚠️ 想验证哪个是主因：把这条线整段注释掉跑一次 —— 边缘仍有余亮（位图 rim），
-    //      但刺眼的那圈没了（见 `docs/shots/hull_outline_ab.png` 的 B 列）。
-    //   ⚠️ 仍不加 bloom：线宽挂在这条轮廓上会外扩成一圈比机体还大的光环（历史段 v2 坑 ⑤）。
-    //   ⚠️ 改这里必须同步 `tools/preview_hull_side.py` 的 `paste_hull`（预览要复刻实机）。
-    g.line(UI.abyss, 0.45, 1.3); hull(1.0, 0, 0); g.stroke()
+    //   ⚠️ 为什么现在必须**删**、而不是继续压暗：这条线画在**几何轮廓 `HULL_OUTLINE`** 上，
+    //      而位图涂抹出来的艇身**比轮廓瘦**（LUMEN 13.01% / RAIA 5.29% 的"轮廓内透明占比"），
+    //      **艏艉两端差得最多** ⇒ 线在那些地方**跑到艇身之外**，实机读作"浮在机体外的一条线"
+    //      （正是用户报的现象）。压暗只能把它从"白线"变成"一条暗线浮在那儿"，漂移没解决。
+    //   ⇒ 直接删。**也不换成"沿位图 alpha 边缘描一圈"**（用户明确「不要其他的描绘」）——
+    //      机体与背景的分界改由**位图自带的 rim** + 战斗层的整体压暗承担（见 `drawVeil`）。
+    //   ⚠️ 要回退看 V6.77 的暗缝版（git 历史），但回退会同时带回上面那条"漂到艇外"。
 
     // ⑨ 炮口照明（V6.57）—— 开火瞬间，炮口的光**打回机体**。
     //    "发射装置像贴图"的第三半：没有这一层，开火只是"船**外面**亮了一下"，
@@ -5473,8 +5749,8 @@ export class DiveGame extends Component {
       // 沿抛出方向**越飞越长**：迎水的一面被向后拖（柔性体，不是刚性圆）
       const a1 = n.r * spread * (1 + NET_STRETCH * (open ? kIn : 1))
       const b1 = n.r * spread
-      // alpha：展开期由淡转实；塌陷期淡出
-      const al = open ? 0.30 + 0.55 * kIn : 0.85 * (1 - kIn)
+      // alpha：展开期由淡转实；塌陷期淡出。× `alphaMul`（V6.84 空网弱化）
+      const al = (open ? 0.30 + 0.55 * kIn : 0.85 * (1 - kIn)) * n.alphaMul
 
       const ca = Math.cos(n.ang), sa = Math.sin(n.ang)
       const px: number[] = [], py: number[] = []

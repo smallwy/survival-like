@@ -23,7 +23,7 @@
  * 全部从既有表推导，所以"表里加了一种敌人 / 一件遗物，美术却漏了"这类漏配
  * 不会静默通过。
  */
-import { ENEMY_TEX, LAYERS, WEAPON_DEF, RELIC_DEF } from './tables'
+import { ENEMY_TEX, BOSS_TEX, LAYERS, WEAPON_DEF, RELIC_DEF } from './tables'
 import { SUB_ART_PATH } from '../subs'
 import { UI_ICON_PATH, UI_BG_PATH, FX_TEX_PATH, UI_FRAME_PATH } from '../uiArt'
 
@@ -33,6 +33,11 @@ export function artPaths(): Record<string, string> {
   // 敌人贴图：key 就是 `ENEMY_TEX` 的值（f_swarm / f_dash / f_drift），
   // 文件名是 web 侧原文件名，去掉 `f_` 前缀。Boss 复用 dash 的图，自然去重。
   for (const key of Object.values(ENEMY_TEX)) {
+    out[key] = 'fish/' + key.replace(/^f_/, '')
+  }
+  // Boss 单开一张表（V6.87）—— 两个 Boss 共用 kind:'boss'，不进 ENEMY_TEX。
+  // ⚠️ 这里漏了 ⇒ `artPaths()` 取不到 `f_boss_*`，图鉴/战斗里 Boss 静默退回无图。
+  for (const key of Object.values(BOSS_TEX)) {
     out[key] = 'fish/' + key.replace(/^f_/, '')
   }
 

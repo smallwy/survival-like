@@ -213,6 +213,12 @@ export class Hud {
   private artUsed = 0
   /** 深度**显示值**（阻尼跟随 `w.depthM`，见 `DEPTH_FOLLOW`）。`-1` = 尚未初始化 */
   private depthShown = -1
+  /**
+   * 深度阻尼速率**覆盖**（1/s）。`<= 0` = 用默认 `DEPTH_FOLLOW`（6/s）。
+   * V6.84：下沉节拍期间由 DiveGame 每帧设成 `SINK_ROLL_RATE`（2.4）——
+   * 默认 6/s 太快（0.5s 就跳到头），然后数字停了、世界还在沉，两件事对不上。
+   */
+  depthRate = 0
   /** 上一帧的 `w.t`，用来推 dt。`-1` = 尚未初始化 */
   private lastT = -1
   /**
@@ -509,7 +515,10 @@ export class Hud {
     // 重新开局会从 11,000m 直接回到 0m —— 大跳变**直接对齐**（否则数字要从头滚一遍，
     // 那读作"这局从深海开始"）。换波最大单跳 ≈1250m（L5），不会误触发。
     if (Math.abs(w.depthM - this.depthShown) > 2000) this.depthShown = w.depthM
-    this.depthShown += (w.depthM - this.depthShown) * Math.min(1, dt * DEPTH_FOLLOW)
+    // V6.84：`depthRate > 0`（下沉节拍期间 DiveGame 设的覆盖值）⇒ 米数跟着世界
+    // 滚完整个节拍；平时用默认 `DEPTH_FOLLOW`（6/s，够跟住波间的阶跃）。
+    this.depthShown += (w.depthM - this.depthShown)
+      * Math.min(1, dt * (this.depthRate > 0 ? this.depthRate : DEPTH_FOLLOW))
     const depthStr = Math.round(this.depthShown).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',')
     this.text(dx0, dy0, depthStr, 30, TXT.cyber)
     this.text(dx0 + 12 + depthStr.length * 15, dy0 + 12, 'm', 12, TXT.dim)
@@ -1685,12 +1694,15 @@ export class Hud {
    * 挂载位示意图（挂载扩容卡）。V6.71 从**俯视椭圆**改成**侧视舱段图**。
    *
    * ⚠️ 为什么必须跟着改（这张图和战斗内共用同一套真源）：
-   *   战斗内的炮位真源已从「座圈角度 + 压扁投影」换成 `SEAT_MOUNTS`（背3 + 腹 3）。
+   *   战斗内的炮位真源已从「座圈角度 + 压扁投影」换成 `SEAT_MOUNTS`。
+   *   V6.85g 起是 **腹 4 + 背两端 2**（不再是"背3 + 腹 3"的对称排）：
+   *   0/2/3/4 在腹部、1/5 在艇首/艇尾上缘（三台的中段塔/舱盖让不开位置）。
    *   图上还画俯视椭圆 ⇒ 卡上标的"新增第5 座"在游戏里根本找不到对应位置，
    *   而这个图的**全部意义**就是告诉玩家"你买的是哪一座"。
    *
-   * 画法：一条缩略的艇身轮廓（梭形），6 个舱位按 `SEAT_MOUNTS` 的 u/v 落点，
-   * 上排=背脊、下排=腹部；已装备的画成实心带本色描边，空座画虚圈，
+   * 画法：一条缩略的艇身轮廓（梭形），6 个舱位**逐点取 `SEAT_MOUNTS` 的 u/v 落点**，
+   * （⚠️ 别再假设"上排/下排"成排对齐 —— 现在是腹 4 + 背 2，各座 v 各异）；
+   * 已装备的画成实心带本色描边，空座画虚圈，
    * 本次要解锁的那座套一圈闪烁提示环（琥珀）。
    *
    * ⚠️ Cocos 的 `ellipse` 收**半径**不是直径（坑 13）—— web 的
@@ -1806,20 +1818,32 @@ export class Hud {
     this.scrim(0.66)
 
     // 面板几何：宽度跟随卡片总宽（自适应设计分辨率），高度是各分区之和
-    // ★ V6.83 方案 A：商店位 3 → `OFFER_N`。
-    //   ⚠️ 卡宽**必须由面板可用宽反推**（原来是 `pw = cw*3 + …` 反着的）——
-    //      5 张卡要挤进同一块面板，否则面板会超出设计分辨率、最右侧的卡画到屏幕外。
-    //   代价：卡宽 204 → 122，`fitText` 会把描述字号自动缩一档。
-    //   如果实机读不下 description，把 `OFFER_N` 改回 4 即可（一行常量）。
-    const cw = 122, gap = 10, pad = 26
+    // ★ V6.83 方案 A：商店位 3 → `OFFER_N`（经济系统的取舍强度靠它）。
+    //   ⛔ V6.83 那版把卡宽从 204 一刀砍到 **122**，注释写「卡宽必须由面板可用宽反推」——
+    //      但**这个"反推"从没算过账**：`cw=122` 时 `pw = 122×5 + 10×4 + 26×2 = 702`，
+    //      只占设计宽 1304 的 **54%**（面板两侧各空 301px）⇒ 卡宽压根不必砍这么狠。
+    //      而且那句「`fitText` 会把描述字号自动缩一档」是**错的**：`fitText` 只**截断加省略号**，
+    //      不缩字号 —— 于是描述/状态行全变成「新装备 · 占 1 座…」，这才是"字会穿"的实感来源。
+    //   ★ V6.85g：卡宽 122 → **176**（`pw = 972`，占设计宽 75%），把 V6.83 欠的排版空间还回来。
+    //      用户 2026-10-16：「商店 UI 错乱、不齐、字会穿」。
+    //      ⚠️ **硬证据（不是"感觉挤"）：类型标签与锁定按钮物理重叠了 14px。**
+    //         · 类型标签左对齐起点 `x + 42`，2 字 × 13 号 ⇒ 占 `x+42 … x+68`
+    //         · 锁定按钮中心 `x + cw - 40`、宽 56 ⇒ 占 `x+cw-68 … x+cw-12`
+    //         · `cw = 122` ⇒ 按钮 `x+54 … x+110` ⇒ **与标签重叠 [x+54, x+68] = 14px**
+    //         · 且两者 y 区间也重叠（标签 `y+13…y+33` / 按钮 `y+8…y+38`）⇒ **标签被按钮压住**
+    //         · `cw = 204`（V6.83 之前）时按钮在 `x+136 … x+192` ⇒ 不重叠
+    //        ⇒ 这是**砍卡宽砍出来的**，不是布局写错；176 时按钮回到 `x+108 … x+164`，间隙 40px ✅
+    //   ⚠️ **别再靠"减上架数"腾空间** —— 上架数 = 经济系统的取舍强度（铁规 22），
+    //      该动的是面板尺寸，不是商品数。
+    const cw = 176, gap = 10, pad = 26
     const pw = cw * OFFER_N + gap * (OFFER_N - 1) + pad * 2
-    // 2026-10-13：卡高 356 → **292**。立绘框归位 2:1（176×88，见 shopCard）后，
-    // 原本框下方那片「立绘放不满、名字又钉在卡底」的死空间随之消失。
-    // 面板高 534 → **470**（占屏高 71% → 63%）—— 「商店太大」这条反馈靠**砍死空间**解决，
-    // 而不是把卡压小：卡宽仍 204，信息一个没少。
-    // ⚠️ 卡高与立绘高**联动**：立绘 `ah` 从 88 降到 (cw-28)/2 = 47，下半区
-    //    全部是 `ch - N` 的写法（从卡底往上排）⇒ 卡高跟着减 41 就自动对齐。
-    const headerH = 56, cardH = 251, footH = 56, vpad = 20
+    // ⚠️⚠️ 卡高与立绘高**强联动** —— 改 `cw` 必须同量反推 `cardH`，否则名称会顶进立绘框。
+    //   推导：立绘框 `ah = (cw - 28) / 2`（2:1，见 shopCard），框底 = `y + 48 + ah`；
+    //         名称中心 = `y + ch - 134`（下半区全部从卡底往上排）。
+    //         两者间距要保住 **22px**（V6.83 卡宽 204 时的原始间距）⇒ `ch ≥ 48 + ah + 22 + 134`。
+    //   ★ V6.85g：cw 122 → 176 ⇒ `ah` 47 → **74**（框底 y+122）⇒ `cardH` 251 → **278**
+    //     （名称中心 y+144，间距 22 ✅）。面板高 429 → **456**（占设计高 61%）。
+    const headerH = 56, cardH = 278, footH = 56, vpad = 20
     const ph = vpad * 2 + headerH + 12 + cardH + 14 + footH
     const px = (W - pw) / 2
     const py = (H - ph) / 2
@@ -1867,7 +1891,7 @@ export class Hud {
     const up: UpgradeDef | undefined = w.offers[i]
     const sold = w.sold[i]
     const locked = w.locked[i]
-    const afford = up ? w.bank >= up.cost : false
+    const afford = up ? w.bank >= w.offerCost(i) : false
 
     // 类型色：器械青 / 挂载琥珀 / 属性紫 / 遗物靛
     const typeCol = !up ? BRIGHT.edge
@@ -1975,7 +1999,11 @@ export class Hud {
     // ---- 名称 / 描述 ----
     // 行位全部**从卡底往上排**（`ch - N`）而不是写死绝对值 —— 改卡高时下半区整体跟着走，
     // 不会出现"立绘变高了、名字还钉在原地"的错位。
-    this.center(cxm, y + ch - 134, up.name, 17, sold ? TXT_LIGHT.mute : TXT_LIGHT.main)
+    // ⚠️ V6.85g：名称也要过 `fitText` —— 它曾是全卡**唯一一行漏网的裸字符串**。
+    //    当前最长的升级名 5 字（`脉冲机关枪` ≈ 85px @17），卡宽 176 下放得下；
+    //    但**下一个更长的名字就会直接穿出卡片**（`Label` 默认不裁剪、也没有 maxWidth）。
+    this.center(cxm, y + ch - 134, fitText(up.name, 17, cw - 24), 17,
+      sold ? TXT_LIGHT.mute : TXT_LIGHT.main)
     this.center(cxm, y + ch - 112, fitText(up.desc, 13, cw - 22), 13, TXT_LIGHT.dim)
 
     // ---- 状态行：**买了会发生什么**必须写死（玩家不该靠猜是"新武器"还是"强化"）----
@@ -2021,7 +2049,9 @@ export class Hud {
     // 价格**并进按钮**（`购买 · 45`），把省下的那一行让给立绘。
     // 买不起时直接给**差额**（`缺 7 鱼骨`）—— 「鱼骨不足」这种文案玩家还得自己回顶栏算。
     this.button(cxm, y + ch - 34, cw - 28, 36,
-      sold ? '已售出' : (afford ? `购买 · ${up.cost}` : `缺 ${up.cost - w.bank} 鱼骨`),
+      // ⚠️ 价格一律走 `w.offerCost(i)`（**唯一算式**，含深度涨价）——
+      //    写 `up.cost` 会显示"面板 45、实扣 78"，且**不报错**。
+      sold ? '已售出' : (afford ? `购买 · ${w.offerCost(i)}` : `缺 ${w.offerCost(i) - w.bank} 鱼骨`),
       () => cbs.onBuy(i), !sold && afford,
       (!sold && afford) ? lightBuyBtn(typeCol) : BTN_BRIGHT_DISABLED)
   }

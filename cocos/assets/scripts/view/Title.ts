@@ -81,7 +81,7 @@ import {
 } from './neon'
 import { SpriteBank } from './art'
 import { UI, TXT, MENU, GLASS, TXT_LIGHT, BUILD_TAG } from '../shared/theme'
-import { SUBS, SUB_ART_R } from '../shared/subs'
+import { SUBS } from '../shared/subs'
 import type { SubDef, SubId } from '../shared/subs'
 import { unlocksByKind, isUnlocked, PERKS } from '../shared/dive/unlocks'
 import type { PerkId } from '../shared/dive/unlocks'
@@ -198,6 +198,30 @@ const TILT_T = 5.5
  *    而且 `Graphics` 画不出模糊，偏移越大越像硬邦邦的两个圆。
  */
 const HULL_R = 90
+/**
+ * **标题界面中央那套"圆盘机构"总开关**（V6.85b 立、V6.85g 扩）。
+ *
+ * `true` = 不画**所有为圆形机体设计的零件**：
+ *   `drawHull` / `drawRing` / `drawLight` / `drawCore` / `drawScanArm`
+ *   ＋ 每帧的**推进器喷流**⑥ / **声呐环**⑦。
+ *
+ * 它们本来是一整套（主盘 r90 / 装甲环 78·86 / 环向推进器口 r68 / 破圆鳍 r132 /
+ * 球面明暗椭圆 / 核心穹顶 Ø40 / 扫描臂 / 声呐椭圆环），而机体立绘已换成
+ * **侧视扁矩形**（`sub_hull.png` 画布 408×339），战斗内机体周围也**什么机构都没有**。
+ * ⇒ 全关之后"主界面机体 = 战斗内机体"。
+ *
+ * ★★ **V6.85b 只关了前三处，后四处漏了** —— 于是主界面剩下一堆**孤儿零件**：
+ *    用户 2026-10-16 截图圈出机体正中那个**近黑圆盘**（= `drawCore` 的核心穹顶底盘
+ *    `0x08161f`，直径 `CORE_R × 2 = 40`）。外壳、装甲环、光源一起关掉之后，
+ *    垫在它下面的东西全没了，只剩它自己**孤零零压在浅色机身上**，对比极强
+ *    ⇒ 读作「机身上有个黑点」。
+ *    （实测量化：机身 99px / 暗核 41px，与 `HERO_DISC` 与 `CORE_R` 的几何完全吻合。）
+ *    ⚠️ **教训**：这一整类是"按圆盘几何算出来的零件"，**关一个必须回头数还有几个**
+ *    —— 漏掉的不会报错，只会在实机上变成一个说不出来由的色块。
+ *
+ * ⚠️ 要重新给主界面做展示装置，必须按**侧视**画（矩形支架），不能把这套圆盘缩一缩。
+ */
+const HULL_SHELL_OFF = true
 const HULL_DEPTH = 14
 const SHADOW_DX = 9
 const SHADOW_DY = 8
@@ -345,14 +369,57 @@ const VENT_VX = 40
  */
 const VENT_DECAY = 1.2
 /**
- * 中央潜航器的**圆盘直径**（不是贴图尺寸 —— 见 subs.ts 的 SUB_ART_R 说明）。
+ * 中央潜航器立绘的**横向显示宽度**（px）。
  *
- * 116 = 半径 58，比战斗内的 `SUB_D`（88）大 32% —— 主界面是"展示位"，该大一号；
+ * V6.85：116 = 战斗内 `SUB_D`（88）的 1.32 倍 —— 主界面是"展示位"，该大一号；
  * 但**不能更大**，否则机构区（58–90）被挤没，舱体又变回"一张立绘"。
+ * ⚠️ 原来是"圆盘直径"（按 `SUB_ART_R` 归一化）；改侧视图后归一化基准换成**画布宽度**。
  */
 const HERO_DISC = 116
-/** 「出击准备」卡里缩略立绘的圆盘直径。卡片只有 132 高，比中央小一号 */
-const SUB_DISC_CARD = 78
+/**
+ * 「出击准备」卡里机体**内容**的显示宽度（px）。
+ *
+ * ★ V6.85g：口径从「**画布宽**」改成「**内容宽**」，值 78 → 100。
+ *
+ * 病根：`sub_hull.png` 画布 408×339 里，机体内容只占 **352×225** —— 四周是留给
+ * 鳍 / 撞角 / 统一几何的**留白**，而且内容**垂直中心偏下**（`cy = 0.5928`）。
+ * 按画布宽缩放时 `78/408` 得到的是"**画布**显示 78 宽"，机体**实际只有 67×43**；
+ * 而紧挨着的武器卡立绘用的是 `WPN_CARD_W - 44 = 186` 的 2:1 框（画布 600×300）
+ * ⇒ 武器内容 **93×80**，机体只剩它一半多 ⇒ 用户 2026-10-16：「潜航艇比武器还小呢」。
+ *
+ * ⇒ 换算基准换成**内容宽 `SUB_HULL_CONTENT_W = 352`**：`100/352` 得到的才是真正
+ *   100px 宽的机体（略大于武器的 93px —— 语义上"潜航器是主角，武器是配角"）。
+ *
+ * ⚠️ 卡片高 132：内容 100 宽 ⇒ 画布 116 宽 × 103 高，上下各留 ~15px。再往上加会
+ *    顶到卡片边框 —— 这个值与 `SUB_CARD_H`、文字起点 `r.x + 128` 三者联动。
+ * ⚠️ 主形象 `HERO_DISC` **仍是画布口径**（`116/408`）—— 它的等效内容宽恰好也是 100，
+ *    两者**结果相同**，所以这轮只改卡片，主界面一行没动。
+ */
+const SUB_DISC_CARD = 100
+/**
+ * 侧视机体在画布里的**不透明内容宽度**（px）。
+ *
+ * ★ V6.85g 新增。`normalize_sub_art.py` 把三台（`sub_lumen / sub_raia / sub_bathy`）
+ * 统一到同一张 408px 画布，机体涂抹出来的实际横向范围是 **x 28..379 ⇒ 352px**
+ * （三台实测一致；内容高 225，纵向中心 `cy = 0.5928`）。
+ *
+ * ⚠️ 与 `docs/机体位图规格_V6.75.md` §1「画布 408×339」同源；**换图 / 改画布必须
+ *    同步这个数**，否则卡片里机体大小会整体漂移（**不报错**，只是"看着不对劲"）。
+ */
+const SUB_HULL_CONTENT_W = 352
+/**
+ * 侧视机体立绘 **`sub_hull.png` 的画布宽度**（px）。
+ *
+ * ★ V6.85 立规矩：选艇界面（卡片 + 中央）**改用战斗内同一张侧视机体** ——
+ * 用户：「战斗内不是有一个潜航器吗，选艇界面就应该是**侧视**的，要和战斗内保持一致」。
+ * 原版三张是**正俯视圆盘**（`sub_lumen/raia/bathy.png`，588×588），缩放进方框里
+ * 读作"一个孔里飘着一张盘"，与实机（侧视 `sub_hull`）**不是同一个东西**。
+ *
+ * ⇒ 归一化基准从"圆盘半径 `SUB_ART_R = 180`"换成"**侧视画布宽度 408**"。
+ * ⚠️ 与 `docs/机体位图规格_V6.75.md` §1「画布 408×339」同源；**换图必须同步这个数**，
+ *    否则卡片里机体大小会整体漂移（**不报错**，只是"看着不对劲"）。
+ */
+const SUB_HULL_ART_W = 408
 
 // ---------------------------------------------------------------------------
 // §3.5 右下角主操作（V6.41）
@@ -1406,6 +1473,15 @@ export class Title {
   private drawHull(): void {
     const g = this.gHull
     g.clear()
+    // ★★ V6.85b：**整体关掉**（保留代码，随时可回滚）。
+    //   用户原话：「**主界面的机体装置贴图和选进战斗机体装置好像 UI 不匹配**」。
+    //   病根：这一整套外壳是**为"半径 58 的圆盘"设计的** —— 主盘 `HULL_R = 90`、
+    //   装甲环 78/86、环向推进器口 `THRUST_R = 68`、破圆鳍到 `FIN_R1 = 132`。
+    //   而侧视机体是 **116×103 的扁矩形**（半高只有 51）⇒ 圆盘上下各戳出 ~39px、
+    //   六个环向口更是与战斗内的**背/腹导轨**座位对不上（战斗内机体周围**什么机构都没有**）。
+    //   ⇒ 要让"界面 = 实机"，最忠实的做法就是**不画**。
+    //   ⚠️ 后续要做"停靠架"的话，得按**侧视**重画一套（矩形支架），⛔ 不是把圆盘缩一缩。
+    if (HULL_SHELL_OFF) return
 
     // ⓪ 投影：右下略微偏移的暗盘，被主盘压掉大半 ⇒ 只在右下露出一圈月牙
     g.fill(0x02060b, 0.40)
@@ -1482,6 +1558,8 @@ export class Title {
    * ⚠️ 这里只画**结构**，不画明暗 —— 明暗归 `drawLight()`（理由见 `drawHull`）。
    */
   private drawRing(g: Gfx, r: number, w: number, seg: number): void {
+    // ★ V6.85b：见 `HULL_SHELL_OFF` —— 两圈装甲环（r78 / r86）是为圆盘做的。
+    if (HULL_SHELL_OFF) { g.clear(); return }
     const step = (Math.PI * 2) / seg
     const duty = 0.62                        // 占空比：剩下 38% 是缺口
     g.line(0x2a465c, 1, w)
@@ -1503,8 +1581,15 @@ export class Title {
    * 周围机构全是硬边转动，有它才有视觉锚点。
    *
    * 体积线索同 `drawHull`：底暗盘 → 上移的亮盘（穹顶）→ 左上高光点。
+   *
+   * ★★ V6.85g：**加 `HULL_SHELL_OFF` 开关**。它就是用户 2026-10-16 圈出的"黑点"：
+   *    底盘 `0x08161f` 是**近黑**，本来嵌在同样是暗调的外壳（`0x1b3243`）正中，
+   *    读作"舱盖上的能量核心"；外壳一关，近黑盘直接压在**浅青白**的侧视机身上，
+   *    明度差从 ~15 拉到 ~130 ⇒ 观感从"核心"翻转成"机身上糊了个黑洞"。
+   *    ⚠️ 改暗/改小**都治不好**（几何位置就不对），只能一起关（铁规 30 的同类）。
    */
   private drawCore(g: Gfx): void {
+    if (HULL_SHELL_OFF) { g.clear(); return }
     g.fill(0x08161f, 1)
     g.g.circle(0, 0, CORE_R)
     g.g.fill()
@@ -1545,6 +1630,8 @@ export class Title {
    */
   private drawLight(): void {
     const g = this.gLight
+    // ★ V6.85b：见 `HULL_SHELL_OFF` —— 球面明暗是为圆盘做的，侧视扁矩形上不成立。
+    if (HULL_SHELL_OFF) { g.clear(); return }
 
     // ① 球面明暗：左上受光 / 右下背光（两个偏心大椭圆）
     g.fill(UI.cyanHi, 0.26)
@@ -1578,6 +1665,9 @@ export class Title {
    * 探头也给了体积：上缘亮线 + 下缘暗线（光源在左上，与全场一致）。
    */
   private drawScanArm(g: Gfx): void {
+    // ★ V6.85g：见 `HULL_SHELL_OFF` —— 扫描臂是以**圆盘圆心**为轴画的
+    //   （`SCAN_R0 → SCAN_R1`），圆盘一没，它就是从机身正中穿出来的一根悬空杆。
+    if (HULL_SHELL_OFF) { g.clear(); return }
     g.line(UI.cyan, 0.45, 2)
     g.g.moveTo(SCAN_R0, 0)
     g.g.lineTo(SCAN_R1 - 8, 0)
@@ -1680,7 +1770,10 @@ export class Title {
     // ⑥ 推进器喷流：6 个各错开 `THRUST_T/6` —— 依次点火才有环形点火感，同时喷 = 一坨光
     const tg = this.gThrust
     tg.clear()
-    for (let i = 0; i < SEAT_ANGLES_DEG.length; i++) {
+    // ★ V6.85g：见 `HULL_SHELL_OFF` —— 这 6 道喷流沿 `THRUST_R = 68` 的**圆环**均布，
+    //   是"环向推进器"的排气口；圆盘外壳一没，它们就变成从机身四周的空气里喷出来的火。
+    //   ⚠️ 必须**先 clear 再跳过**（不能提前 return）—— 提前返回会把上一帧的火苗永久留在屏上。
+    if (!HULL_SHELL_OFF) for (let i = 0; i < SEAT_ANGLES_DEG.length; i++) {
       const a = (SEAT_ANGLES_DEG[i] * Math.PI) / 180
       const p = ((this.t + (i * THRUST_T) / SEAT_ANGLES_DEG.length) % THRUST_T) / THRUST_DUR
       if (p >= 1) continue
@@ -1703,7 +1796,10 @@ export class Title {
     //    椭圆压扁（ry = rx × 0.43）而不是正圆 —— 3/4 俯视口径，正圆会读成"光环"。
     const sg = this.gSonar
     sg.clear()
-    for (let i = 0; i < SONAR_RINGS; i++) {
+    // ★ V6.85g：见 `HULL_SHELL_OFF` —— 声呐环是给**俯视圆盘**读的（椭圆压扁 = 3/4 俯视口径），
+    //   换到侧视机体上就成一圈套在艇身上的光环，反而正是"画上去的东西"。
+    //   ⚠️ 同 ⑥：先 clear 再跳过。
+    if (!HULL_SHELL_OFF) for (let i = 0; i < SONAR_RINGS; i++) {
       const sp = ((this.t / SONAR_PERIOD) + i / SONAR_RINGS) % 1
       const r = sp * SONAR_RMAX
       const a = (1 - sp) * (1 - sp) * 0.34
@@ -2468,22 +2564,27 @@ export class Title {
    * 卡片立绘异步到达。
    *
    * 与 `syncHeroArt()` 同一模式：每帧对一次 key，命中就 `return`。
-   * 潜航器用的是**船坞里同一张贴图** `sub_<id>`；武器用商店那张 `item_<id>`。
+   * 潜航器用的是**战斗内同一张侧视机体** `sub_hull`（V6.85 起）；武器用商店那张 `item_<id>`。
    *
-   * ⚠️ 潜航器缩放走 **`SUB_DISC_CARD / (2 * SUB_ART_R)`**（按圆盘半径）——
-   *    与船坞、战斗内三处同源。按整体缩放会让三台在卡片里差一倍。
+   * ⚠️ 潜航器缩放走 **`SUB_DISC_CARD / SUB_HULL_CONTENT_W`**（按侧视机体**内容**宽度）。
+   *    ★ V6.85g：原来是 `/ SUB_HULL_ART_W`（**画布**宽 408）—— 那把画布留白也算进了
+   *      "机体有多大"，缩出来的机体只有目标值的三分之二。见 `SUB_DISC_CARD` 注释。
+   *    与主形象、战斗内共用同一张图与同一套归一化。
    */
   private syncLoadArt(): void {
     for (let i = 0; i < this.loadSubArt.length; i++) {
       const a = this.loadSubArt[i]
       if (a.node.active) continue
+      // ★ V6.85：**每个潜航器有自己的侧视立绘** `sub_lumen / sub_raia / sub_bathy`（由
+      //   `prep_sub_art.py` + `normalize_sub_art.py` 统一到同一张画布 ⇒ 与战斗内**同一套几何**）。
+      //   原来是"正俯视圆盘"，与实机（侧视）不是同一个东西，用户否掉了。
       const key = 'sub_' + SUBS[i].id
       const sf = this.art.get(this.art.has(key) ? key : 'sub_body')
       if (!sf) continue
       a.spriteFrame = sf
       const ut = a.node.getComponent(UITransform) ?? a.node.addComponent(UITransform)
       ut.setContentSize(sf.originalSize.width, sf.originalSize.height)
-      const k = SUB_DISC_CARD / (2 * SUB_ART_R)
+      const k = SUB_DISC_CARD / SUB_HULL_CONTENT_W
       a.node.setScale(k, k, 1)
       a.node.active = true
     }
@@ -2596,12 +2697,13 @@ export class Title {
    * 每帧对一次即可（直接比 key，命中就 return）：标题界面会停留很久，但一次比较的
    * 代价可以忽略；反过来"只挂一次"会在美术后到位时永远显示不出图。
    *
-   * ⚠️ 缩放走 **`HERO_DISC / (2 * SUB_ART_R)`**（按**圆盘半径**），不是按贴图整体 ——
-   * 否则三台会因突出件不同而大小不一（§9.4 已写死这条）。
+   * ⚠️ 缩放走 **`HERO_DISC / SUB_HULL_ART_W`**（按**侧视画布宽度**）——
+   * V6.85 起中央机体也换成侧视 `sub_hull`（与战斗内一致），侧视图没有"圆盘半径"可言。
    */
   private syncHeroArt(): void {
     const art = this.heroArt
     if (!art) return
+    // ★ V6.85：中央机体 = 你选的那一台自己的侧视立绘（与战斗内同一张图、同一套归一化）
     const want = 'sub_' + SUBS[this.sel].id
     const useKey = this.art.has(want) ? want : (this.art.has('sub_body') ? 'sub_body' : '')
     if (!useKey) return
@@ -2613,7 +2715,7 @@ export class Title {
     // 素材 meta 是 `trimType: auto` ⇒ `rect` 是裁剪后的；而 `trim=false` 时引擎按
     // 整张画布定标 ⇒ 用 `rect` 会**非等比拉伸**（实测横向压掉 35%，已记在项目记忆里）。
     ut.setContentSize(sf.originalSize.width, sf.originalSize.height)
-    const k = HERO_DISC / (2 * SUB_ART_R)
+    const k = HERO_DISC / SUB_HULL_ART_W
     art.node.setScale(k, k, 1)
     art.node.active = true
     this.heroKey = useKey
