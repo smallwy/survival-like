@@ -59,6 +59,10 @@ web/src/assets/sub/_regen_v2/
 # 注：本目录早期已有部分文件被误入库（见提交说明），此处仅阻止继续增长。
 web/src/assets/items/_regen/
 
+# ImageGen 工具的默认输出目录（AI 源图，与上面 *_regen/ 同一约定：源图不入库）。
+# 正式归档的出图原稿走 docs/shots/sub_art/01_出图原稿/，那份入库。
+generated-images/
+
 # WorkBuddy 会话产出图（诊断图 _diag_*/iso*/turret_*、设计对照图）；
 # 可随时重新生成，且体积大。仓库只留 overview.md 与 memory。
 .workbuddy/artifacts/*.png
