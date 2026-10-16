@@ -49,7 +49,7 @@ TEMPLATE = os.path.join(ROOT, 'cocos', 'assets', 'resources', 'sub', 'sub_hull.p
 # 需要生成 / 修正的鱼图（V6.82 六张 + V6.83 七张）
 NAMES = [
     'splitter', 'shard', 'bulwark', 'brood', 'kamikaze', 'herder',   # V6.82
-    'jelly', 'mimic', 'lancer', 'burrower', 'bloom', 'leech', 'darter',  # V6.83
+    'jelly', 'mimic', 'lancer', 'burrower', 'bloom', 'leech', 'darter', 'spitter',  # V6.83
 ]
 
 

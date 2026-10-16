@@ -368,6 +368,55 @@ def draw_darter(im=None):
     return _save(im, h, 'darter')
 
 
+def draw_spitter(im=None):
+    """喷酸鱼：**短粗身 + 前端大口径喷嘴 + 背部毒囊**（V6.83）
+
+    ★ 刻意**不用 `_spindle`** —— 那是"所有鱼"的通用形，用多了剪影就雷同。
+    它的读法必须是"**它靠喷东西**"，而"喷"这个动作要有一个**形状上的解释**：
+    前端一个突出的**大圆口** + 背上一个**鼓起来的囊**（酸从哪来）。
+    与 `lancer` 的长吻区别：那个是**细而长的刺**，这个是**短而大的口**。
+    """
+    h = 320
+    im = _canvas(h)
+    dr = ImageDraw.Draw(im)
+    cx, cy = W * SS / 2, h * SS / 2
+
+    # 身体：前宽后窄的"瓶子"（不是纺锤 —— 前后不对称才读得出朝向）
+    body = [(cx - 152 * SS, cy - 88 * SS), (cx - 40 * SS, cy - 100 * SS),
+            (cx + 96 * SS, cy - 74 * SS), (cx + 176 * SS, cy - 20 * SS),
+            (cx + 176 * SS, cy + 20 * SS), (cx + 96 * SS, cy + 74 * SS),
+            (cx - 40 * SS, cy + 100 * SS), (cx - 152 * SS, cy + 88 * SS)]
+    dr.polygon(body, fill=_mix(MAGENTA, 0.64) + (BODY_A,))
+    dr.line(body + [body[0]], fill=MAGENTA + (255,), width=7 * SS, joint='curve')
+
+    # 背部毒囊：一个鼓在上面的包（"酸从哪来"的形状解释）
+    dr.ellipse([cx - 30 * SS, cy - 176 * SS, cx + 118 * SS, cy - 44 * SS],
+               fill=_mix(MAGENTA, 0.44) + (215,), outline=MAGENTA + (255,), width=6 * SS)
+    for k in range(3):                       # 囊内的酸液纹（三层同心弧 ⇒ 读作"装满了")
+        rr = (18 + k * 16) * SS
+        dr.arc([cx + 44 * SS - rr, cy - 110 * SS - rr, cx + 44 * SS + rr, cy - 110 * SS + rr],
+               200, 340, fill=(0xff, 0xff, 0xff, 170 - k * 40), width=5 * SS)
+
+    # ★ 前端喷嘴：一段**大口径的短管** + 一个**双层圆环开口**
+    #   （双层环是全作唯一这个形状 —— 一眼认出"那是口"）
+    dr.rounded_rectangle([cx - 232 * SS, cy - 46 * SS, cx - 128 * SS, cy + 46 * SS],
+                         radius=16 * SS, fill=_mix(MAGENTA, 0.30) + (245,),
+                         outline=MAGENTA + (255,), width=6 * SS)
+    for rr, wd in ((34, 7), (20, 6)):
+        dr.ellipse([cx - 202 * SS - rr * SS * 0.5, cy - rr * SS * 0.5,
+                    cx - 202 * SS + rr * SS * 0.5, cy + rr * SS * 0.5],
+                   outline=MAGENTA + (235,), width=wd * SS)
+    dr.ellipse([cx - 208 * SS, cy - 7 * SS, cx - 196 * SS, cy + 7 * SS], fill=(0xff, 0xff, 0xff, 210))
+
+    # 尾鳍：小而分叉（它不是靠游得快 —— 尾鳍刻意画小，与 lancer 的大尾鳍对照）
+    for sy in (-1, 1):
+        dr.polygon([(cx + 170 * SS, cy), (cx + 236 * SS, cy + sy * 62 * SS), (cx + 190 * SS, cy + sy * 14 * SS)],
+                   fill=_mix(MAGENTA, 0.52) + (205,), outline=MAGENTA + (255,))
+
+    _eye(dr, cx - 52 * SS, cy - 30 * SS, MAGENTA, 12 * SS)
+    return _save(im, h, 'spitter')
+
+
 def _eye(dr, x, y, color, r):
     dr.ellipse([x - r, y - r, x + r, y + r], fill=INK + (240,), outline=color + (255,), width=4 * SS)
     r2 = r * 0.45
@@ -389,6 +438,7 @@ DRAWERS = [
     ('bloom', draw_bloom),
     ('leech', draw_leech),
     ('darter', draw_darter),
+    ('spitter', draw_spitter),
 ]
 
 

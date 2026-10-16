@@ -2210,6 +2210,9 @@ export class DiveGame extends Component {
       case 'kill':
         this.killFx(ev)
         break
+      case 'eshotDown':
+        this.eshotDownFx(ev)
+        break
       case 'pickup':
         // 拾取反馈原来只有 3 颗火花 —— 磁吸**收割一串**鱼骨时几乎看不见。
         // 补一圈扩散环：环是"已进账"的确认信号，在余光里比火花更容易被感知到。
@@ -3733,6 +3736,10 @@ export class DiveGame extends Component {
       }
     }
 
+    // 敌方投射物（V6.83）：画在玩家子弹之后（最上层）—— 弹必须压得住鱼群，
+    // 否则"一颗正在飞来的东西"会被 30 只鱼盖住，而它恰恰是最需要被看到的东西。
+    this.drawEShots(w)
+
     this.drawPlayer(w)
   }
 
@@ -3740,6 +3747,101 @@ export class DiveGame extends Component {
    * 敌人。分工与 web 一致：**贴图负责"具体形象"，2px 发光核心负责"可读性"**。
    * 核心必须有一条在贴图之上 —— 那是"每条鱼都能被定位"的铁律，远距离只剩一个点时靠它。
    */
+  /**
+   * **敌方投射物**（V6.83）。
+   *
+   * ★ 与玩家的子弹必须在**形状语汇**上分开，不能只靠颜色：
+   *   玩家的弹 = **锐利弹体 + 长拖尾**（"打出去的东西"）
+   *   敌方的弹 = **圆团 + 脉动环 + 短拖尾**（"飘过来的东西"）
+   *   拖尾长度尤其关键 —— 它同时编码速度：玩家弹快（长尾），酸弹慢（短尾）。
+   *
+   * ⚠️ 坐标用 `gEnt` ⇒ **直接给 sim 坐标**（`Gfx` 层内部已做 y 翻转）。
+   *    只有裸 Sprite 才需要 `this.H - y`（见 `drawEnemies` 的 `sp.node.setPosition`）。
+   *    这两者写混了会得到"弹在屏幕上下镜像的位置"——**不报错、只是位置不对**。
+   */
+  private drawEShots(w: DiveWorld): void {
+    if (!w.eShots.length) return
+    const g = this.gEnt
+    for (const s of w.eShots) {
+      if (!s.alive) continue
+      // 脉动：越接近到点越快（`life` 归零就是它爆开的时刻）—— 预警做在物体自己身上
+      const near = 1 - Math.max(0, s.life) / 1.2
+      const pulse = 1 + Math.sin(s.t * (12 + near * 18)) * (0.10 + near * 0.10)
+
+      const sp = Math.max(1, Math.hypot(s.vx, s.vy))
+      const ux = s.vx / sp, uy = s.vy / sp
+      const px2 = -uy, py2 = ux
+
+      // ① 酸雾外晕（两层低透明圆 ⇒ 深色层里也亮）
+      g.fill(UI.magenta, 0.12); g.fillCircle(s.x, s.y, 15 * pulse)
+      g.fill(UI.magenta, 0.24); g.fillCircle(s.x, s.y, 9.5 * pulse)
+      // ② 短拖尾（**短**才读得出"它慢" —— 拖尾长度就是速度的编码）
+      for (let i = 0; i < 3; i++) {
+        const L0 = 9 + i * 7, L1 = L0 + 7
+        neonLine(g, s.x - ux * L0, s.y - uy * L0, s.x - ux * L1, s.y - uy * L1,
+          UI.magenta, { width: 3.0 - i * 0.6, alpha: 0.7 / (i + 1.3), bloom: false })
+      }
+      // ③ 酸团本体（不规则感：两个偏心圆叠一层，避免"完美圆点"的塑料感）
+      g.fill(UI.magenta, 0.85)
+      g.fillCircle(s.x, s.y, 6.4)
+      g.fillCircle(s.x + px2 * 2.2 - ux * 1.6, s.y + py2 * 2.2 - uy * 1.6, 4.2 * pulse)
+      // ④ 亮核
+      g.fill(0xffffff, 0.92); g.fillCircle(s.x, s.y, 2.6)
+      // ⑤ 脉动环：**"这是个会炸的东西"** —— 没有环它会被当成可以忽略的小点
+      g.line(UI.magenta, 0.35 + near * 0.4, 1.5)
+      g.strokeEllipse(s.x, s.y, 11 * pulse, 11 * pulse)
+    }
+  }
+
+  /**
+   * **敌弹被清除**（V6.83）。★ 用户明确要求"一定要考虑技能相关的特效" —— 就是这里。
+   *
+   * 五种 `cause` 必须画成**五句不同的话**，因为玩家要知道"我刚才是怎么处理掉它的"：
+   * ```
+   * blast 爆炸抵消 → 外扩冲击环（"炸掉了"，语汇同 explosion）
+   * net   网拦截   → 向内收拢的网目（"网收走了"，与爆炸**方向相反**）
+   * ram   撞角撞碎 → 一撮碎片 + 短促闪（"撞碎了"，语汇同 `hit`）
+   * hit   打到玩家 → 玩家受击（`playerHurt` 自己会表现）⇒ 这里只补一个小爆
+   * spent 到点爆开 → blast 环（它自己炸的，与"被抵消"共用 explosion 语汇）
+   * ```
+   * ⚠️ `blast` 与 `spent` 看起来一样是**故意的** —— 对玩家而言"它炸了"和"我把它炸了"
+   *    的结果都是"不用躲了"，区别由**爆炸的来历**（玩家那一发有没有 muzzle/blast）交代。
+   */
+  private eshotDownFx(ev: Extract<SimEvent, { t: 'eshotDown' }>): void {
+    switch (ev.cause) {
+      case 'blast':
+        this.pushShock(ev.x, ev.y, ev.r * 2.4, 0.22, UI.amber, 2.2, ev.r * 0.7, 1)
+        this.pushRadialSparks(ev.x, ev.y, 5, 90, 40, 1.2, UI.amber)
+        break
+      case 'spent':
+        this.pushShock(ev.x, ev.y, ev.r * 3.0, 0.26, UI.magenta, 2.4, ev.r * 0.8, 1)
+        this.pushRadialSparks(ev.x, ev.y, 7, 130, 60, 1.3, UI.magenta)
+        break
+      case 'net':
+        // 网目**向内**收（与爆炸相反的方向）—— 复用 `killFx` 里 net 死法的语汇
+        for (let k = 0; k < 3; k++) {
+          const a = (k / 3) * Math.PI * 2 + 0.4
+          const r1 = ev.r * 2.2
+          this.arcs.push({
+            pts: [
+              { x: ev.x + Math.cos(a) * r1, y: ev.y + Math.sin(a) * r1 },
+              { x: ev.x + Math.cos(a + 0.6) * r1 * 0.42, y: ev.y + Math.sin(a + 0.6) * r1 * 0.42 },
+            ], life: 0.18, maxLife: 0.18,
+          })
+        }
+        this.pushShock(ev.x, ev.y, ev.r * 1.8, 0.2, UI.cyan, 2, 0, 1)
+        break
+      case 'ram':
+        this.pushShock(ev.x, ev.y, ev.r * 1.7, 0.16, UI.steel, 2, ev.r * 0.6, 1)
+        this.pushRadialSparks(ev.x, ev.y, 6, 150, 60, 1.6, UI.steel)
+        break
+      case 'hit':
+        // 玩家挨打的主表现由 `playerHurt` 负责，这里只留一个小爆点做"弹消耗掉了"的收束
+        this.pushShock(ev.x, ev.y, ev.r * 1.6, 0.14, UI.danger, 2, 0, 1)
+        break
+    }
+  }
+
   private drawEnemies(w: DiveWorld): void {
     this.hideFish()
     this.flashMarks.length = 0        // 本帧重新登记（上一帧的已由 drawFx 消费掉）

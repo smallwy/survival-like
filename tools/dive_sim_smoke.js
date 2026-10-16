@@ -1139,6 +1139,127 @@ console.log('\n[7] 元系统（沉淀 / 解锁 / 永久强化 / 图鉴）')
     assert.ok(maxDev > 25,
       `摆尾鱼的轨迹应明显偏离直线，实测最大偏离 ${maxDev.toFixed(1)}px（振幅 90）`)
   })
+
+  // =======================================================================
+  // V6.83 敌方投射物（**新子系统**）+ 与玩家技能的交互
+  //   ★ 用户明确要求"一定要考虑技能相关的特效" —— 交互的**判定**在模拟层，
+  //     而"画成什么样"由 `eshotDown` 的 `cause` 决定（渲染层）。
+  //     所以这一组测的是**判定**：谁清掉了它、清掉几颗、清掉之后还有没有伤害。
+  // =======================================================================
+
+  check('V6.83 喷酸鱼：**保持距离**（近了退、远了进），被贴脸时后退', () => {
+    const w = rig(5201)
+    const e = mke('spitter', w.px + 260, w.py, { r: 20, speed: 58 })
+    w.enemies.push(e)
+    const d0 = Math.hypot(e.x - w.px, e.y - w.py)
+    step(w, 60)
+    const d1 = Math.hypot(e.x - w.px, e.y - w.py)
+    assert.ok(Math.abs(d1 - d0) < 70,
+      `它应维持距离而不是一路贴上来（${d0.toFixed(0)} → ${d1.toFixed(0)}）`)
+    // 贴脸 ⇒ 必须后退（"冲进去打断它"是设计上的解法之一）
+    w.px = e.x - 60; w.py = e.y
+    const d2 = Math.hypot(e.x - w.px, e.y - w.py)
+    step(w, 40)
+    const d3 = Math.hypot(e.x - w.px, e.y - w.py)
+    assert.ok(d3 > d2 + 8, `被贴脸时应后退（${d2.toFixed(0)} → ${d3.toFixed(0)}）`)
+  })
+
+  check('V6.83 喷酸鱼：**周期开火**，且在前摇时锁方向（侧移才躲得掉）', () => {
+    const w = rig(5202)
+    const e = mke('spitter', w.px + 260, w.py, { r: 20, speed: 58 })
+    w.enemies.push(e)
+    w.drainEvents()
+    let shots = 0
+    for (let i = 0; i < Math.ceil(6 / DT); i++) {
+      w.update(DT, { dx: 0, dy: 0, burst: false })
+      for (const ev of w.drainEvents()) { /* 事件只是排空，不在这里判 */ }
+      if (w.eShots.length > shots) shots = w.eShots.length
+    }
+    assert.ok(shots >= 1, `6 秒内至少应吐 1 发（实测峰值 ${shots}）`)
+  })
+
+  check('V6.83 敌方投射物：飞的是**直线**（不追踪玩家）', () => {
+    const w = rig(5203)
+    w.spawnEShot(w.px + 200, w.py - 300, 1, 0)     // 朝右飞，远离玩家
+    const s = w.eShots[0]
+    const v0x = s.vx, v0y = s.vy
+    for (let i = 0; i < 40; i++) {
+      w.updateEShots(DT)
+      assert.ok(Math.abs(s.vx - v0x) < 1e-9 && Math.abs(s.vy - v0y) < 1e-9,
+        '敌弹不该中途改向（追踪弹会把"躲"变成"跑"）')
+      if (!s.alive) break
+    }
+  })
+
+  check('V6.83 敌方投射物：到点**爆开**（发 `spent`），不是凭空消失', () => {
+    const w = rig(5204)
+    w.spawnEShot(w.px + 200, w.py - 340, 1, 0)     // 往没人的地方飞
+    w.drainEvents()
+    let spent = 0
+    for (let i = 0; i < Math.ceil(1.5 / DT); i++) {
+      w.updateEShots(DT)
+      for (const ev of w.drainEvents()) if (ev.t === 'eshotDown' && ev.cause === 'spent') spent++
+    }
+    assert.ok(spent >= 1, `寿命归零应发 \`spent\` 事件（实测 ${spent}）—— 凭空消失玩家读不出"它到点了"`)
+    assert.strictEqual(w.eShots.length, 0, '到点后应被回收')
+  })
+
+  check('V6.83 敌方投射物：打到玩家**掉氧**并消耗掉', () => {
+    const w = rig(5205)
+    w.o2 = w.o2Max
+    const before = w.o2
+    w.spawnEShot(w.px - 46, w.py, 1, 0)            // 正对玩家
+    for (let i = 0; i < 30; i++) w.updateEShots(DT)
+    assert.ok(before - w.o2 > 5,
+      `命中应掉氧（实测 ${(before - w.o2).toFixed(1)}）`)
+    assert.strictEqual(w.eShots.length, 0, '命中后应消耗掉')
+  })
+
+  check('V6.83 ★技能交互：**爆炸抵消敌弹**（走真实 `explode` 链路）', () => {
+    // 为什么这条必须走 `explode()` 而不是直接调 `clearEShots`：
+    // 我们要验的是"**鱼雷 / 回声 / 气泡雷炸开时会不会清弹**"这个**接线**，
+    // 而 `clearEShots` 本身能不能用是另一回事（下一条测）。
+    const w = rig(5206)
+    w.spawnEShot(w.px + 300, w.py, 1, 0)
+    w.spawnEShot(w.px + 316, w.py + 12, 1, 0)
+    assert.strictEqual(w.eShots.filter(s => s.alive).length, 2, '前置：场上应有 2 颗')
+    w.explode(w.px + 308, w.py, 70, 0)             // dmg 给 0：只测清弹
+    assert.strictEqual(w.eShots.filter(s => s.alive).length, 0,
+      '爆炸半径内的敌弹应被抵消 —— 否则玩家在弹幕里丢鱼雷会有"用了大招却没变化"的失重感')
+  })
+
+  check('V6.83 ★技能交互：**网收走敌弹**（给网加上弹幕场景里的第二个用途）', () => {
+    const w = rig(5207)
+    w.spawnEShot(w.px + 400, w.py, 1, 0)
+    assert.strictEqual(w.eShots.filter(s => s.alive).length, 1, '前置：场上应有 1 颗')
+    const n = w.clearEShots(w.px + 400, w.py, 70, 'net')
+    assert.strictEqual(n, 1, '网半径内应清掉 1 颗')
+  })
+
+  check('V6.83 技能交互：**被拦下的弹不该还能伤到玩家**（否则"拦了没用"）', () => {
+    const w = rig(5208)
+    w.o2 = w.o2Max
+    const before = w.o2
+    w.spawnEShot(w.px - 60, w.py, 1, 0)            // 正对玩家飞来
+    w.clearEShots(w.px - 60, w.py, 40, 'blast')    // 在它脸上把它清掉
+    for (let i = 0; i < 30; i++) w.updateEShots(DT)
+    assert.ok(before - w.o2 < 2,
+      `被清掉的弹不该再有伤害（实测掉 ${(before - w.o2).toFixed(1)}）—— ` +
+      `拦弹只省直击、省不掉范围的话，玩家会读作"拦了没用"`)
+  })
+
+  check('V6.83 换层必须清空敌弹（否则上一层的弹会飞进新层）', () => {
+    // ⚠️ 这是"复制一段清池代码必忘一层"的典型现场：`diveDeeper` 里原本有一串
+    //    `this.enemies = []` / `this.bullets = []` …，漏掉新池**不报错**，
+    //    只表现为"换带之后莫名其妙挨了一下"。
+    const w = rig(5209)
+    w.spawnEShot(w.px + 200, w.py, 1, 0)
+    assert.ok(w.eShots.length > 0, '前置：场上应有敌弹')
+    w.o2 = w.o2Max
+    w.phase = 'decide'
+    w.diveDeeper()
+    assert.strictEqual(w.eShots.length, 0, '换层应清空敌弹')
+  })
 }
 
 // ---------------------------------------------------------------------------

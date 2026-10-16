@@ -40,7 +40,7 @@ import { UI } from '../theme'
 import { SUBS } from '../subs'
 import type { SubDef } from '../subs'
 import type {
-  Enemy, Bone, Pulse, Bullet, Echo, Acid, Mine, Lure, Kind, Weapon, WeaponId,
+  Enemy, Bone, Pulse, Bullet, Echo, Acid, Mine, Lure, EnemyShot, Kind, Weapon, WeaponId,
   Stats, LayerDef, WaveShape, RelicId, SimEvent, InputState, UpgradeDef, ShopTarget,
   DamageCause,
 } from './types'
@@ -398,6 +398,42 @@ const DARTER_R = 19
 const DARTER_AMP = 90
 const DARTER_HZ = 2.2
 
+// ---------------------------------------------------------------------------
+// V6.83 敌方投射物（`spitter` 专用；这是**新子系统**，不是一个新分支）
+//   详细设计见 `types.ts` 的 `EnemyShot`
+// ---------------------------------------------------------------------------
+
+/** 喷酸鱼：**保持距离**的远程 */
+const SPITTER_HP = 44
+const SPITTER_SPD = 58
+const SPITTER_R = 20
+/**
+ * 交战带（px）：保持在这个区间里开火。
+ * 220–300 的依据 —— 玩家射程 `PLAYER.range = 420`，所以它**仍在射程内**
+ * （不会变成"打不到的敌人"），但已经远到"要么冲进去、要么躲弹"的抉择成立。
+ * 内边界 220 = 玩家的 1 倍身位多一点：再近它就退了，读作"它怕你靠近"。
+ */
+const SPITTER_NEAR = 220
+const SPITTER_FAR = 300
+/** 应急后撤距离：进了这个圈就**只顾后退、不再开火**（"贴脸 = 打断它的输出"） */
+const SPITTER_PANIC = 160
+/** 开火间隔（s） */
+const SPITTER_IV = 2.2
+/** 吐弹前摇（s）：张嘴蓄力的预警 —— 与 dash 的 charge 同一套"先预警再发生"的语汇 */
+const SPITTER_WINDUP = 0.4
+
+/** 酸弹：直线飞，到点爆开 */
+const ESPEED = 260
+/** 寿命（s）⇒ 射程 260 × 1.2 = **312px**。比玩家射程短，所以"它打得到你，你多半也打得到它" */
+const ELIFE = 1.2
+const EDMG = 9
+const ER = 9
+/** 命中半径（与玩家碰撞）—— 比视觉小一点，给"擦过去"留余地 */
+const EHIT_R = 13
+/** 爆开半径与爆开伤害（范围小、伤害略高于直击，逼玩家别贴着炸点站） */
+const EBLAST_R = 34
+const EBLAST_DMG = 12
+
 /**
  * **先规格，后出图**的落点（本专家的工作方式）：
  * 五种的**形状语汇**（给插画岗的交接）。
@@ -464,6 +500,7 @@ const ENEMY_BASE: Record<Kind, { hp: number; spd: number; r: number; color: numb
   bloom:    { hp: BLOOM_HP,     spd: BLOOM_SPD,    r: BLOOM_R,    color: UI.lime },
   leech:    { hp: LEECH_HP,     spd: LEECH_SPD,    r: LEECH_R,    color: UI.magenta },
   darter:   { hp: DARTER_HP,    spd: DARTER_SPD,   r: DARTER_R,   color: UI.jade },
+  spitter:  { hp: SPITTER_HP,   spd: SPITTER_SPD,  r: SPITTER_R,  color: UI.magenta },
   boss:     { hp: 900,          spd: 46,  r: 52,       color: UI.violet },
 }
 
@@ -618,6 +655,14 @@ export class DiveWorld implements ShopTarget {
   acids: Acid[] = []
   /** V6.46 气泡雷：玩家脚下布下的雷。**唯一不索敌**的实体 */
   mines: Mine[] = []
+  /**
+   * **敌方投射物池**（V6.83）。见 `types.ts` 的 `EnemyShot`。
+   *
+   * ⚠️ 与玩家的 `bullets` 是**两个池**，刻意不合并：两者的"归属"不同，
+   *    合并等于每个消费点都要先问"这颗是谁的"，而漏问一处就是**敌弹打敌人 /
+   *    自己弹打自己**（不报错、只表现为"手感很怪"）。
+   */
+  eShots: EnemyShot[] = []
   /** V6.46 生物光诱饵：半径内敌人改追它 */
   lures: Lure[] = []
   weapons: Weapon[] = []
@@ -781,7 +826,7 @@ export class DiveWorld implements ShopTarget {
     this.hurtDirT = 0
     this.layerCardT = 2.6
     this.weapons = []
-    this.bullets = []; this.echoes = []; this.acids = []
+    this.bullets = []; this.echoes = []; this.acids = []; this.eShots = []
     this.mines = []; this.lures = []
     // 开局武器：由「出击准备」面板选定（V6.41）；不传则回落到机关枪
     // —— 这是原版一直用的开局武器，缺省值保持它以免改变老存档玩家的第一局手感。
@@ -1163,6 +1208,7 @@ export class DiveWorld implements ShopTarget {
       this.updateBullets(dt)
       this.updateEchoes(dt)
       this.updateAcids(dt)
+      this.updateEShots(dt)
       // ★ 裂体的分裂**延迟到这一帧的伤害结算全部跑完之后**（V6.82）：
       //   直接在同一次 `hurt()` 里 `enemies.push`，等于**在 `for (const e of this.enemies)`
       //   的遍历中途改数组** —— JS 会让新加的元素在同一帧被再遍历一次，
@@ -1648,6 +1694,46 @@ export class DiveWorld implements ShopTarget {
         e.x += nx * e.speed * slow * dt - ny * sw
         e.y += ny * e.speed * slow * dt + nx * sw
         e.fx = nx; e.fy = ny
+      } else if (e.kind === 'spitter') {
+        // ---- 喷酸鱼（V6.83）：**保持距离**开火 ----
+        // 本作第一个**远程**敌人。它引入的压力与前 17 种都不同：
+        // 别的敌人逼你"离开它"，它逼你**处理一颗正在飞来的东西**
+        // —— 接触是"现在就在掉氧"，投射物是"再过 0.4 秒会掉氧"。
+        // ⇒ 玩家的两条解法：**冲进去贴脸**（它会后退，输出被打断）或**躲弹**。
+        e.t += dt
+        if (e.phase === 'charge') {
+          // 前摇：**站住不动**（"停下 = 要吐了"，与 dash 的 charge 同一套预警语汇）
+          e.fx = e.dirX; e.fy = e.dirY      // 前摇期间朝**锁定的方向**，不是朝玩家
+          if (e.t >= SPITTER_WINDUP) {
+            // 出弹口在**身体前端**（不是中心）—— 从中心吐会读作"原地冒出来"
+            this.spawnEShot(e.x + e.dirX * (e.r + 6), e.y + e.dirY * (e.r + 6), e.dirX, e.dirY)
+            e.phase = 'chase'
+            e.t = 0
+          }
+        } else {
+          // 走位：把自己维持在交战带里
+          if (da < SPITTER_PANIC) {
+            // 应急后撤。⚠️ 这时**压住开火计时** —— 否则"被贴脸时刚好到点"会让它
+            //    边退边吐，读作"贴脸也没用"，而"贴脸能打断它的输出"是它设计上的解法之一。
+            e.x -= nx * e.speed * slow * dt
+            e.y -= ny * e.speed * slow * dt
+            e.t = Math.min(e.t, SPITTER_IV * 0.5)
+          } else if (da < SPITTER_NEAR) {
+            e.x -= nx * e.speed * slow * dt
+            e.y -= ny * e.speed * slow * dt
+          } else if (da > SPITTER_FAR) {
+            e.x += nx * e.speed * slow * dt
+            e.y += ny * e.speed * slow * dt
+          }
+          // 到点就起手（+60 的宽容：刚出带一点也允许，否则它一直在走位、永不开火）
+          if (e.t >= SPITTER_IV && da < SPITTER_FAR + 60 && e.rootT <= 0) {
+            e.phase = 'charge'
+            e.t = 0
+            // ⚠️ 方向在**前摇开始**时锁定 —— 前摇那 0.4s 里玩家还能挪，
+            //    而"它瞄的是 0.4 秒前的你"才让"侧移躲弹"成立。
+            e.dirX = nx; e.dirY = ny
+          }
+        }
       } else if (e.kind === 'boss') {
         e.t += dt
         if (e.bossKind === 'angler') {
@@ -1979,6 +2065,10 @@ export class DiveWorld implements ShopTarget {
     // 视觉先于伤害：先抛事件（渲染层这一帧就能画网），再结算效果
     // `ang` = 抛出方向：网是柔性体，张开形状沿运动方向拉长（不是圆），渲染层需要它
     this.emit({ t: 'burst', x: b.x, y: b.y, r: NET_R, ang: Math.atan2(b.vy, b.vx) })
+    // ★ **网收走敌方投射物**（V6.83）。网是"控制一片区域"，把飞进区域的弹一并卷走
+    //   与它的语义完全一致 —— 而且这让"网"在弹幕场景里多了一个用途，
+    //   而它原本只有一个（定身）。
+    this.clearEShots(b.x, b.y, NET_R, 'net')
     for (const e of this.enemies) {
       if (!e.alive) continue
       if (e.charmT > 0) continue                  // 已是友方的别再网一遍
@@ -2044,6 +2134,95 @@ export class DiveWorld implements ShopTarget {
   }
 
   /** 酸液云：每 0.35s 结算一次，本体持续 3s。DiveScene.ts:2063-2079 */
+  // ==========================================================================
+  // 敌方投射物（V6.83 · 新子系统）
+  // ==========================================================================
+
+  /** 吐一发酸弹。`dx/dy` 是**单位方向**（前摇开始时锁定的那个） */
+  spawnEShot(x: number, y: number, dx: number, dy: number): void {
+    this.eShots.push({
+      x, y,
+      vx: dx * ESPEED, vy: dy * ESPEED,
+      life: ELIFE, dmg: EDMG, r: EHIT_R, blastR: EBLAST_R,
+      alive: true, t: 0,
+    })
+  }
+
+  /**
+   * **清除**半径内的敌方投射物（V6.83）。
+   *
+   * 这是"技能能拦弹"的**唯一入口** —— 三种手段都走它，只有 `cause` 不同
+   * （爆炸抵消 / 网拦截 / 撞角撞碎），渲染层据此画不同的反馈。
+   *
+   * ⚠️ 刻意**不在这里结算爆开伤害**：被拦下来的弹不该还能伤到玩家 ——
+   *    否则"拦弹"只省了直击、省不掉范围，玩家会读作"拦了没用"。
+   * ⚠️ 也不在这里 `filter`：本函数可能在遍历别的数组的过程中被调用
+   *    （`explode` 来自 `updateBullets` / `updateEnemies`）。清理留给 `updateEShots`。
+   *
+   * @returns 清掉的颗数（调用方据此决定要不要给"拦到了"的正反馈）
+   */
+  clearEShots(x: number, y: number, r: number, cause: 'blast' | 'net' | 'ram'): number {
+    let n = 0
+    for (const s of this.eShots) {
+      if (!s.alive) continue
+      if (dist(s.x, s.y, x, y) > r + s.r) continue
+      s.alive = false
+      n++
+      this.emit({ t: 'eshotDown', x: s.x, y: s.y, r: s.r, cause })
+    }
+    return n
+  }
+
+  /** 一颗弹"用掉"了：命中玩家（`hit`）或飞到寿命尽头爆开（`spent`） */
+  private spendEShot(s: EnemyShot, cause: 'hit' | 'spent'): void {
+    s.alive = false
+    this.emit({ t: 'eshotDown', x: s.x, y: s.y, r: s.blastR || s.r, cause })
+    // 只有"到点"才爆 —— 命中玩家已经是直击，再来一发范围就是双重惩罚
+    if (cause !== 'spent' || s.blastR <= 0) return
+    const d = dist(s.x, s.y, this.px, this.py)
+    if (d < s.blastR + PLAYER.r) {
+      this.damagePlayer(EBLAST_DMG, (this.px - s.x) / (d || 1), (this.py - s.y) / (d || 1))
+    }
+  }
+
+  /**
+   * 推进敌方投射物。`update()` 每帧一次。
+   *
+   * ⚠️ `filter` 放在**帧末**（与 `acids` 同规）：本函数内部还会通过
+   *    `spendEShot` / `clearEShots` 之外的路径改 `alive`，边遍历边删会让
+   *    新元素被跳过。
+   */
+  updateEShots(dt: number): void {
+    for (const s of this.eShots) {
+      if (!s.alive) continue
+      s.t += dt
+      s.life -= dt
+      s.x += s.vx * dt
+      s.y += s.vy * dt
+      // 出界即灭。⚠️ 不给"绕回来"—— 那是 `bones` 的规则，弹绕回来会变成
+      //    玩家读不出"它去哪了"的第二段攻击。
+      if (s.x < -40 || s.x > this.W + 40 || s.y < -40 || s.y > this.H + 40) {
+        s.alive = false
+        this.emit({ t: 'eshotDown', x: s.x, y: s.y, r: s.r, cause: 'spent' })
+        continue
+      }
+      const d = dist(s.x, s.y, this.px, this.py)
+      // 刺鳐撞角：贴得极近时把弹撞碎（复用 `sub.ram`，不新开机制）
+      if (this.sub.ram > 0 && d < s.r + PLAYER.r + 24) {
+        s.alive = false
+        this.emit({ t: 'eshotDown', x: s.x, y: s.y, r: s.r, cause: 'ram' })
+        continue
+      }
+      if (d < s.r + PLAYER.r) {
+        this.damagePlayer(s.dmg, (this.px - s.x) / (d || 1), (this.py - s.y) / (d || 1))
+        this.spendEShot(s, 'hit')
+        continue
+      }
+      if (s.life <= 0) this.spendEShot(s, 'spent')
+    }
+    this.eShots = this.eShots.filter(s => s.alive)
+  }
+
   updateAcids(dt: number): void {
     for (const a of this.acids) {
       a.life -= dt
@@ -2885,6 +3064,12 @@ export class DiveWorld implements ShopTarget {
   explode(x: number, y: number, r: number, dmg: number, o2per = 0, depth = 0, o2cap = Infinity): void {
     this.emit({ t: 'shake', ms: 130, intensity: 0.006 })
     this.emit({ t: 'blast', x, y, r })
+    // ★ **爆炸抵消敌方投射物**（V6.83）。为什么爆炸该有这条：
+    //   爆炸本来就是"清场"的语汇，而被弹幕压制的玩家最自然的反应就是"炸一下清空"。
+    //   反过来说，如果爆炸清不掉弹，玩家在弹幕里丢鱼雷会有强烈的"我用了大招却没变化"的失重感。
+    //   ⚠️ 只有**爆炸**有这条（网 / 撞角各在自己的入口）—— 别在"所有 AoE"上统一加，
+    //      那会把"清弹"变成零门槛，远程敌人立刻退化（见 `EnemyShot` 的注释）。
+    this.clearEShots(x, y, r, 'blast')
     let o2gain = 0
     const seen = new Set<Enemy>()      // 同一敌人只计一次（爆炸环可能重叠判定）
     for (const e of this.enemies) {
@@ -3051,7 +3236,7 @@ export class DiveWorld implements ShopTarget {
     this.rerollCost = REROLL_BASE
     if (this.bank < REROLL_BASE) this.bank = 20
     this.rollOffers(true)
-    this.bullets = []; this.pulses = []; this.echoes = []; this.acids = []
+    this.bullets = []; this.pulses = []; this.echoes = []; this.acids = []; this.eShots = []
   }
 
   /** 抽三张（fresh=true 全换；否则保留锁定格）。DiveScene.ts:5153-5165 */
@@ -3120,7 +3305,7 @@ export class DiveWorld implements ShopTarget {
     this.o2Max = L.o2Max + this.st.o2Bonus
     this.o2 = Math.min(this.o2 - toll, this.o2Max)
     this.enemies = []; this.bones = []; this.pulses = []
-    this.bullets = []; this.echoes = []; this.acids = []
+    this.bullets = []; this.echoes = []; this.acids = []; this.eShots = []
     this.hurtDirT = 0; this.hurtFlash = 0
     const from = LAYERS[this.layerIdx - 1].depthBot
     this.descFrom = from

@@ -99,6 +99,7 @@ _ASSET_RULES: list[tuple[str, str, str]] = [
     ("fish/bloom.png", "fish/bloom.png", "copy"),
     ("fish/leech.png", "fish/leech.png", "copy"),
     ("fish/darter.png", "fish/darter.png", "copy"),
+    ("fish/spitter.png", "fish/spitter.png", "copy"),
     # ---- 潜航器机体（正俯视；SUB_ART_PATH 指向其中三张）----
     ("sub/sub_lumen.png", "sub/sub_lumen.png", "copy"),
     ("sub/sub_raia.png", "sub/sub_raia.png", "copy"),

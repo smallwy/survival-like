@@ -185,6 +185,14 @@
       "dst_bytes": 27310
     },
     {
+      "src": "fish/spitter.png",
+      "dst": "fish/spitter.png",
+      "transform": "copy",
+      "src_sha256": "01c13723ef9f3a535ec254c9f769a16d9090ecfc124a9d83ec192f2e4609d254",
+      "dst_sha256": "01c13723ef9f3a535ec254c9f769a16d9090ecfc124a9d83ec192f2e4609d254",
+      "dst_bytes": 36986
+    },
+    {
       "src": "sub/sub_lumen.png",
       "dst": "sub/sub_lumen.png",
       "transform": "copy",

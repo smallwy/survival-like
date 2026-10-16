@@ -113,6 +113,7 @@ export const CODEX: CodexEntry[] = [
   { id: 'enemy:bloom', cat: 'enemy', name: '孢囊', hint: '它会死，但死在哪儿——那片酸雾会留三秒' },
   { id: 'enemy:leech', cat: 'enemy', name: '吸血蛭', hint: '它贴着你吸氧、还越吸越硬 —— 别晾着它' },
   { id: 'enemy:darter', cat: 'enemy', name: '摆尾鱼', hint: '它的路线是波浪，别瞄它现在的位置' },
+  { id: 'enemy:spitter', cat: 'enemy', name: '喷酸鱼', hint: '它不让你靠近 —— 冲进去贴脸，或者读它的前摇侧移躲弹' },
   // ---- 首领 ----
   { id: 'boss:abyss', cat: 'boss', name: '深渊守望者', hint: '深渊带最后一波才现身的东西' },
   { id: 'boss:angler', cat: 'boss', name: '鮟鱇女王', hint: '在一片黑暗里挂着一盏灯等你游过去' },

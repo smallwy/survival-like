@@ -664,7 +664,7 @@ export const LAYERS: LayerDef[] = [
     //   `lancer` / `burrower` / `leech` 同理：**先落在一个 ≥40% 的层**，深层只是加厚。
     mix: { splitter: 0.06, bulwark: 0.06, brood: 0.06, kamikaze: 0.05, herder: 0.04,
            lancer: 0.05, burrower: 0.05, leech: 0.05, jelly: 0.03, darter: 0.03,
-           mimic: 0.04, bloom: 0.04 } },
+           mimic: 0.04, bloom: 0.04, spitter: 0.04 } },
   // L4 热泉带：**热泉**
   { name: '热泉带', sub: 'HYDROTHERMAL', mech: '热泉', tip: '上升的热流会顶开你 —— 停不住',
     o2Max: 70,  drain: 2.40, dropCap: 135, toll: 30, vis: 0.60, depthTop: 4000,  depthBot: 6000,
@@ -672,7 +672,7 @@ export const LAYERS: LayerDef[] = [
     // V6.82 第一批：盾鳐（绕后）+ 孵卵囊（点杀）+ 牧群者（先杀 buff 源）+ 裂体。
     mix: { splitter: 0.05, bulwark: 0.07, brood: 0.05, herder: 0.06,
            lancer: 0.05, burrower: 0.05, bloom: 0.06, leech: 0.05, mimic: 0.05,
-           jelly: 0.03, darter: 0.03 } },
+           jelly: 0.03, darter: 0.03, spitter: 0.05 } },
   // L5 深渊带：**压力**
   { name: '深渊带', sub: 'THE ABYSS', mech: '压力', tip: '每过一波，舱体再压掉一截氧气上限',
     o2Max: 60,  drain: 3.00, dropCap: 160, toll: 0,  vis: 0.46, depthTop: 6000,  depthBot: 11000,
@@ -681,7 +681,7 @@ export const LAYERS: LayerDef[] = [
     //   再叠自爆就是"数值死刑"（参见 §3.4 的 2026-10-11 修正），压力应该来自上限与速率。
     mix: { bulwark: 0.08, brood: 0.06, herder: 0.08,
            mimic: 0.06, lancer: 0.05, burrower: 0.06, bloom: 0.06, leech: 0.05,
-           darter: 0.04 } },
+           darter: 0.04, spitter: 0.05 } },
 ]
 
 /**
@@ -803,6 +803,7 @@ export const TEX_BASE_ROT: Partial<Record<Kind, number>> = {
   bloom: Math.PI,
   leech: Math.PI,
   darter: Math.PI,
+  spitter: Math.PI,
 }
 
 /** 敌人贴图 key（渲染层按它取资源）。DiveScene.ts:1486 / 1572 */
@@ -827,6 +828,7 @@ export const ENEMY_TEX: Record<Kind, string> = {
   bloom: 'f_bloom',
   leech: 'f_leech',
   darter: 'f_darter',
+  spitter: 'f_spitter',
   boss: 'f_dash',
 }
 
