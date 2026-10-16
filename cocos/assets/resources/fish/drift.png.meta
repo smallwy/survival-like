@@ -2,7 +2,7 @@
   "ver": "1.0.27",
   "importer": "image",
   "imported": true,
-  "uuid": "7c467aa5-cf94-4a87-aab4-44066dc68221",
+  "uuid": "cf2c4dbc-951e-4bf1-bace-ae5e3a2a1fd1",
   "files": [
     ".json",
     ".png"
@@ -10,14 +10,14 @@
   "subMetas": {
     "6c48a": {
       "importer": "texture",
-      "uuid": "7c467aa5-cf94-4a87-aab4-44066dc68221@6c48a",
+      "uuid": "cf2c4dbc-951e-4bf1-bace-ae5e3a2a1fd1@6c48a",
       "displayName": "drift",
       "id": "6c48a",
       "name": "texture",
       "userData": {
         "wrapModeS": "clamp-to-edge",
         "wrapModeT": "clamp-to-edge",
-        "imageUuidOrDatabaseUri": "7c467aa5-cf94-4a87-aab4-44066dc68221",
+        "imageUuidOrDatabaseUri": "cf2c4dbc-951e-4bf1-bace-ae5e3a2a1fd1",
         "isUuid": true,
         "visible": false,
         "minfilter": "linear",
@@ -34,7 +34,7 @@
     },
     "f9941": {
       "importer": "sprite-frame",
-      "uuid": "7c467aa5-cf94-4a87-aab4-44066dc68221@f9941",
+      "uuid": "cf2c4dbc-951e-4bf1-bace-ae5e3a2a1fd1@f9941",
       "displayName": "drift",
       "id": "f9941",
       "name": "spriteFrame",
@@ -113,9 +113,9 @@
           ]
         },
         "isUuid": true,
-        "imageUuidOrDatabaseUri": "7c467aa5-cf94-4a87-aab4-44066dc68221@6c48a",
+        "imageUuidOrDatabaseUri": "cf2c4dbc-951e-4bf1-bace-ae5e3a2a1fd1@6c48a",
         "atlasUuid": "",
-        "trimType": "auto"
+        "trimType": "none"
       },
       "ver": "1.0.12",
       "imported": true,
@@ -129,6 +129,6 @@
     "type": "sprite-frame",
     "fixAlphaTransparencyArtifacts": false,
     "hasAlpha": true,
-    "redirect": "7c467aa5-cf94-4a87-aab4-44066dc68221@6c48a"
+    "redirect": "cf2c4dbc-951e-4bf1-bace-ae5e3a2a1fd1@6c48a"
   }
 }

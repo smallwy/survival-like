@@ -2,7 +2,7 @@
   "ver": "1.0.27",
   "importer": "image",
   "imported": true,
-  "uuid": "6991d04d-f0af-46da-945c-5f8d6ecc6621",
+  "uuid": "3b548c5a-6488-4685-88e1-83fe5555215c",
   "files": [
     ".json",
     ".png"
@@ -10,14 +10,14 @@
   "subMetas": {
     "6c48a": {
       "importer": "texture",
-      "uuid": "6991d04d-f0af-46da-945c-5f8d6ecc6621@6c48a",
+      "uuid": "3b548c5a-6488-4685-88e1-83fe5555215c@6c48a",
       "displayName": "kamikaze",
       "id": "6c48a",
       "name": "texture",
       "userData": {
         "wrapModeS": "clamp-to-edge",
         "wrapModeT": "clamp-to-edge",
-        "imageUuidOrDatabaseUri": "6991d04d-f0af-46da-945c-5f8d6ecc6621",
+        "imageUuidOrDatabaseUri": "3b548c5a-6488-4685-88e1-83fe5555215c",
         "isUuid": true,
         "visible": false,
         "minfilter": "linear",
@@ -34,7 +34,7 @@
     },
     "f9941": {
       "importer": "sprite-frame",
-      "uuid": "6991d04d-f0af-46da-945c-5f8d6ecc6621@f9941",
+      "uuid": "3b548c5a-6488-4685-88e1-83fe5555215c@f9941",
       "displayName": "kamikaze",
       "id": "f9941",
       "name": "spriteFrame",
@@ -46,9 +46,9 @@
         "trimX": 0,
         "trimY": 0,
         "width": 512,
-        "height": 280,
+        "height": 375,
         "rawWidth": 512,
-        "rawHeight": 280,
+        "rawHeight": 375,
         "borderTop": 0,
         "borderBottom": 0,
         "borderLeft": 0,
@@ -61,16 +61,16 @@
         "vertices": {
           "rawPosition": [
             -256,
-            -140,
+            -187.5,
             0,
             256,
-            -140,
+            -187.5,
             0,
             -256,
-            140,
+            187.5,
             0,
             256,
-            140,
+            187.5,
             0
           ],
           "indexes": [
@@ -83,9 +83,9 @@
           ],
           "uv": [
             0,
-            280,
+            375,
             512,
-            280,
+            375,
             0,
             0,
             512,
@@ -103,17 +103,17 @@
           ],
           "minPos": [
             -256,
-            -140,
+            -187.5,
             0
           ],
           "maxPos": [
             256,
-            140,
+            187.5,
             0
           ]
         },
         "isUuid": true,
-        "imageUuidOrDatabaseUri": "6991d04d-f0af-46da-945c-5f8d6ecc6621@6c48a",
+        "imageUuidOrDatabaseUri": "3b548c5a-6488-4685-88e1-83fe5555215c@6c48a",
         "atlasUuid": "",
         "trimType": "none"
       },
@@ -129,6 +129,6 @@
     "type": "sprite-frame",
     "fixAlphaTransparencyArtifacts": false,
     "hasAlpha": true,
-    "redirect": "6991d04d-f0af-46da-945c-5f8d6ecc6621@6c48a"
+    "redirect": "3b548c5a-6488-4685-88e1-83fe5555215c@6c48a"
   }
 }

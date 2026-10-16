@@ -2,7 +2,7 @@
   "ver": "1.0.27",
   "importer": "image",
   "imported": true,
-  "uuid": "c5b13b4d-dd18-4d94-80df-31a2b3597b2e",
+  "uuid": "b4a7e238-7607-4d23-9e22-19f41726a2d3",
   "files": [
     ".json",
     ".png"
@@ -10,14 +10,14 @@
   "subMetas": {
     "6c48a": {
       "importer": "texture",
-      "uuid": "c5b13b4d-dd18-4d94-80df-31a2b3597b2e@6c48a",
+      "uuid": "b4a7e238-7607-4d23-9e22-19f41726a2d3@6c48a",
       "displayName": "darter",
       "id": "6c48a",
       "name": "texture",
       "userData": {
         "wrapModeS": "clamp-to-edge",
         "wrapModeT": "clamp-to-edge",
-        "imageUuidOrDatabaseUri": "c5b13b4d-dd18-4d94-80df-31a2b3597b2e",
+        "imageUuidOrDatabaseUri": "b4a7e238-7607-4d23-9e22-19f41726a2d3",
         "isUuid": true,
         "visible": false,
         "minfilter": "linear",
@@ -34,7 +34,7 @@
     },
     "f9941": {
       "importer": "sprite-frame",
-      "uuid": "c5b13b4d-dd18-4d94-80df-31a2b3597b2e@f9941",
+      "uuid": "b4a7e238-7607-4d23-9e22-19f41726a2d3@f9941",
       "displayName": "darter",
       "id": "f9941",
       "name": "spriteFrame",
@@ -46,9 +46,9 @@
         "trimX": 0,
         "trimY": 0,
         "width": 512,
-        "height": 260,
+        "height": 240,
         "rawWidth": 512,
-        "rawHeight": 260,
+        "rawHeight": 240,
         "borderTop": 0,
         "borderBottom": 0,
         "borderLeft": 0,
@@ -61,16 +61,16 @@
         "vertices": {
           "rawPosition": [
             -256,
-            -130,
+            -120,
             0,
             256,
-            -130,
+            -120,
             0,
             -256,
-            130,
+            120,
             0,
             256,
-            130,
+            120,
             0
           ],
           "indexes": [
@@ -83,9 +83,9 @@
           ],
           "uv": [
             0,
-            260,
+            240,
             512,
-            260,
+            240,
             0,
             0,
             512,
@@ -103,17 +103,17 @@
           ],
           "minPos": [
             -256,
-            -130,
+            -120,
             0
           ],
           "maxPos": [
             256,
-            130,
+            120,
             0
           ]
         },
         "isUuid": true,
-        "imageUuidOrDatabaseUri": "c5b13b4d-dd18-4d94-80df-31a2b3597b2e@6c48a",
+        "imageUuidOrDatabaseUri": "b4a7e238-7607-4d23-9e22-19f41726a2d3@6c48a",
         "atlasUuid": "",
         "trimType": "none"
       },
@@ -129,6 +129,6 @@
     "type": "sprite-frame",
     "fixAlphaTransparencyArtifacts": false,
     "hasAlpha": true,
-    "redirect": "c5b13b4d-dd18-4d94-80df-31a2b3597b2e@6c48a"
+    "redirect": "b4a7e238-7607-4d23-9e22-19f41726a2d3@6c48a"
   }
 }

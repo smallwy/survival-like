@@ -76,145 +76,161 @@
       "src": "fish/orbit.png",
       "dst": "fish/orbit.png",
       "transform": "copy",
-      "src_sha256": "461c6e15f23ef350e764a8cf297ac0f98e046f5a4308662451e227445d4db236",
-      "dst_sha256": "461c6e15f23ef350e764a8cf297ac0f98e046f5a4308662451e227445d4db236",
-      "dst_bytes": 50794
+      "src_sha256": "5c958c8b6b845a0f4442e2cf4a10ab8342003e2cb28c8e9116ddba15c7453259",
+      "dst_sha256": "5c958c8b6b845a0f4442e2cf4a10ab8342003e2cb28c8e9116ddba15c7453259",
+      "dst_bytes": 170268
     },
     {
       "src": "fish/splitter.png",
       "dst": "fish/splitter.png",
       "transform": "copy",
-      "src_sha256": "39a480590c866aac458138c16a429f4ccfd185bc601a78e760cded780ebb64a1",
-      "dst_sha256": "39a480590c866aac458138c16a429f4ccfd185bc601a78e760cded780ebb64a1",
-      "dst_bytes": 26232
+      "src_sha256": "f97d623140c42ac34f3cba59c2171f9fef9c5d677578cc91986b7a2fea9386eb",
+      "dst_sha256": "f97d623140c42ac34f3cba59c2171f9fef9c5d677578cc91986b7a2fea9386eb",
+      "dst_bytes": 123124
     },
     {
       "src": "fish/shard.png",
       "dst": "fish/shard.png",
       "transform": "copy",
-      "src_sha256": "b3c5d8158f78bdd385a467bf8a19686324ec08d3a07d74890885c804e30811f8",
-      "dst_sha256": "b3c5d8158f78bdd385a467bf8a19686324ec08d3a07d74890885c804e30811f8",
-      "dst_bytes": 14393
+      "src_sha256": "01d24f29d86cbd9609e3c69beeaa056d9d535dc3a7fe733f2ebecf79b0692a2d",
+      "dst_sha256": "01d24f29d86cbd9609e3c69beeaa056d9d535dc3a7fe733f2ebecf79b0692a2d",
+      "dst_bytes": 129722
     },
     {
       "src": "fish/bulwark.png",
       "dst": "fish/bulwark.png",
       "transform": "copy",
-      "src_sha256": "54b5a560ea603d6e546110c3d4636cb2c6e4af542eaf06bf6f57fa37f6efeb59",
-      "dst_sha256": "54b5a560ea603d6e546110c3d4636cb2c6e4af542eaf06bf6f57fa37f6efeb59",
-      "dst_bytes": 21444
+      "src_sha256": "a8cff3e5fc4914ad1cd9842ab5ea969bc2ec302bfe018db6af63e2d2fe3a0882",
+      "dst_sha256": "a8cff3e5fc4914ad1cd9842ab5ea969bc2ec302bfe018db6af63e2d2fe3a0882",
+      "dst_bytes": 245896
     },
     {
       "src": "fish/brood.png",
       "dst": "fish/brood.png",
       "transform": "copy",
-      "src_sha256": "f985f3e8d7ff0ba52caeb7b00108feba27902b910d464e74ce346e5bd2f8f3b4",
-      "dst_sha256": "f985f3e8d7ff0ba52caeb7b00108feba27902b910d464e74ce346e5bd2f8f3b4",
-      "dst_bytes": 39238
+      "src_sha256": "b0c2231111ac8c7cbc0d1a226f68323b62800bb99130bbfb93041043aef9e2d9",
+      "dst_sha256": "b0c2231111ac8c7cbc0d1a226f68323b62800bb99130bbfb93041043aef9e2d9",
+      "dst_bytes": 379526
     },
     {
       "src": "fish/kamikaze.png",
       "dst": "fish/kamikaze.png",
       "transform": "copy",
-      "src_sha256": "1b19a55bbf6f03d24d6e559da0b82cd059e8ebaf6faf1fda0c120845468375c0",
-      "dst_sha256": "1b19a55bbf6f03d24d6e559da0b82cd059e8ebaf6faf1fda0c120845468375c0",
-      "dst_bytes": 43681
+      "src_sha256": "cbd8f1f400bd7af293cd23e205b1a7393003bb7d00949a2a8e28e71861abeea3",
+      "dst_sha256": "cbd8f1f400bd7af293cd23e205b1a7393003bb7d00949a2a8e28e71861abeea3",
+      "dst_bytes": 311761
     },
     {
       "src": "fish/herder.png",
       "dst": "fish/herder.png",
       "transform": "copy",
-      "src_sha256": "39286a919aaa8531df9311ca80dcac7e4814d101d5b117462470889b4a5ed7e9",
-      "dst_sha256": "39286a919aaa8531df9311ca80dcac7e4814d101d5b117462470889b4a5ed7e9",
-      "dst_bytes": 26112
+      "src_sha256": "f33184ceb02ea0cf5d0b7412e015fc9b20ed7b7a4d2afd39259a46dbdcd0748a",
+      "dst_sha256": "f33184ceb02ea0cf5d0b7412e015fc9b20ed7b7a4d2afd39259a46dbdcd0748a",
+      "dst_bytes": 180464
     },
     {
       "src": "fish/jelly.png",
       "dst": "fish/jelly.png",
       "transform": "copy",
-      "src_sha256": "7b5e39f56d44f1d911037a4374044b495f11130a8b158ba78cad49615c48a2bf",
-      "dst_sha256": "7b5e39f56d44f1d911037a4374044b495f11130a8b158ba78cad49615c48a2bf",
-      "dst_bytes": 26183
+      "src_sha256": "721c4633cb4ea8b677939809f587cefac3cc8765ae7f536424f06986ebd8e975",
+      "dst_sha256": "721c4633cb4ea8b677939809f587cefac3cc8765ae7f536424f06986ebd8e975",
+      "dst_bytes": 169315
     },
     {
       "src": "fish/mimic.png",
       "dst": "fish/mimic.png",
       "transform": "copy",
-      "src_sha256": "682ff77e4506d6d07003e05d875a6e7e032fff9fd90d4d2e041db7cdbc50acac",
-      "dst_sha256": "682ff77e4506d6d07003e05d875a6e7e032fff9fd90d4d2e041db7cdbc50acac",
-      "dst_bytes": 26855
+      "src_sha256": "80996d6bf7ae68c5c8ea49d4b220123474cba879b5612639575d239521482299",
+      "dst_sha256": "80996d6bf7ae68c5c8ea49d4b220123474cba879b5612639575d239521482299",
+      "dst_bytes": 194037
     },
     {
       "src": "fish/lancer.png",
       "dst": "fish/lancer.png",
       "transform": "copy",
-      "src_sha256": "893008aa99599ae4f8b4b9345ddfb86c40d92af7a1b4189c6f5e54fd1aadee42",
-      "dst_sha256": "893008aa99599ae4f8b4b9345ddfb86c40d92af7a1b4189c6f5e54fd1aadee42",
-      "dst_bytes": 19685
+      "src_sha256": "3b5b032a94539cebababeb1492c896312769dcdc19425fdd9c6185b3a045fb03",
+      "dst_sha256": "3b5b032a94539cebababeb1492c896312769dcdc19425fdd9c6185b3a045fb03",
+      "dst_bytes": 83703
     },
     {
       "src": "fish/burrower.png",
       "dst": "fish/burrower.png",
       "transform": "copy",
-      "src_sha256": "11dfcb0baff63751c124eb7fd17b5eee81434b1eaa39dcb75ca82be81d0b9cb3",
-      "dst_sha256": "11dfcb0baff63751c124eb7fd17b5eee81434b1eaa39dcb75ca82be81d0b9cb3",
-      "dst_bytes": 28139
+      "src_sha256": "dbb5634d57e9c68e51466ee83a3a999cb024b9684854f6a31dc437b444835d5f",
+      "dst_sha256": "dbb5634d57e9c68e51466ee83a3a999cb024b9684854f6a31dc437b444835d5f",
+      "dst_bytes": 183491
     },
     {
       "src": "fish/bloom.png",
       "dst": "fish/bloom.png",
       "transform": "copy",
-      "src_sha256": "237e92f7a2c7ca8d75a515633e9eeef7815ad021529b538899076957e6d03d40",
-      "dst_sha256": "237e92f7a2c7ca8d75a515633e9eeef7815ad021529b538899076957e6d03d40",
-      "dst_bytes": 38625
+      "src_sha256": "fc8ada273d787be52d4700b7e2a4aad36f94a4bc0b758c6b12cc5148281d0fc3",
+      "dst_sha256": "fc8ada273d787be52d4700b7e2a4aad36f94a4bc0b758c6b12cc5148281d0fc3",
+      "dst_bytes": 222750
     },
     {
       "src": "fish/leech.png",
       "dst": "fish/leech.png",
       "transform": "copy",
-      "src_sha256": "043615f81f2563ca588d9d50477027f690d905702e436f6a8f0feeed59dd7fd6",
-      "dst_sha256": "043615f81f2563ca588d9d50477027f690d905702e436f6a8f0feeed59dd7fd6",
-      "dst_bytes": 35155
+      "src_sha256": "f058527e1612bd54052ff482699a9038ae9cce58ea3550a9be0879dcc9840087",
+      "dst_sha256": "f058527e1612bd54052ff482699a9038ae9cce58ea3550a9be0879dcc9840087",
+      "dst_bytes": 102071
     },
     {
       "src": "fish/darter.png",
       "dst": "fish/darter.png",
       "transform": "copy",
-      "src_sha256": "2afa91af3359a7cec0289e0cbe1f82920011fe70e8d58e0ccbb6199c0eb517fc",
-      "dst_sha256": "2afa91af3359a7cec0289e0cbe1f82920011fe70e8d58e0ccbb6199c0eb517fc",
-      "dst_bytes": 27310
+      "src_sha256": "642ffec957fb8d11eafb8982c3647543890f14e03410d5fe75d808e41168dba0",
+      "dst_sha256": "642ffec957fb8d11eafb8982c3647543890f14e03410d5fe75d808e41168dba0",
+      "dst_bytes": 129471
     },
     {
       "src": "fish/spitter.png",
       "dst": "fish/spitter.png",
       "transform": "copy",
-      "src_sha256": "01c13723ef9f3a535ec254c9f769a16d9090ecfc124a9d83ec192f2e4609d254",
-      "dst_sha256": "01c13723ef9f3a535ec254c9f769a16d9090ecfc124a9d83ec192f2e4609d254",
-      "dst_bytes": 36986
+      "src_sha256": "be4432ff692d8c09fbf260c63becb467689fe33cf42f676d607ad50e7358f253",
+      "dst_sha256": "be4432ff692d8c09fbf260c63becb467689fe33cf42f676d607ad50e7358f253",
+      "dst_bytes": 187917
+    },
+    {
+      "src": "fish/boss_watcher.png",
+      "dst": "fish/boss_watcher.png",
+      "transform": "copy",
+      "src_sha256": "99dd06e283b7327022898a332c629900afdc00e7892179644c582012dd65d690",
+      "dst_sha256": "99dd06e283b7327022898a332c629900afdc00e7892179644c582012dd65d690",
+      "dst_bytes": 192346
+    },
+    {
+      "src": "fish/boss_angler.png",
+      "dst": "fish/boss_angler.png",
+      "transform": "copy",
+      "src_sha256": "f9fd355862550d17dacc78e8a15db76286fb66ecb74e5e9ba94a1e804cfff69b",
+      "dst_sha256": "f9fd355862550d17dacc78e8a15db76286fb66ecb74e5e9ba94a1e804cfff69b",
+      "dst_bytes": 135713
     },
     {
       "src": "sub/sub_lumen.png",
       "dst": "sub/sub_lumen.png",
       "transform": "copy",
-      "src_sha256": "ec08604c6875460f38fc33ccc0e54ab95fd38c6d06746e0ff26ed9996fe2ea3b",
-      "dst_sha256": "ec08604c6875460f38fc33ccc0e54ab95fd38c6d06746e0ff26ed9996fe2ea3b",
-      "dst_bytes": 152028
+      "src_sha256": "784cb9a47f995952c001fd2caa24e5911cb37bfcd88e179465ff1e9c1e76cdf9",
+      "dst_sha256": "784cb9a47f995952c001fd2caa24e5911cb37bfcd88e179465ff1e9c1e76cdf9",
+      "dst_bytes": 145936
     },
     {
       "src": "sub/sub_raia.png",
       "dst": "sub/sub_raia.png",
       "transform": "copy",
-      "src_sha256": "506a9992e24a7577cf4763269307ca00c090874a68cf599326011beba9643fc9",
-      "dst_sha256": "506a9992e24a7577cf4763269307ca00c090874a68cf599326011beba9643fc9",
-      "dst_bytes": 248426
+      "src_sha256": "9120ecc63f52f03e001bd8db033e36e0f334b1f67ebcbe5fd7f6941fc44bd1e7",
+      "dst_sha256": "9120ecc63f52f03e001bd8db033e36e0f334b1f67ebcbe5fd7f6941fc44bd1e7",
+      "dst_bytes": 129215
     },
     {
       "src": "sub/sub_bathy.png",
       "dst": "sub/sub_bathy.png",
       "transform": "copy",
-      "src_sha256": "4504fe79b91ca4a9aa101e97f2a31225197f6f4768165983f50f39ce6981aae0",
-      "dst_sha256": "4504fe79b91ca4a9aa101e97f2a31225197f6f4768165983f50f39ce6981aae0",
-      "dst_bytes": 240925
+      "src_sha256": "184928173f34af8aa092fc3de13ab29c27450811173d562ea516640719dec3c9",
+      "dst_sha256": "184928173f34af8aa092fc3de13ab29c27450811173d562ea516640719dec3c9",
+      "dst_bytes": 164985
     },
     {
       "src": "sub/sub_body.png",
