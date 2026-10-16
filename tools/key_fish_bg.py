@@ -19,7 +19,9 @@
     亮度又接近背景，会被泛洪当成"背景"漏掉，导致水印被裁进图里）。
 
 用法：
-    python tools/key_fish_bg.py <输入png> <输出png> [--long 512] [--no-mark]
+    python tools/key_fish_bg.py <输入png> <输出png> [--long 512] [--no-mark] [--no-inner]
+
+  `--no-inner` 关掉内部背景补种（回到 V6.88 之前的行为：闭合轮廓的内腔会被留下）。
 """
 
 import os
@@ -36,9 +38,22 @@ DIST_MAX = 34           # 单通道平均容差
 # 收缩边数（px）：把主体边缘那圈**抗锯齿半透明描边**吃掉，否则贴到深色水里会有一圈白边
 ERODE = 1
 
+# ★★ V6.88 内部背景补种 —— 修「闭合轮廓内部的底色抠不掉」。
+# 症状：`orbit`（细触须绕成的**封闭环**）抠完仍有 49% 的像素是"不透明且接近浅白"，
+#       环内那片背景原封不动留在图上；实机读作"一个大白盘"，36px 剪影也成了实心盘
+#       ⇒ **中空这个识别特征被抠底吃掉了**（剪影看板里 `brood↔orbit` 0.736 的成因之一）。
+# 根因：第一轮只泛洪**与画布四边连通**的浅色（见模块头注释），而闭合轮廓把它围在里面。
+# 处置：第一轮之后，把「颜色接近背景基色、但未与边缘连通」的**大块**连通域也判为背景。
+INNER_MIN_AREA_RATIO = 0.004    # 该连通域占全图的比例下限（0.4%）
+# ⚠️ 下限的用途是**放过主体上的小亮点**（高光/眼点），只删真正的背景岛。
+#    实测：orbit 环内岛 ≈ 40% 全图，而主体高光块 < 0.2% ⇒ 0.4% 两侧余量都够。
 
-def key_out(img, block_mark=True):
-    """把与画布边缘连通的浅色像素置为透明。返回 RGBA 图。"""
+
+def key_out(img, block_mark=True, inner=True):
+    """把与画布边缘连通的浅色像素置为透明。返回 RGBA 图。
+
+    `inner=True` 时额外清除**被主体围住、与边缘不连通**的浅色块（闭合轮廓的内腔）。
+    """
     img = img.convert('RGBA')
     w, h = img.size
     px = img.load()
@@ -90,6 +105,38 @@ def key_out(img, block_mark=True):
                 vis[i] = 1
                 q.append((nx, ny))
 
+    # ---- 第二轮：内部背景补种（V6.88，见 INNER_MIN_AREA_RATIO 的注释）----
+    # 只认「颜色接近背景基色 + 未与画布边缘连通 + 面积够大」三件套；
+    # 面积门槛放过主体自己的浅色高光，颜色门槛放过主体上的有色区域。
+    if inner:
+        area_min = max(64, int(w * h * INNER_MIN_AREA_RATIO))
+        seen = bytearray(w * h)
+        for y0 in range(h):
+            row0 = y0 * w
+            for x0 in range(w):
+                i0 = row0 + x0
+                if vis[i0] or seen[i0] or not is_bg(x0, y0):
+                    continue
+                comp = []
+                dq = deque([(x0, y0)])
+                seen[i0] = 1
+                while dq:
+                    x, y = dq.popleft()
+                    comp.append(y * w + x)
+                    for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                        nx, ny = x + dx, y + dy
+                        if nx < 0 or ny < 0 or nx >= w or ny >= h:
+                            continue
+                        i = ny * w + nx
+                        if vis[i] or seen[i]:
+                            continue
+                        if is_bg(nx, ny):
+                            seen[i] = 1
+                            dq.append((nx, ny))
+                if len(comp) >= area_min:
+                    for i in comp:
+                        vis[i] = 1
+
     out = Image.new('RGBA', (w, h), (0, 0, 0, 0))
     op = out.load()
     for y in range(h):
@@ -117,9 +164,10 @@ def main():
         if a.startswith('--long'):
             long_side = int(a.split('=')[1]) if '=' in a else long_side
     block_mark = '--no-mark' not in sys.argv
+    inner = '--no-inner' not in sys.argv
 
     img = Image.open(src)
-    got = key_out(img, block_mark)
+    got = key_out(img, block_mark, inner)
 
     bbox = got.getbbox()
     if bbox:

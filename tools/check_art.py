@@ -78,10 +78,40 @@ LUMA_BY_BAND = {
 }
 
 FISH_LONG = 512                # 长边（key_fish_bg.py --long 512）
-# 重心 x 区间 = 头朝左。**判据口径**：现有三张实测 42/42/46%，
-# 而"头朝左"是**定性判据**，±2% 的实测噪声不该判死 —— 故区间取 40~48（含边界）。
-# >50% 才是真反向（整场鱼会翻）。V6.62 新出的 armor 实测 49%，在此区间外 ⇒ 需修正。
-FISH_CX = (0.40, 0.48)
+# 重心 x 区间 —— ⚠️ **只有上界有语义**：>50% = 头朝右 ⇒ 整场鱼反向（这是真错误）。
+# 下界原本写 40（照抄三张真图 42/42/46 的最小值减 2），**没有任何语义依据** ——
+# 重心偏左（<40%）在语义上恰恰是"头朝左更明显"，完全正确。V6.87 踩：
+# `burrower` 左端大幅张开的铲颚把重心压到 39% ⇒ 被判死，而它正是按 brief 画的。
+# ⇒ 下界放宽到 30（只挡"整个主体贴到画布最左"这种明显失衡）。
+FISH_CX = (0.30, 0.50)
+
+# ★★ 形态族（V6.87）：**质心只对"普通鱼形"可信**。
+#   质心 = 面积的一阶矩 ⇒ 一片"大而薄"的尾鳍能把它拉到右边，
+#   而这条鱼其实头朝左、完全正确。实测：`lancer` 50% / `darter` 53% 都是这种情况。
+#   ⛔ 拿质心去卡非鱼形态 = 烧图去凑一个对目标无效的数目字（V6.87 的教训，见 MEMORY_ART）。
+#   ⇒ 非 `fish` 族的重心**只 WARN 不 FAIL**，「头朝左」由目视确认（本来也要一张张看）。
+FISH_FAMILY = {
+    'shard':    'frag',      # 碎片群：无头无尾，体量分布本就自由
+    'mimic':    'frag',      # E 族碎屑：**唯一不许对称**的 ⇒ 重心本就任意
+    # C 巢形：圆鼓囊体、**没有头也没有尾** ⇒ 重心天然落在 50% 附近，
+    #   用鱼形的 40~50% 去卡必然判死（brood 实测 50% —— 这个坑 V6.87 踩了三次才按族修）。
+    'brood':    'blob',
+    'bloom':    'blob',
+    'spitter':  'blob',
+    'lancer':   'spear',     # 矛形：体量是长矛本身，尾只是一小片
+    'darter':   'bigtail',   # 身体在左 + 大 V 尾在右（薄而大 ⇒ 质心天然右偏）
+    'orbit':    'ring',      # 触须绕成环 ⇒ 主剪影是环，重心天然居中偏右
+}
+# 各族重心的**提示区间**（超出 = WARN，不是 FAIL）
+# ⚠️ 加族时**两边都要加**；取值用 `.get(fam, FISH_CX_SOFT_DEFAULT)`，
+#    漏一个键只会 KeyError 把整个闸门打崩（V6.87 踩：`orbit` 加进 FISH_FAMILY 却忘加这里）。
+FISH_CX_SOFT_DEFAULT = (0.30, 0.70)
+FISH_CX_SOFT = {
+    'frag':    (0.30, 0.60),
+    'spear':   (0.30, 0.60),
+    'bigtail': (0.40, 0.62),
+    'ring':    (0.35, 0.70),   # 环：触须绕圈 ⇒ 重心天然居中偏右
+}
 FISH_EDGE_SLACK = 2            # "裁到内容"允许的贴边容差（px/边）
 FISH_MIN_SIDE = 64             # 长边之外的短边下限，防"一根细条"
 
@@ -264,13 +294,24 @@ def check_fish(quiet=False) -> int:
             if touching < 3:
                 bad.append(f'未裁到内容（包围盒 {bb} 只贴 {touching}/4 边）'
                            f'—— 透明边会让引擎里显示变小')
-        if not (FISH_CX[0] <= cx <= FISH_CX[1]):
-            bad.append(f'重心 x {cx * 100:.0f}% 不在 {FISH_CX[0] * 100:.0f}~{FISH_CX[1] * 100:.0f}%'
-                       f'（>50% = 头朝右，整场鱼会反向）')
+        # 重心：按形态族判（见 FISH_FAMILY 注释 —— 质心对非鱼形态不可信）
+        fam = FISH_FAMILY.get(p.stem, 'fish')
+        soft = []
+        if fam == 'fish':
+            if not (FISH_CX[0] <= cx <= FISH_CX[1]):
+                bad.append(f'重心 x {cx * 100:.0f}% 不在 {FISH_CX[0] * 100:.0f}~{FISH_CX[1] * 100:.0f}%'
+                           f'（>50% = 头朝右，整场鱼会反向）')
+        else:
+            lo, hi = FISH_CX_SOFT.get(fam, FISH_CX_SOFT_DEFAULT)
+            if not (lo <= cx <= hi):
+                soft.append(f'重心 x {cx * 100:.0f}% 超出 {fam} 族提示区间'
+                            f' {lo * 100:.0f}~{hi * 100:.0f}%（质心对 {fam} 形态不可信，'
+                            f'请以目视「头朝左」为准）')
         if not corners_clear:
             bad.append(f'四角不透明 {corners}（抠底没抠干净）')
 
-        detail = f'{w}x{h} 重心{cx * 100:4.0f}% 四角透明={corners_clear}'
+        detail = f'{w}x{h} 重心{cx * 100:4.0f}% 四角透明={corners_clear}' + (
+            '' if fam == 'fish' else f' [{fam}]')
         if bad:
             if not quiet:
                 print(f'[{BAD}] {p.name:<20} {detail}')
@@ -279,6 +320,14 @@ def check_fish(quiet=False) -> int:
             else:
                 print(f'[{BAD}] {p.name:<20} ' + ' | '.join(bad))
             fails += 1
+        elif soft:
+            # WARN 不计入 fails —— 它只是"人眼该看一眼"，不是几何错误
+            if not quiet:
+                print(f'[{WARN}] {p.name:<20} {detail}')
+                for b in soft:
+                    print(f'         └─ {b}')
+            else:
+                print(f'[{WARN}] {p.name:<20} ' + ' | '.join(soft))
         elif not quiet:
             row(p.name, OK, detail)
     return fails

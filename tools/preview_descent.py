@@ -27,12 +27,19 @@ import os
 from PIL import Image, ImageDraw, ImageFont
 
 # --- 与 DiveGame.ts 同步的常量 ---------------------------------------------
+# ⚠️ V6.85 重写：原版是"瞬时置顶 + 指数衰减"（`SCROLL_BURST` / `BURST_TAU`），
+#    现在是**脚本化下沉节拍**（速度 = S·6k(1−k)/D，∫₀^D = S）+ **整层世界位移**（`diveY`）。
+#    对照 `DiveGame.ts`：常量区 `SINK_*` / `SCAN_DUR` / `XFADE_*` / `RING_DUR` / `DIVE_OVERSCAN`、
+#    `stepWater()`（速度 Profile + diveY）、`stepBgDrift()`（背景补偿缩放）、`drawScanBand()`。
+#    ⛔ 分母是 **D 不是 D²**（V6.85 修过：写成 D² 时积分只有 S/D）。
 W, H = 1304, 749            # 设计分辨率
-SCROLL_BASE = 46.0          # px/s
-SCROLL_BURST = 220.0        # 换带爆冲
-BURST_TAU = 0.9             # 指数衰减时间常数
-SCAN_DUR = 0.6
+SCROLL_BASE = 46.0          # px/s（常态滚动）
+SINK_WAVE_PX, SINK_WAVE_DUR = 170.0, 1.1   # 换波小拍（净位移 / 时长）
+SINK_DESC_PX, SINK_DESC_DUR = 380.0, 1.9   # 换带大拍
+SCAN_DUR = 0.9
 XFADE_DUR = 2.0
+RING_DUR = 1.2
+XFADE_PUSH = 52
 
 MOTE_MUL = {
     'L1/L2/L3/L5': (1.00, 0.35),
@@ -76,45 +83,80 @@ def mix(a, b, t):
     return tuple(round(a[i] + (b[i] - a[i]) * t) for i in range(3))
 
 
-def v_scroll(t, burst0=SCROLL_BURST):
-    """换带发生在 t=0：瞬时置顶 + 指数衰减。与 stepWater() 同式。"""
-    b = burst0 * math.exp(-t / BURST_TAU) if t >= 0 else 0.0
-    return SCROLL_BASE + b
+def sink_v(t, S, D):
+    """脚本化下沉的**速度**：`v = S·6k(1−k)/D`（k = t/D，D 之外为 0）。与 `stepWater()` 同式。"""
+    if t <= 0 or t >= D:
+        return 0.0
+    k = t / D
+    return S * 6.0 * k * (1.0 - k) / D
+
+
+def sink_disp(t, S, D):
+    """**净位移** = 速度 Profile 的积分 = `S · smoothstep(k)` ⇒ 终点正好是 S（这是正确性的判据）。"""
+    if t <= 0:
+        return 0.0
+    if t >= D:
+        return S
+    k = t / D
+    return S * (3 * k * k - 2 * k ** 3)
+
+
+def dive_y(t, S, D):
+    """**整层世界位移**（V6.85）：`−S/2 · sin(πk)` —— 世界向上（玩家下沉）再回到 0。"""
+    if t <= 0 or t >= D:
+        return 0.0
+    return -S * 0.5 * math.sin(math.pi * t / D)
+
+
+def v_scroll(t, S=SINK_DESC_PX, D=SINK_DESC_DUR):
+    """换带发生在 t=0 的 `scrollV`（常态 46 + 节拍速度）。与 stepWater() 同式。"""
+    return SCROLL_BASE + sink_v(t, S, D)
 
 
 # ---------------------------------------------------------------------------
 # ① 速度曲线
 # ---------------------------------------------------------------------------
 def draw_curve(d, x0, y0, w, h, tmax=4.0, title=''):
-    # 轴
+    """三条曲线同框（**换带大拍**是主验收对象）：
+         ① `scrollV`（青）= 常态 46 + 节拍峰速
+         ② **净位移**（琥珀）= smoothstep，终点必须正好 = `SINK_DESC_PX`（V6.85 修的那条）
+         ③ **整层世界位移 `diveY`**（紫）= 世界整体上移的幅度，上去再回 0
+    """
     d.rectangle([x0, y0, x0 + w, y0 + h], outline=C_GRID)
-    vmax = SCROLL_BURST + SCROLL_BASE
-    # 稳态参考线（SCROLL_BASE）
+    peak = SCROLL_BASE + 1.5 * SINK_DESC_PX / SINK_DESC_DUR      # 46 + 300 = 346
+    vmax = peak * 1.08
     ybase = y0 + h - int(SCROLL_BASE / vmax * h)
     d.line([x0, ybase, x0 + w, ybase], fill=(0x3a, 0x5a, 0x66))
-    txt(d, (x0 + 4, ybase - 12), f'稳态 {SCROLL_BASE:.0f} px/s', fill=C_TXT)
+    txt(d, (x0 + 4, ybase - 12), f'常态 {SCROLL_BASE:.0f} px/s', fill=C_TXT)
 
-    pts = []
+    def py_disp(v):
+        return y0 + 62 + int((SINK_DESC_PX - v) / (SINK_DESC_PX * 0.72) * (h - 74))
+
     n = 400
+    pts_v, pts_d, pts_y = [], [], []
     for i in range(n + 1):
         t = tmax * i / n
-        v = v_scroll(t)
-        pts.append((x0 + int(w * t / tmax), y0 + h - int(v / vmax * h)))
-    d.line(pts, fill=C_CYAN, width=2)
-
-    # 三个时间常数点：τ / 2τ / 3τ（衰减到 37% / 14% / 5%）
-    for k, lab in ((1, 'τ'), (2, '2τ'), (3, '3τ')):
-        t = k * BURST_TAU
-        if t > tmax:
-            continue
         px = x0 + int(w * t / tmax)
-        py = y0 + h - int(v_scroll(t) / vmax * h)
-        d.line([px, y0, px, y0 + h], fill=(0x2a, 0x3a, 0x46))
-        d.ellipse([px - 2, py - 2, px + 2, py + 2], fill=C_CYAN_HI)
-        txt(d, (px + 3, py - 14), f'{lab} {v_scroll(t):.0f}', fill=C_CYAN_HI)
+        pts_v.append((px, y0 + h - int(v_scroll(t) / vmax * h)))
+        pts_d.append((px, py_disp(sink_disp(t, SINK_DESC_PX, SINK_DESC_DUR))))
+        pts_y.append((px, y0 + 62 + int(abs(dive_y(t, SINK_DESC_PX, SINK_DESC_DUR))
+                                        / (SINK_DESC_PX * 0.5) * (h - 74) * 0.5)))
 
-    txt(d, (x0, y0 - 20), f'{title}  t=0 换带瞬时置 {SCROLL_BURST:.0f} → 指数衰减',
-        fill=C_TXT)
+    ted = x0 + int(w * SINK_DESC_DUR / tmax)
+    d.line([ted, y0, ted, y0 + h], fill=(0x2a, 0x3a, 0x46))
+    txt(d, (ted + 3, y0 + h - 16), f'拍结束 {SINK_DESC_DUR:.1f}s', fill=C_TXT, size=12)
+
+    d.line(pts_y, fill=(0xa0, 0x6b, 0xff), width=2)
+    d.line(pts_d, fill=(0xff, 0xb3, 0x47), width=2)
+    d.line(pts_v, fill=C_CYAN, width=2)
+
+    txt(d, (x0, y0 - 20), title, fill=C_TXT)
+    txt(d, (x0 + 6, y0 + 6), f'青 = scrollV，峰 {peak:.0f} = 常态 {peak / SCROLL_BASE:.1f}×',
+        fill=C_CYAN_HI, size=12)
+    txt(d, (x0 + 6, y0 + 24), f'琥珀 = 净位移，终点必须 = {SINK_DESC_PX:.0f}px（V6.85 修：原来只有一半）',
+        fill=(0xff, 0xb3, 0x47), size=12)
+    txt(d, (x0 + 6, y0 + 42), f'紫 = diveY，峰 {SINK_DESC_PX * 0.5:.0f}px = 整层世界下潜（上去再回 0）',
+        fill=(0xa0, 0x6b, 0xff), size=12)
     txt(d, (x0 + w - 60, y0 + h + 4), f'{tmax:.0f}s', fill=C_TXT)
 
 
@@ -191,7 +233,7 @@ def main():
     if a.curve or not only:
         im = Image.new('RGB', (W, 300), C_BG)
         d = ImageDraw.Draw(im)
-        draw_curve(d, 40, 66, W - 80, 190, 4.0, '① 下潜滚动速度 vScroll')
+        draw_curve(d, 40, 66, W - 80, 190, 4.0, '① 换层「向下移动」：速度 / 净位移 / 整层世界位移')
         im.save(f'{OUT}/descent_curve.png')
         print('→ descent_curve.png')
 
@@ -204,7 +246,7 @@ def main():
             x0 = 40 + i * (fw + 10)
             draw_scan_frame(d, x0, 50, fw, fh, t, w_t=t * 3)
             txt(d, (x0, 30), f't={t:.2f}s', fill=C_TXT)
-        txt(d, (40, 300), '② 温跃层扫带（底 → 顶，0.6s，26 段正弦；'
+        txt(d, (40, 300), '② 温跃层扫带（底 → 顶，0.9s，26 段正弦；'
                           '头线 / 过渡带 / 余晖 三层）', fill=C_TXT)
         im.save(f'{OUT}/descent_scan.png')
         print('→ descent_scan.png')

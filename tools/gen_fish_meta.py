@@ -28,9 +28,10 @@ Cocos 的 `.meta` 里有一整套**由图片尺寸推导出来的**字段：
 **不是"像个模板"**，而是它的 `vertices` 已经是"整图"形态，照尺寸缩放即可，
 不需要从别的样本反推序列化顺序。
 
-用法：
+用法（**默认扫 `fish/` 整个目录**，V6.86 起不再依赖手写名单）：
     <python> tools/gen_fish_meta.py            # 全部（缺的补、错的修）
-    <python> tools/gen_fish_meta.py --check    # 只检查，不写盘
+    <python> tools/gen_fish_meta.py --check    # 只检查，不写盘（有不一致则退出码 1）
+    <python> tools/gen_fish_meta.py --dir sub  # 改扫别的目录（如 sub/）
 """
 
 from __future__ import annotations
@@ -46,11 +47,9 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FISH = os.path.join(ROOT, 'cocos', 'assets', 'resources', 'fish')
 TEMPLATE = os.path.join(ROOT, 'cocos', 'assets', 'resources', 'sub', 'sub_hull.png.meta')
 
-# 需要生成 / 修正的鱼图（V6.82 六张 + V6.83 七张）
-NAMES = [
-    'splitter', 'shard', 'bulwark', 'brood', 'kamikaze', 'herder',   # V6.82
-    'jelly', 'mimic', 'lancer', 'burrower', 'bloom', 'leech', 'darter', 'spitter',  # V6.83
-]
+# ⛔ 这里原本有一份写死的 `NAMES`（V6.82 六张 + V6.83 八张）。
+#    **V6.86 删掉** —— 它正是闸门盲区的来源：名单外的图永远检查不到。
+#    现在一律扫目录（见 `main()`），新图落盘即自动纳入，不需要再登记。
 
 
 def build_meta(name: str, w: int, h: int) -> dict:
@@ -120,11 +119,26 @@ def current_ok(path: str, w: int, h: int) -> bool:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument('--check', action='store_true', help='只检查不写盘')
+    ap.add_argument('--dir', default=None,
+                    help='改为处理该目录下**所有** png（相对 cocos/assets/resources，如 sub）；'
+                         '默认只处理 fish/ 的既有清单。V6.85 加：sub/*.png 也要统一 none')
     args = ap.parse_args()
 
+    # ⚠️ **V6.86 修闸门盲区**：默认路径曾只遍历写死的 `NAMES`（14 个新名字），
+    #    于是 5 张老图（swarm / dash / drift / armor / **orbit**）从来没被检查过 ——
+    #    `--check` 报 "✅ 全部正确"，而其中 `orbit` 实际是 `trimType: "auto"` 且
+    #    alpha 包围盒 ≠ 整图（内容 270×251 / 画布 512×330）⇒ `rect` / `pivot` /
+    #    `originalSize` 三个口径与其余 18 张都不一致，**而没有任何一处会报错**
+    #    （`verify_cocos.py` 只对"key ↔ 磁盘"，不看 meta 口径）。
+    #    ⇒ 默认改成**扫目录**（与 `--dir` 同一口径）：闸门要覆盖磁盘上的**每一张**，
+    #      不是覆盖"我以为存在的那几张"。手写名单会漂移，目录不会。
+    base = (os.path.join(ROOT, 'cocos', 'assets', 'resources', args.dir)
+            if args.dir else FISH)
+    names = sorted(f[:-4] for f in os.listdir(base) if f.endswith('.png'))
+
     bad = []
-    for name in NAMES:
-        png = os.path.join(FISH, name + '.png')
+    for name in names:
+        png = os.path.join(base, name + '.png')
         if not os.path.exists(png):
             print(f'  ⚠️  {name:9s} 缺图（先跑 gen_fish_placeholder.py）')
             continue

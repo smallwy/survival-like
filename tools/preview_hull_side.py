@@ -76,8 +76,8 @@ PED_OVER = 2.2                  # B 版凸台比槽**单侧**多出去的量（�
 # 必须与 `shared/dive/tables.ts` 的 `SEAT_MOUNTS` 逐值一致 —— 这里的预览图是唯一的
 # 目视验收手段，不一致就等于"骗人的图"。注意**背是负、腹是正**（sim 的 y 向下）。
 SEAT_MOUNTS = [
-    (0.12, -0.95), (0.06, 0.95), (-0.28, -0.93),
-    (-0.34, 0.92), (-0.68, -0.79), (-0.74, 0.73),
+    (0.66, 0.75), (0.60, -0.80), (0.24, 0.93),
+    (-0.22, 0.93), (-0.62, 0.80), (-0.70, -0.67),
 ]
 
 # 14 点梭形：艏在 +x、艏艉都是圆钝端面、背腹平直
@@ -225,16 +225,16 @@ def draw_hull(d, cx, cy, scale=1.0, m=1, layers=None, tint=C_BODY):
             sx = cx + (-0.60 - i * 0.085) * HL * m
             line([(sx, cy - HH * 0.20), (sx, cy + HH * 0.22)],
                  blend(rgb(C_ABYSS), BG_RGB, 0.26), 1.1)
-    # ⑧ 兜底轮廓 —— V6.77 起是**暗缝**，不是亮边（与实机 `drawBody` 的 ⑧ 同步）。
-    #    ⚠️ 两处历史：V6.75 实机已删"上缘受光弧"（矢量机体的明暗语言，叠在位图高光上
-    #       会变成两道亮边）；V6.77 把主体那条从 `UI.cyan` 改成 `UI.abyss`
-    #       —— 闭环 + 高亮 = "UI 框"的语汇（铁规 14），读作"贴上去的一块板"。
-    #       预览必须同改，否则几何参考模式会继续误导（实机早不是这样了）。
+    # ⑧ 兜底轮廓 —— **V6.85g 实机已整段删除**（与实机 `drawBody` 的 ⑧ 同步）。
+    #    用户 2026-10-16：「浮在机体外的霓虹兜底线要我一起收掉，不要其他的描绘」。
+    #    这条线画在 `HULL_OUTLINE` 上，而三台位图**涂抹出来的艇身比轮廓瘦**
+    #    （艏艉两端差得最多）⇒ 兜线在端部跑出机体外，就是用户看到的那圈霓虹线。
+    #    ⛔ **不换成沿 alpha 边缘描线**（用户「不要其他的描绘」）—— 机体与背景的分界
+    #       改由位图自带 rim + `drawVeil` 承担。预览必须同删，否则几何参考模式会继续误导。
+    #    ⚠️ 保留 `'neon'` 层名（no-op）= 调用点不用改；**别再把这条线画回来**。
     if 'neon' in L:
-        line([P(x, y) for (x, y) in HULL_OUTLINE] +
-             [P(HULL_OUTLINE[0][0], HULL_OUTLINE[0][1])],
-             blend(rgb(C_ABYSS), BG_RGB, 0.45), 1.6)
-    # ⑨ 六个炮位（**校验用**：背脊 3 + 腹部 3，座心必须骑在艇缘上，不能浮在外面）
+        pass
+    # ⑨ 六个炮位（**校验用**：腹 4 + 背两端 2，座心必须骑在艇缘上，不能浮在外面）
     #     V6.71：与 DiveGame.drawTurret 的 ①②③ 三级同步。
     if 'seats' in L:
         TOP = rgb(C_BODY, 0.52)          # 座叠在**机体**上，不是叠在背景上
@@ -327,7 +327,7 @@ def canvas(w, h, bg=C_BG):
 SUB_HULL_ART = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     'cocos', 'assets', 'resources', 'sub', 'sub_hull.png')
-SUB_HULL = {'w': 102.0, 'h': 84.75, 'cx': 0.5000, 'cy': 0.5841}
+SUB_HULL = {'w': 102.0, 'h': 90.25, 'cx': 0.5000, 'cy': 0.5928}
 
 # ---------------------------------------------------------------------------
 # 机体投影（实机的 `subShadow`）怎么画。**这是"实机在画什么"的单一真源** ——
@@ -344,21 +344,18 @@ SHADOW = 'none'
 
 
 def hull_edge(img, cx, cy, scale=1.0, m=1):
-    """复刻 `DiveGame.drawBody` 的 ⑧ **兜底轮廓** —— V6.77 起是**暗缝**，不是亮边。
+    """⑧ **兜底轮廓** —— V6.85g 起**实机已整段删除**，本函数保留为 no-op。
 
-    ⚠️ **预览里曾经整层缺失**（V6.75 换位图时只贴了图，忘了同步这一条）⇒
-       出给用户看的合成图比实机少一层，"实机有白描边、图里却看不到"的错觉就是这么来的。
-       实机画什么，预览就画什么。
+    用户 2026-10-16：「浮在机体外的霓虹兜底线要我一起收掉，不要其他的描绘」。
+    这条线画在 `HULL_OUTLINE` 上，而三台位图**涂抹出来的艇身比轮廓瘦**（艏艉差最多）
+    ⇒ 兜线在端部跑出机体外。⛔ **不换成沿 alpha 边缘描线**（用户「不要其他的描绘」）。
 
-    参数逐值对齐实机：`g.line(UI.abyss, 0.45, 1.3)` + `hull(1.0, 0, 0)`。
+    历史：V6.75 换位图时它曾是"唯一让机体从背景里分出来"的一层；V6.77 从亮 `UI.cyan`
+    改成暗 `UI.abyss`（铁规 14：闭环 + 高亮 = "UI 框"的语汇）—— 但**暗缝同样贴在轮廓上**，
+    端部照样跑出机体 ⇒ V6.85g 整段删除。分界改由位图自带 rim + `drawVeil` 承担。
+    ⚠️ 保留函数签名 = `paste_hull` 调用点不用改；**别再把线画回来**。
     """
-    HL, HH = SUB_D / 2 * scale, HULL_H / 2 * scale
-    pts = [(cx + x * HL * m, cy + y * HH) for (x, y) in HULL_OUTLINE]
-    pts.append(pts[0])
-    d = ImageDraw.Draw(img, 'RGBA')
-    d.line([(round(a), round(b)) for a, b in pts],
-           fill=blend(rgb(C_ABYSS), BG_RGB, 0.45),
-           width=max(1, int(round(1.3 * scale))), joint='curve')
+    return  # V6.85g：⑧ 已删除
 
 
 def hull_rails(img, cx, cy, scale=1.0, m=1, dark=True, tint=C_CYAN):
@@ -394,7 +391,7 @@ def hull_rails(img, cx, cy, scale=1.0, m=1, dark=True, tint=C_CYAN):
            fill=blend(col, BG_RGB, a2), width=lw, joint='curve')
 
 
-def paste_hull(img, cx, cy, scale=1.0, m=1, shadow=None, edge=True,
+def paste_hull(img, cx, cy, scale=1.0, m=1, shadow=None, edge=False,
                rails=True, rails_dark=True):
     """贴**位图机体**到 `(cx, cy)` —— 该点是**躯干中心**，与 `SEAT_MOUNTS` 同一基准。
 
@@ -404,7 +401,8 @@ def paste_hull(img, cx, cy, scale=1.0, m=1, shadow=None, edge=True,
     ⛔ 别在调用点把 `shadow='hard'` 写死 —— 那正是"预览比实机差一层"的老坑
     （与 `draw_turret` 默认值踩过的是同一个）。
     `rails=True` 时画 ③/③b 挂载带（见 `hull_rails`，V6.77b = 暗缝）；
-    `edge=True` 时再画 `DiveGame` 的 ⑧ 兜底轮廓（V6.77 = 暗缝，见 `hull_edge`）。
+    `edge` 参数保留但 **V6.85g 起默认 `False`** —— 实机已删 ⑧ 兜底轮廓
+    （`hull_edge` 现为 no-op，见它）；传 `True` 不再有任何效果。
     返回 False 表示磁盘上还没有位图（此时应退回 `draw_hull` 的几何参考）。
     """
     if not os.path.exists(SUB_HULL_ART):

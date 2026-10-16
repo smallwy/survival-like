@@ -100,6 +100,11 @@ _ASSET_RULES: list[tuple[str, str, str]] = [
     ("fish/leech.png", "fish/leech.png", "copy"),
     ("fish/darter.png", "fish/darter.png", "copy"),
     ("fish/spitter.png", "fish/spitter.png", "copy"),
+    # V6.87：两个 Boss **各有自己的真图**（此前共用 `f_dash`）。
+    #   来源表不是 `ENEMY_TEX` 而是 `BOSS_TEX`（两个 Boss 同属 kind:'boss'，
+    #   进不了 `Record<Kind,…>`）—— 逐行抄 `BOSS_TEX`，漏一行闸门就红。
+    ("fish/boss_watcher.png", "fish/boss_watcher.png", "copy"),
+    ("fish/boss_angler.png", "fish/boss_angler.png", "copy"),
     # ---- 潜航器机体（正俯视；SUB_ART_PATH 指向其中三张）----
     ("sub/sub_lumen.png", "sub/sub_lumen.png", "copy"),
     ("sub/sub_raia.png", "sub/sub_raia.png", "copy"),
