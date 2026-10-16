@@ -33,6 +33,10 @@ const {
   TURRET_SPIN, TURRET_OMEGA_IDLE, TURRET_OMEGA_TRACK, STREAK_MAX_LV,
   // V6.82 新生物
   LAYERS, LAYER_WAVES, spawnWeights, SWARM_MIN, CODEX_BYPRODUCT_KINDS, ENEMY_TEX,
+  // V6.83 经济（方案 A/B）：商店位与重掷成本
+  OFFER_N, REROLL_BASE, REROLL_STEP,
+  // V6.83 机制卡（第二批）：拾取半径基准
+  O2,
 } = require(path.join(path.resolve(buildDir), 'dive', 'index.js'))
 
 const W = 1304
@@ -169,9 +173,13 @@ console.log('\n[4] 商店经济')
   const w = new DiveWorld({ w: W, h: H, seed: 42 })
   w.bank = 100
   w.openShop()
-  check('openShop 后 phase = shop 且抽满 3 张', () => {
+  check('openShop 后 phase = shop 且抽满 `OFFER_N` 张', () => {
     assert.strictEqual(w.phase, 'shop')
-    assert.strictEqual(w.offers.length, 3)
+    // ⚠️ 从常量反推，不写死数字：V6.83 把商店位 3 → 5 时，原来写死的 `3`
+    //    让这条断言"正确地失败了"，而正确改法是把数字换成常量，不是再手写一个 5。
+    assert.strictEqual(w.offers.length, OFFER_N)
+    assert.strictEqual(w.locked.length, OFFER_N, 'locked 必须同步（否则锁位错到别的格）')
+    assert.strictEqual(w.sold.length, OFFER_N, 'sold 必须同步')
   })
   check('可购买：扣钱 + 标记 sold', () => {
     const idx = w.offers.findIndex((u, i) => u && !w.sold[i] && u.cost <= w.bank)
@@ -182,11 +190,12 @@ console.log('\n[4] 商店经济')
     assert.strictEqual(w.bank, before - cost)
     assert.strictEqual(w.sold[idx], true)
   })
-  check('刷新递增（8 → 14）', () => {
+  check('刷新递增（每次 + `REROLL_STEP`）', () => {
     const c0 = w.rerollCost
+    assert.strictEqual(c0, REROLL_BASE, '进商店时重掷成本应回到基准值')
     w.bank = 100
     w.reroll()
-    assert.strictEqual(w.rerollCost, c0 + 6)
+    assert.strictEqual(w.rerollCost, c0 + REROLL_STEP)
   })
   check('锁定格刷新后保留原卡', () => {
     // ⚠️ 必须**重开一次商店**：上一项买过第 0 格，`sold[0]` 为 true 时
@@ -1362,6 +1371,99 @@ console.log('\n[7] 元系统（沉淀 / 解锁 / 永久强化 / 图鉴）')
     const moving = dodged(false), still = dodged(true)
     assert.ok(still > moving + 5,
       `静止时闪避应明显更高（移动 ${moving}/60 vs 静止 ${still}/60）`)
+  })
+
+  // ---- V6.83 第二批机制卡（4 张）----
+
+  /** 在离玩家 `d0` 处放一块骨，跑一帧，返回"有没有被拾走" */
+  function bonePicked(w, d0) {
+    const b = { x: w.px + d0, y: w.py, vx: 0, vy: 0, fade: 1, o2: 5, coin: 10,
+      size: 10, rot: 0, spin: 0, alive: true }
+    w.bones.push(b)
+    w.update(DT, { dx: 0, dy: 0, burst: false })
+    return !b.alive
+  }
+
+  check('V6.83 机制卡·吸附鳍：**缺氧时拾取范围更大**', () => {
+    const w = rig(5310)
+    w.st.pickup = 0
+    w.st.lowPickup = 0.6
+    // 放在"满氧够不着（31px）、低氧够得着（31×1.6≈50px）"之间
+    const d0 = O2.pickupR * 1.3
+    w.o2 = w.o2Max
+    const rich = bonePicked(w, d0)
+    w.o2 = w.o2Max * 0.2
+    const poor = bonePicked(w, d0)
+    assert.ok(!rich && poor,
+      `满氧不该够到（${(O2.pickupR).toFixed(0)}px）而缺氧应该够到（${(O2.pickupR * 1.6).toFixed(0)}px）；` +
+      `实测 满氧=${rich} 缺氧=${poor}（判定距离 ${d0.toFixed(0)}px）`)
+  })
+
+  check('V6.83 机制卡·声场延伸：**远距离命中**额外伤害', () => {
+    const w = rig(5311)
+    w.st.crit = 0; w.st.fullHpCrit = 0; w.st.critMul = 0; w.st.farDmg = 0.5
+    const dmgAt = (d0) => {
+      const e = mke('swarm', w.px + d0, w.py, { hp: 1e9, maxHp: 1e9, r: 19 })
+      const b = e.hp
+      w.hurt(e, 50, 'bullet')
+      return b - e.hp
+    }
+    const near = dmgAt(200), far = dmgAt(400)
+    assert.ok(far > near * 1.4,
+      `300px 外应额外 +50%（近 ${near.toFixed(1)} vs 远 ${far.toFixed(1)}）`)
+    // 没这张卡时不该有差
+    w.st.farDmg = 0
+    assert.ok(Math.abs(dmgAt(400) - dmgAt(200)) < 1e-9,
+      '没有这张卡时远近伤害必须一致（新维度默认 0）')
+  })
+
+  check('V6.83 机制卡·增压推进：**静止够久再起步**才触发加速窗口', () => {
+    const w = rig(5312)
+    w.st.startBoost = 0.5
+    for (let i = 0; i < Math.ceil(1.3 / DT); i++) w.update(DT, { dx: 0, dy: 0, burst: false })
+    assert.ok(w.stillT >= 1.2, `静止 1.3s 后 stillT 应 ≥1.2（实测 ${w.stillT.toFixed(2)}）`)
+    assert.strictEqual(w.boostT, 0, '还没动 ⇒ 不该有加速窗口')
+    w.update(DT, { dx: 1, dy: 0, burst: false })
+    assert.ok(w.boostT > 0, '起步瞬间应进入加速窗口')
+    // 窗口内 vs 窗口外的位移对比
+    const run = (boost) => {
+      const w2 = rig(5313)
+      w2.st.startBoost = 0.5
+      // ⚠️ 对照组必须 `stillT = 0`：给它 `5` 的话，第 1 帧就满足
+      //    "静止够久 + 正在起步" ⇒ **自动**进入加速窗口，两组测出来几乎一样。
+      //    （第一版就是这么写的，实测 110 vs 108 —— 差的 1.7% 正是第一帧的差。）
+      w2.stillT = boost > 0 ? 5 : 0
+      w2.boostT = boost
+      const x0 = w2.px
+      for (let i = 0; i < 20; i++) w2.update(DT, { dx: 1, dy: 0, burst: false })
+      return w2.px - x0
+    }
+    const withB = run(1.5), without = run(0)
+    assert.ok(withB > without * 1.2,
+      `加速窗口内应明显更快（有 ${withB.toFixed(1)}px vs 无 ${without.toFixed(1)}px）`)
+  })
+
+  check('V6.83 机制卡·打捞直觉：**每波第一块骨**额外值钱', () => {
+    const coinOf = (waveBones) => {
+      const w = rig(5314)
+      w.st.luck = 0
+      w.st.firstBone = 3.0
+      w.waveBones = waveBones
+      w.bank = 0
+      const b = { x: w.px, y: w.py, vx: 0, vy: 0, fade: 1, o2: 5, coin: 100,
+        size: 10, rot: 0, spin: 0, alive: true }
+      w.bones.push(b)
+      w.update(DT, { dx: 0, dy: 0, burst: false })
+      return w.bank
+    }
+    const first = coinOf(0), later = coinOf(5)
+    assert.ok(first > later * 3,
+      `每波第一块骨应值约 4 倍（首块 ${first} vs 已拾过 5 块的 ${later}）`)
+    // 每波重置
+    const w = rig(5315)
+    w.waveBones = 7
+    w.startWave()
+    assert.strictEqual(w.waveBones, 0, 'startWave 必须把"本波首块"计数清零')
   })
 }
 

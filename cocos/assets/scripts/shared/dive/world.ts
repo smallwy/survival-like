@@ -49,7 +49,7 @@ import {
   LAYERS, LAYER_WAVES, SEAT_MOUNTS, HULL_H, SUB_D, MOUNT_BASE_R, TURRET_OUT,
   TURRET_SPIN, TURRET_OMEGA_IDLE, TURRET_OMEGA_TRACK, STREAK_MAX_LV,
   SEAT_SWAY_MAX, SEAT_SWAY_FOLLOW, SEAT_SWAY_DECAY,
-  MAX_SEATS, BASE_SEATS, REROLL_BASE, REROLL_STEP, BONE, ENEMY_TEX, TEX_BASE_ROT, weaponFamily,
+  MAX_SEATS, BASE_SEATS, REROLL_BASE, REROLL_STEP, OFFER_N, BONE, ENEMY_TEX, TEX_BASE_ROT, weaponFamily,
   spawnWeights,
 } from './tables'
 import { CARD_POOL } from './pool'
@@ -462,6 +462,16 @@ const REGEN_MISS_K = 2.5
  */
 const STILL_T = 1.2
 
+/** **声场延伸**：判定"远距离命中"的门槛（px）。取 300 的依据 ——
+ *  `PLAYER.range = 420` 的 71%，即"明显是远射"而不是"顺手打到的"；
+ *  再近（<250）就变成常态加成，再远（>350）大部分战斗都够不着。 */
+const FAR_R = 300
+/** **增压推进**：静止后起步加速的持续时间（s） */
+const BOOST_T = 1.5
+/** **吸附鳍**：判定"缺氧"的门槛（比例）。与 `s_regen` 的低氧线**故意不同**
+ *  （0.30 vs 0.35）—— 两个机制的最优点错开，玩家不需要"卡在同一条线上"才双吃。 */
+const LOW_PICKUP_O2 = 0.35
+
 /**
  * **先规格，后出图**的落点（本专家的工作方式）：
  * 五种的**形状语汇**（给插画岗的交接）。
@@ -664,6 +674,14 @@ export class DiveWorld implements ShopTarget {
    * ⚠️ 它是**世界状态**而不是 `Stats`（Stats 只存卡的数值），与 `plateT`/`noHitT` 同类。
    */
   stillT = 0
+  /**
+   * **本波已拾取的鱼骨数**（`s_luck` 打捞直觉用）。`startWave()` 里清零。
+   * ⚠️ 是"计数"不是"布尔"：写成 `firstBoneTaken: boolean` 也能跑，但第 N 块骨的
+   *    UI/表现想扩（比如第 10 块也给奖励）时就得改类型。
+   */
+  waveBones = 0
+  /** **起步加速剩余时间**（s）。`speed` 增压推进用；由 `movePlayer` 维护 */
+  boostT = 0
   hurtFlash = 0
   hurtDirX = 0
   hurtDirY = 0
@@ -758,8 +776,8 @@ export class DiveWorld implements ShopTarget {
   // ---- 商店 ----
   offers: UpgradeDef[] = []
   bank = 0
-  locked: boolean[] = [false, false, false]
-  sold: boolean[] = [false, false, false]
+  locked: boolean[] = []
+  sold: boolean[] = []
   rerollCost = 0
   pool: UpgradeDef[]
   /** 可挂载器械上限（4 → 5 → 6，靠扩容卡） */
@@ -878,6 +896,7 @@ export class DiveWorld implements ShopTarget {
     this.spawnTimer = 0
     this.waveTimer = s.dur
     this.droppedThisWave = 0
+    this.waveBones = 0            // V6.83 打捞直觉：每波首块骨重新计数
     this.eliteWave = 0            // 每波重新抽精英（V6.62 §5-A）
     this.phase = 'wave'
     this.depthM = L.depthTop + (L.depthBot - L.depthTop) * (this.waveInLayer / this.waves().length)
@@ -1273,14 +1292,22 @@ export class DiveWorld implements ShopTarget {
     const dx = clamp(input.dx, -1, 1)
     const dy = clamp(input.dy, -1, 1)
     const spdMul = (1 + this.st.speed
+      + (this.boostT > 0 ? this.st.startBoost : 0)
       + (this.hasRelic('current_fin') && this.noHitT >= 3 ? 0.3 : 0))
       // ---- 缠索（V6.79b）：只压**移动速度**，不压射速、不动氧气、不扣氧 ----
       // 这就是"一条压力只配一个解"：它的解只有一个 —— 往外游。
       * (this.tetherSrc ? TETHER_SLOW : 1)
     // ★ V6.83 流体规避：维护"连续静止时长"。判据用**输入**而不是位移 ——
     //   缠索/减速下"想动但动不了"不该算静止（那会让这张卡在负面状态下白送收益）。
-    if (dx || dy) this.stillT = 0
-    else this.stillT += dt
+    // ★ V6.83 增压推进：**停下够久再起步**时给一段爆发。
+    //   ⚠️ 必须在把 `stillT` 归零**之前**读它 —— 归零后再判就永远是 0（静默失效）。
+    if (dx || dy) {
+      if (this.stillT >= STILL_T && this.boostT <= 0) this.boostT = BOOST_T
+      this.stillT = 0
+    } else {
+      this.stillT += dt
+    }
+    if (this.boostT > 0) this.boostT -= dt
     if (dx || dy) {
       const l = Math.hypot(dx, dy)
       this.aim = Math.atan2(dy, dx)
@@ -2320,6 +2347,12 @@ export class DiveWorld implements ShopTarget {
     const crit = this.rng.chance(critRate)
     let d = dmg * this.dmgMulNow()
     if (crit) d *= 1 + this.st.critMul
+    // ★ V6.83 声场延伸：**远距离命中**额外伤害 —— 把"站远处"从安全变成高效。
+    //   ⚠️ 必须放在 `d` 定义**之后**（放前面 = `d` 未初始化的编译错，
+    //      这类错误 TS 会拦住，但同样的位置换在 JS 里就是静默 `NaN`）。
+    if (this.st.farDmg > 0 && dist(this.px, this.py, e.x, e.y) > FAR_R) {
+      d *= 1 + this.st.farDmg
+    }
     // ---- V6.77d 狩猎本能：对**已被控住**的目标加伤 ----
     // ⚠️ 读的是敌人自己身上的 `slowT` / `rootT`（网族与定身雷写的），
     //    不是"玩家有没有带控制武器" ⇒ 队友/多武器协同也算数。
@@ -2539,7 +2572,11 @@ export class DiveWorld implements ShopTarget {
    * （原实现就是在这里 `filter(e => e.alive)`，保持同序）。DiveScene.ts:2290-2365
    */
   updateBones(dt: number): void {
-    const pr = O2.pickupR * (1 + this.st.pickup + (this.hasRelic('tidal_compass') ? 0.8 : 0))
+    // ★ V6.83 吸附鳍：**缺氧时**拾取范围再放大（"缺血时自动补给"）。
+    const lowO2 = this.o2 / this.o2Max < LOW_PICKUP_O2
+    const pr = O2.pickupR * (1 + this.st.pickup
+      + (lowO2 ? this.st.lowPickup : 0)
+      + (this.hasRelic('tidal_compass') ? 0.8 : 0))
     const H = this.H
     for (const b of this.bones) {
       if (!b.alive) continue
@@ -2568,7 +2605,13 @@ export class DiveWorld implements ShopTarget {
         this.o2 = Math.min(this.o2Max, this.o2 + b.o2)
         const gained = this.o2 - before
         b.alive = false
-        const coin = Math.round(b.coin * this.boneValueMul())
+        // ★ V6.83 打捞直觉：**每波第一块骨**额外值钱（"开门红"）。
+        //   ⚠️ 用 `waveBones === 0` 判"这一波还没拾过"，**不是**"这一帧第一块" ——
+        //      同一帧吃两块骨时，第二块不该也算首块。
+        const first = this.waveBones === 0
+        const mul = this.boneValueMul() * (first ? (1 + this.st.firstBone) : 1)
+        const coin = Math.round(b.coin * mul)
+        this.waveBones++
         this.bank += coin
         this.emit({ t: 'pickup', x: b.x, y: b.y, o2: b.o2, coin })
         if (gained > 0.5) {
@@ -3285,8 +3328,8 @@ export class DiveWorld implements ShopTarget {
   /** DiveScene.ts:5126-5143 */
   openShop(): void {
     this.phase = 'shop'
-    this.locked = [false, false, false]
-    this.sold = [false, false, false]
+    this.locked = new Array(OFFER_N).fill(false)
+    this.sold = new Array(OFFER_N).fill(false)
     this.rerollCost = REROLL_BASE
     if (this.bank < REROLL_BASE) this.bank = 20
     this.rollOffers(true)
@@ -3296,10 +3339,10 @@ export class DiveWorld implements ShopTarget {
   /** 抽三张（fresh=true 全换；否则保留锁定格）。DiveScene.ts:5153-5165 */
   rollOffers(fresh: boolean): void {
     const alive = this.pool.filter(u => !u.dead || !u.dead(this))
-    const from = alive.length >= 3 ? alive : this.pool
-    const next = this.rng.shuffle(from.slice()).slice(0, 3)
+    const from = alive.length >= OFFER_N ? alive : this.pool
+    const next = this.rng.shuffle(from.slice()).slice(0, OFFER_N)
     if (!fresh) {
-      for (let i = 0; i < 3; i++) {
+      for (let i = 0; i < OFFER_N; i++) {
         if (this.locked[i] && !this.sold[i] && this.offers[i]) next[i] = this.offers[i]
       }
     }

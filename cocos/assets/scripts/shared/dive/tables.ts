@@ -290,8 +290,27 @@ export const MAX_SEATS = 6
 export const BASE_SEATS = 4
 
 /** 商店刷新定价：8 起、每次 +6。DiveScene.ts:163-164 */
+/**
+ * **商店一次上几张卡**（V6.83 · 用户拍板的经济方案 A）。
+ *
+ * ★ 为什么要抽成常量：这个 `3` 原本**硬编码在 6 处**（`locked`/`sold` 的初始化 ×2、
+ *   `openShop` 的重置 ×2、`rollOffers` 的切片与循环 ×2），而**渲染层的卡宽也由它反推**。
+ *   改一处漏一处 = 商店里出现两张空卡 / 卡画到面板外 —— **不报错**。
+ */
+export const OFFER_N = 5
+/** 商店上卡数与卡宽一起决定面板总宽，见 `Hud.ts` 的 `drawShop` */
 export const REROLL_BASE = 8
-export const REROLL_STEP = 6
+/**
+ * 重掷的**成本步进**（方案 B：让重掷成为主要消耗）。
+ *
+ * ★ 原来是 6 —— 意味着重掷 10 次只花 `8 + 6×9 = 62` 金，而后期一波能赚 800+，
+ *   **重掷便宜到不需要考虑**。改成 18 后：10 次 = 170、20 次 = 350。
+ *
+ * ⚠️ `REROLL_BASE` 保持 **8 不动**：第一次重掷永远便宜 ——
+ *   "这一批都不想要，换一批"必须是一个无门槛的动作，否则玩家会硬买不想要的卡。
+ *   贵的应该是**反复刷**，不是**刷一次**。
+ */
+export const REROLL_STEP = 18
 
 /** 全场唯一近白：鱼骨与受击闪白专用。DiveScene.ts:167-169 */
 export const WHITE = 0xffffff
@@ -476,6 +495,7 @@ export const STAT_CAP: Partial<Record<keyof Stats, number>> = {
   //    不封顶的话，两张同类卡 + 遗物就能把"条件满足时"推到接近免疫
   //    —— 那不是"机制强"，而是**这个条件变成了唯一玩法**。
   plateArmor: 0.40, stillDodge: 0.50, fullHpCrit: 0.50,
+  lowPickup: 1.0, farDmg: 0.6, startBoost: 1.0, firstBone: 4.0,
 }
 
 /**
@@ -500,6 +520,7 @@ export const NEW_STATS = (): Stats => ({
   // 于是"没有这张卡"的玩家行为与加卡之前**逐帧一致**（同一个规矩）。
   // ⚠️ 漏掉这里就是 `undefined` 参与算术 ⇒ `NaN` 一路传染（不报错）。
   plateArmor: 0, stillDodge: 0, fullHpCrit: 0,
+  lowPickup: 0, farDmg: 0, startBoost: 0, firstBone: 0,
 })
 
 /** 属性的显示元数据（顺序 = 商店属性面板排列顺序）。DiveScene.ts:346-360 */

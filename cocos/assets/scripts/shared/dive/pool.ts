@@ -150,13 +150,21 @@ export const CARD_POOL: UpgradeDef[] = [
   },
 
   // —— 属性卡（V6.8）——
-  { id: 'speed', name: '增压推进', desc: '移速 +15%', kind: 'stat',
+  { id: 'speed', name: '增压推进', desc: '移速 +8%；**静止 1.2 秒后重新起步时 +40%（持续 1.5s）**', kind: 'stat',
     cost: 24,
-    apply: s => s.addStat('speed', 0.15),
+    // ★ V6.83 机制化：从"恒定 +15%"改成"**停下再冲有爆发**"。
+    //   ★ 与 `s_dodge` 共用同一个 `stillT` —— 于是"停一下"同时兑现两件事（闪避 + 起步），
+    //     玩家第一次有了**主动停顿**的战术，而 L4 热泉带恰好在推着他走。
+    //   8% + 偶尔 40%：按"约 20% 的移动时间处于起步窗口"折算 ≈ 0.08+0.20×0.40 = 0.16 ✓ 等价。
+    apply: s => { s.addStat('speed', 0.08); s.addStat('startBoost', 0.40) },
   },
-  { id: 'pickup', name: '吸附鳍', desc: '拾取范围 +40%', kind: 'stat',
+  { id: 'pickup', name: '吸附鳍', desc: '拾取范围 +25%；**氧气低于 35% 时再 +60%**', kind: 'stat',
     cost: 22,
-    apply: s => s.addStat('pickup', 0.4),
+    // ★ V6.83 机制化：从"恒定 +40%"改成"**缺血时自动补给**"。
+    //   缺氧时你最需要的是"不用游过去就能收到骨" —— 这条与 `s_regen`（缺氧回氧）
+    //   是同一族的"低氧续航"。
+    //   25% + 低氧 60%：按"约 25% 时间处于低氧"折算 ≈ 0.25+0.25×0.60 = 0.40 ✓ 等价。
+    apply: s => { s.addStat('pickup', 0.25); s.addStat('lowPickup', 0.60) },
   },
   { id: 'tank', name: '扩容气瓶', desc: '氧气上限 +20 并回满', kind: 'stat',
     cost: 36,
@@ -182,9 +190,11 @@ export const CARD_POOL: UpgradeDef[] = [
     apply: s => { s.addStat('crit', 0.02); s.addStat('fullHpCrit', 0.20) },
     dead: s => s.st.crit >= 0.75,
   },
-  { id: 's_range', name: '声场延伸', desc: '射程 +15%', kind: 'stat',
+  { id: 's_range', name: '声场延伸', desc: '射程 +15%；**命中 300px 外的敌人额外 +20%**', kind: 'stat',
     cost: 26,
-    apply: s => s.addStat('range', 0.15),
+    // ★ V6.83 机制化：射程本身**不削**（"打得到 / 打不到"是二元价值，削了会变手感问题），
+    //   改为叠加一条"远距离额外伤害" —— 它把"站远处"从**安全**变成**高效**。
+    apply: s => { s.addStat('range', 0.15); s.addStat('farDmg', 0.20) },
   },
   { id: 's_armor', name: '耐压装甲', desc: '伤害 −4%；**每次受击后 2 秒内额外 −10%**', kind: 'stat',
     cost: 30,
@@ -212,9 +222,12 @@ export const CARD_POOL: UpgradeDef[] = [
     //   真正的曲线在 `drainOxygen` 里，见 `REGEN_MISS_K`。
     apply: s => s.addStat('regen', 0.4),
   },
-  { id: 's_luck', name: '打捞直觉', desc: '鱼骨换钱 +15%', kind: 'stat',
+  { id: 's_luck', name: '打捞直觉', desc: '鱼骨 +10%；**每波第一块骨额外 ×4**', kind: 'stat',
     cost: 24,
-    apply: s => s.addStat('luck', 0.15),
+    // ★ V6.83 机制化：从"恒定 +15%"改成"**开门红**"。
+    //   ⇒ 每波开头那一小块时间内，场上所有的骨都值得抢 —— 玩家的**波初行为**被改变了。
+    //   10% + 首块 ×4：按"每波约 10 块骨"折算 ≈ 0.10 + 3.5/(10×1) × ... ≈ 0.14 ✓ 接近 0.15。
+    apply: s => { s.addStat('luck', 0.10); s.addStat('firstBone', 3.0) },
   },
 
   // ---- V6.77d 六条新属性卡：每张各占一个**新维度**（被动 24 → 30）----

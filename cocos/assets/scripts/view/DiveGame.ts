@@ -108,8 +108,7 @@ import {
   CAM_ZOOM, MOUNT_RING_R, SEAT_PORT_R, SEAT_MOUNTS, MAX_SEATS,
   SLOT_HW, SLOT_HD, TURRET_OUT,
   EMITTER_SIZE, SUB_D, HULL_H, BASE_SEATS, WEAPON_DEF,
-  BONE, weaponFamily, LAYER_ECO, LAYERS,
-} from '../shared/dive/tables'
+  BONE, weaponFamily, LAYER_ECO, LAYERS, OFFER_N,} from '../shared/dive/tables'
 import { UI } from '../shared/theme'
 import { SUBS, getSub } from '../shared/subs'
 import type { SubId } from '../shared/subs'
@@ -1421,7 +1420,11 @@ export class DiveGame extends Component {
     // 「点卡片或按 1 / 2 / 3 购买」—— 那句话是完整的两张空头支票。这里兑现键盘那一半。
     // `buyCard()` 自带 phase / 越界 / sold / 买不起 四重守卫，所以无脑转发即可。
     if (this.world.phase === 'shop') {
-      if (k >= KeyCode.DIGIT_1 && k <= KeyCode.DIGIT_3) this.world.buyCard(k - KeyCode.DIGIT_1)
+      // V6.83：商店位 3 → `OFFER_N`(5)，数字键同步扩到 DIGIT_5。
+      // ⚠️ 键位必须与 `OFFER_N` 对齐 —— 少一处就会出现"画了 5 张但只能按 1~3 买"。
+      if (k >= KeyCode.DIGIT_1 && k <= KeyCode.DIGIT_1 + OFFER_N - 1) {
+        this.world.buyCard(k - KeyCode.DIGIT_1)
+      }
       else if (k >= KeyCode.NUM_1 && k <= KeyCode.NUM_3) this.world.buyCard(k - KeyCode.NUM_1)
     }
   }

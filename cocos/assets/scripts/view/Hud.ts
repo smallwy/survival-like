@@ -41,7 +41,7 @@ import { UI, TXT, MENU, BRIGHT, TXT_LIGHT } from '../shared/theme'
 import {
   LAYERS, RELIC_SLOTS, STAT_META, STAT_CARD, STAT_CAP, WEAPON_DEF, CARD_WEAPON_ID,
   O2, MAX_SEATS, BONE, weaponFamily, evolutionBase, RELIC_DEF, layerO2, EVOLUTIONS,
-  SEAT_MOUNTS, MOUNT_BASE_R, HULL_H, SUB_D, BASE_SEATS,
+  SEAT_MOUNTS, MOUNT_BASE_R, HULL_H, SUB_D, BASE_SEATS, OFFER_N,
 } from '../shared/dive/tables'
 import type { DiveWorld } from '../shared/dive/world'
 import type { UpgradeDef, WeaponId, RelicId, Stats } from '../shared/dive/types'
@@ -1806,13 +1806,20 @@ export class Hud {
     this.scrim(0.66)
 
     // 面板几何：宽度跟随卡片总宽（自适应设计分辨率），高度是各分区之和
-    const cw = 204, gap = 18, pad = 26
-    const pw = cw * 3 + gap * 2 + pad * 2
+    // ★ V6.83 方案 A：商店位 3 → `OFFER_N`。
+    //   ⚠️ 卡宽**必须由面板可用宽反推**（原来是 `pw = cw*3 + …` 反着的）——
+    //      5 张卡要挤进同一块面板，否则面板会超出设计分辨率、最右侧的卡画到屏幕外。
+    //   代价：卡宽 204 → 122，`fitText` 会把描述字号自动缩一档。
+    //   如果实机读不下 description，把 `OFFER_N` 改回 4 即可（一行常量）。
+    const cw = 122, gap = 10, pad = 26
+    const pw = cw * OFFER_N + gap * (OFFER_N - 1) + pad * 2
     // 2026-10-13：卡高 356 → **292**。立绘框归位 2:1（176×88，见 shopCard）后，
     // 原本框下方那片「立绘放不满、名字又钉在卡底」的死空间随之消失。
     // 面板高 534 → **470**（占屏高 71% → 63%）—— 「商店太大」这条反馈靠**砍死空间**解决，
     // 而不是把卡压小：卡宽仍 204，信息一个没少。
-    const headerH = 56, cardH = 292, footH = 56, vpad = 20
+    // ⚠️ 卡高与立绘高**联动**：立绘 `ah` 从 88 降到 (cw-28)/2 = 47，下半区
+    //    全部是 `ch - N` 的写法（从卡底往上排）⇒ 卡高跟着减 41 就自动对齐。
+    const headerH = 56, cardH = 251, footH = 56, vpad = 20
     const ph = vpad * 2 + headerH + 12 + cardH + 14 + footH
     const px = (W - pw) / 2
     const py = (H - ph) / 2
@@ -1823,7 +1830,7 @@ export class Hud {
 
     // ---- 顶栏：标题 + 副标题 + 骨币胶囊（右）----
     this.text(ix, iy + 18, `L${w.layerIdx + 1} ${LAYERS[w.layerIdx].name} · 波间补给`, FS.big, TXT_LIGHT.main)
-    this.text(ix, iy + 41, `第 ${w.waveInLayer + 1} 波结束 · 点卡片或按 1 / 2 / 3 购买`, 13, TXT_LIGHT.dim)
+    this.text(ix, iy + 41, `第 ${w.waveInLayer + 1} 波结束 · 点卡片或按 1 ~ ${OFFER_N} 购买`, 13, TXT_LIGHT.dim)
 
     const bankStr = `${w.bank}`
     const pillW = 34 + bankStr.length * 11 + 42
@@ -1837,7 +1844,7 @@ export class Hud {
 
     // ---- 三张卡 ----
     const cy0 = iy + headerH + 12
-    for (let i = 0; i < 3; i++) this.shopCard(ix + i * (cw + gap), cy0, cw, cardH, i, w, cbs)
+    for (let i = 0; i < OFFER_N; i++) this.shopCard(ix + i * (cw + gap), cy0, cw, cardH, i, w, cbs)
 
     // ---- 底栏：刷新（次）/ 继续（主，最亮的那个）----
     const fy = py + ph - vpad - footH / 2
@@ -1917,7 +1924,9 @@ export class Hud {
     // 立体感用与战斗里炮塔**同一套语言**：内凹 + 左上受光 + 硬边。
     // 两层递减暗带代替渐变（引擎无渐变填充），让这块读作"凹进去的展示窗"。
     const cxm = x + cw / 2
-    const ax = x + 14, ay = y + 48, aw = cw - 28, ah = 88
+    // ⚠️ `ah` **必须**跟着 `aw` 走（2:1）：素材统一 2:1 画布，框一旦不是 2:1
+    //    就会出现「立绘放不满 + 上下死空间」—— V8 那版 176×148(1.19:1) 正是这么翻车的。
+    const ax = x + 14, ay = y + 48, aw = cw - 28, ah = (cw - 28) / 2
     g.fill(BRIGHT.slot, 1); g.fillRoundRect(ax, ay, aw, ah, 10)
     g.fill(UI.abyss, 0.18); g.fillRect(ax + 1, ay + 1, aw - 2, 8)
     g.fill(UI.abyss, 0.10); g.fillRect(ax + 1, ay + 9, aw - 2, 5)

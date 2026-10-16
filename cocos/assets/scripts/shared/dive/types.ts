@@ -478,6 +478,16 @@ export interface Stats {
   stillDodge: number
   /** 对**满血**敌人的额外暴击率（`s_crit` 弱点解析）。在 `hurt` 里按 `e.hp >= e.maxHp` 读 */
   fullHpCrit: number
+
+  // ---- V6.83 第二批机制卡的条件值（同上：默认必须为 0）----
+  /** **缺氧时**的额外拾取范围（`pickup` 吸附鳍）：缺氧时你更需要自动收骨 */
+  lowPickup: number
+  /** **远距离命中**的额外伤害（`s_range` 声场延伸）：鼓励保持距离输出 */
+  farDmg: number
+  /** **静止后起步**的额外移速（`speed` 增压推进）：与 `s_dodge` 共用 `stillT` */
+  startBoost: number
+  /** **每波第一块骨**的额外价值（`s_luck` 打捞直觉）："开门红" */
+  firstBone: number
 }
 
 export interface LayerDef {
